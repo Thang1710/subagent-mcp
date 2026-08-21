@@ -35,6 +35,31 @@ versions quarantine only the affected runtime. Use the built-in deterministic
 fake adapter as the behavioral reference. Published resource schemas are
 available at `importlib.resources.files("subagent_harness_mcp") / "schemas"`.
 
+The repository also includes a separately buildable adapter at
+[`examples/sample_adapter`](../examples/sample_adapter). It imports only the
+public adapter and contract modules. Run the public lifecycle check against a
+deterministic adapter before publishing it:
+
+```python
+import asyncio
+
+from my_adapter import create_adapter
+from subagent_harness_mcp.adapters import run_adapter_conformance
+
+asyncio.run(run_adapter_conformance(
+    create_adapter,
+    workspace_path="/absolute/disposable/workspace",
+    model="provider/exact-model-id",
+    reasoning={"effort": "provider-native-value"},
+    transport="managed-sdk",
+))
+```
+
+The check covers probe, context resolution, spawn, reopen, snapshot, follow-up,
+interrupt, and close while verifying stable session and context identities. Do
+not point a conformance fixture at a live provider account; live-provider proof
+remains a separate approval and billing gate.
+
 Before release, test discovery from an installed wheel, every terminal state,
 needs-input/follow-up, restart/open-session, interruption/cleanup, exact
 model/workspace attestation, idempotent retries, and redaction. Live-provider

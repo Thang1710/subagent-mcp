@@ -14,6 +14,7 @@ from .base import (
     ProbeResult,
     ResolvedContext,
 )
+from .conformance import ConformanceReport, run_adapter_conformance
 
 __all__ = [
     "Adapter",
@@ -26,6 +27,8 @@ __all__ = [
     "CanaryAdapter",
     "CanaryRequest",
     "CanaryResult",
+    "ConformanceReport",
     "ProbeResult",
     "ResolvedContext",
+    "run_adapter_conformance",
 ]

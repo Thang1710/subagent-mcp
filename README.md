@@ -114,6 +114,7 @@ for details.
 |---|---|
 | 13-tool normalized lifecycle over stdio | Works |
 | Deterministic adapter for integration testing | Works without provider quota |
+| Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
 | Windows install, update, rollback, registration, and conservative uninstall | Passed fresh public-user acceptance for `0.1.0a6` |
 | Claude Code native adapter | Implemented but remains `needs_canary` until its live no-overage gate passes |

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "subagent-harness-mcp-sample-adapter"
+version = "0.1.0"
+description = "Minimal separately packaged adapter for Subagent MCP."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = ["subagent-harness-mcp>=0.1.0a6,<1"]
+
+[project.entry-points."subagent_harness_mcp.adapters"]
+sample-echo = "subagent_mcp_sample_adapter:create_adapter"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subagent_mcp_sample_adapter"]
