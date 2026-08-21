@@ -60,6 +60,49 @@ def _security_snapshot(path: Path) -> bytes | int:
     ).stdout
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows security descriptor contract")
+def test_windows_private_descriptor_binds_current_user_as_owner() -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    advapi32.GetSecurityDescriptorOwner.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_void_p),
+        ctypes.POINTER(wintypes.BOOL),
+    ]
+    advapi32.GetSecurityDescriptorOwner.restype = wintypes.BOOL
+    advapi32.ConvertStringSidToSidW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
+    advapi32.ConvertStringSidToSidW.restype = wintypes.BOOL
+    advapi32.EqualSid.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    advapi32.EqualSid.restype = wintypes.BOOL
+    kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
+    kernel32.LocalFree.restype = wintypes.HLOCAL
+
+    owner = ctypes.c_void_p()
+    owner_defaulted = wintypes.BOOL()
+    current_sid = ctypes.c_void_p()
+    with live_common._windows_private_descriptor() as descriptor:
+        assert advapi32.GetSecurityDescriptorOwner(
+            descriptor,
+            ctypes.byref(owner),
+            ctypes.byref(owner_defaulted),
+        )
+        assert owner.value
+        assert advapi32.ConvertStringSidToSidW(
+            live_common._windows_current_sid(),
+            ctypes.byref(current_sid),
+        )
+        try:
+            assert advapi32.EqualSid(owner, current_sid)
+        finally:
+            kernel32.LocalFree(current_sid)
+
+
 def _observations(scope: ApprovalScope, *, dirty_tracked: bool = False) -> ExecutionObservations:
     return ExecutionObservations(
         git_head=scope.git_head,

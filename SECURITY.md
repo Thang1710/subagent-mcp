@@ -13,8 +13,8 @@ the sensitive details.
 The Windows Managed Preview must fail closed when model, harness, workspace,
 authentication source, terminal lifecycle, or no-overage evidence is missing.
 Subagent MCP never enables usage credits or modifies billing settings. Existing
-Codex, Claude, and AgentBridge configuration, authentication, caches,
-transcripts, state, and processes are outside its ownership boundary.
+client and native-harness configuration, authentication, caches, transcripts,
+state, and processes are outside its ownership boundary.
 
 Only a release installed from published artifacts and passing its documented
 real-host gates may be treated as provider-ready.

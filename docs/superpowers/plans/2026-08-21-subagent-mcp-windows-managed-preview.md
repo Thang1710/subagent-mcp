@@ -2,11 +2,11 @@
 
 > **Execution:** Use `subagent-driven-development` or `executing-plans`, one writer per bounded task. Test once at the end of each task, then perform one fresh Critical-only review wave. Defer Important/Minor polish to the post-preview debt ledger.
 
-**Goal:** Ship `subagent-harness-mcp==0.1.0a1` as an MIT-licensed Windows Managed Preview with a real stdio MCP, revisioned local state, a normalized adapter contract, a deterministic fake adapter, a capability-gated Claude Code managed adapter, and an opt-in localhost settings/activity UI.
+**Goal:** Ship `subagent-harness-mcp==0.1.0a2` as an MIT-licensed Windows Managed Preview with a real stdio MCP, revisioned local state, a normalized adapter contract, a deterministic fake adapter, a capability-gated Claude Code managed adapter, and an opt-in localhost settings/activity UI.
 
-**Architecture:** One Python package exposes CLI, stdio MCP, and localhost UI as thin surfaces over one `SubagentMcpService`. The service owns SQLite state, JSON config, idempotency, lifecycle transitions, redaction, circuits, and adapter selection. Adapters translate the common async contract to their native harness and never write shared state directly. Version 0.1.0a1 supports the managed transport on Windows only after its exact CLI/SDK/no-overage canary passes; visible-background, promotion, native Codex-panel injection, and other operating systems remain explicit capability gaps.
+**Architecture:** One Python package exposes CLI, stdio MCP, and localhost UI as thin surfaces over one `SubagentMcpService`. The service owns SQLite state, JSON config, idempotency, lifecycle transitions, redaction, circuits, and adapter selection. Adapters translate the common async contract to their native harness and never write shared state directly. Version 0.1.0a2 supports the managed transport on Windows only after its exact CLI/SDK/no-overage canary passes; visible-background, promotion, native Codex-panel injection, and other operating systems remain explicit capability gaps.
 
-**Release principle:** Build the usable product before broad hardening. A pre-release blocker is only a direct Critical defect: crash; core lifecycle unusable; duplicate external work; wrong session/model/workspace; severe UX break; credential/overage violation; security boundary bypass; data loss/corruption; destructive install/update/uninstall; or impact across most users. Everything else is recorded and shipped later.
+**Release principle:** Build the usable product before broad hardening. A pre-release blocker is only a direct Critical defect: any security defect; crash; core lifecycle unusable; duplicate external work; wrong session/model/workspace; severe UX break; credential/overage violation; data loss/corruption; destructive install/update/uninstall; or impact across most users. Everything else is recorded and shipped later.
 
 **Tech stack:** Python 3.10+, standard library `sqlite3`/`http.server`, official MCP Python SDK v2 (`mcp>=2.0.0,<2.1`, lock resolves 2.0.0), `claude-agent-sdk==0.2.142`, package-owned static HTML/CSS/JavaScript, pytest 8, uv, PowerShell 5.1.
 
@@ -80,7 +80,7 @@ The stdio MCP registers the exact public tool names from the design. Unsupported
 - Create: `src/subagent_harness_mcp/__init__.py`, `src/subagent_harness_mcp/cli.py`, `src/subagent_harness_mcp/py.typed`
 - Create: `README.md`, `LICENSE`, `SECURITY.md`, `CHANGELOG.md`, `tests/unit/test_package_contract.py`
 
-- [ ] Convert the project to a real `src` package named `subagent-harness-mcp`, display name “Subagent MCP”, version `0.1.0a1`, MIT license, and script `subagent-harness-mcp = subagent_harness_mcp.cli:main`.
+- [ ] Convert the project to a real `src` package named `subagent-harness-mcp`, display name “Subagent MCP”, version `0.1.0a2`, MIT license, and script `subagent-harness-mcp = subagent_harness_mcp.cli:main`.
 - [ ] Add `mcp>=2.0.0,<2.1` and exact `claude-agent-sdk==0.2.142`; resolve once, require lock version 2.0.0, add exactly `.preview/` to `.gitignore`, and use only `.preview/runtime/test` for product-task verification—never sync an existing user environment.
 - [ ] Implement `--version` and placeholder command routing that fails with concise actionable errors, never a traceback for user mistakes.
 - [ ] Test metadata, wheel contents, console entry point, and source/wheel import from isolated temporary environments.
@@ -194,7 +194,9 @@ This is the only production-provider/live-publication task.
 - [ ] Install the built artifact into a fresh staged runtime, start the localhost UI, verify configuration/health/activity in a real browser, and stop it cleanly.
 - [ ] Run one bounded fresh Codex -> registered stdio MCP -> Claude Code read-only review, then one write-capable disposable worktree task. Verify model/session/workspace identity, terminal result, cleanup, no duplicate work, no usage credits, and no mutation of existing config/cache/transcripts/processes.
 - [ ] Exercise real Windows update, rollback, MCP restart/resume, and conservative uninstall-preserves-data.
-- [ ] Publish matching `0.1.0a1` wheel/sdist and GitHub release with manifest/checksums only after all release-critical gates pass. Label unsupported transports/platforms/capabilities explicitly.
+- [ ] Save and commit the verified project at the controller-approved preservation path. Build an exact manifest before removing only Subagent MCP-owned installs, registrations, processes, runtimes, state, and caches from the test machine; preserve unrelated tools and the committed backup.
+- [ ] With the local source checkout unavailable to the test environment, install as a new public user from the published GitHub/PyPI artifacts, then verify CLI, MCP registration, localhost UI, and one Codex -> Subagent MCP -> Claude Code end-to-end task.
+- [ ] Publish matching `0.1.0a2` wheel/sdist and GitHub release with manifest/checksums only after all release-critical gates pass. Label unsupported transports/platforms/capabilities explicitly.
 - [ ] Mark the overall goal complete only after installed-artifact E2E and publication are independently verified.
 
 ## Final verification command set

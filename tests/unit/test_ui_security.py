@@ -18,7 +18,7 @@ def _server(*, patch_calls: list[tuple[dict[str, object], int]] | None = None):
 
     def snapshot():
         return {
-            "version": "0.1.0a1",
+            "version": "0.1.0a2",
             "revision": 7,
             "health": {"state": "ready", "messages": []},
             "runtimes": [],

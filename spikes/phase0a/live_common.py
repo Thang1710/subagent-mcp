@@ -256,7 +256,8 @@ def _windows_private_descriptor() -> Iterator[Any]:
     kernel32.LocalFree.argtypes = [wintypes.HLOCAL]
     kernel32.LocalFree.restype = wintypes.HLOCAL
     descriptor = ctypes.c_void_p()
-    sddl = f"D:P(A;;FA;;;{_windows_current_sid()})"
+    current_sid = _windows_current_sid()
+    sddl = f"O:{current_sid}D:P(A;;FA;;;{current_sid})"
     if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
         sddl, 1, ctypes.byref(descriptor), None,
     ):
@@ -274,9 +275,14 @@ def _set_private_windows_acl(path: Path) -> None:
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     advapi32.SetFileSecurityW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, ctypes.c_void_p]
     advapi32.SetFileSecurityW.restype = wintypes.BOOL
+    security_information = 0x00000004 | 0x80000000
+    try:
+        _verify_current_owner_windows_path(path)
+    except PermissionError:
+        security_information |= 0x00000001
     with _windows_private_descriptor() as descriptor:
         if not advapi32.SetFileSecurityW(
-            str(path), 0x00000004 | 0x80000000, descriptor,
+            str(path), security_information, descriptor,
         ):
             raise OSError(ctypes.get_last_error(), "SetFileSecurityW failed", str(path))
 
@@ -458,10 +464,11 @@ def _path_exists_or_is_indirect(path: Path) -> bool:
 
 def _create_private_directory(path: Path) -> None:
     path.mkdir(mode=0o700)
-    _require_direct_current_owner_directory(path)
     if os.name == "nt":
+        _require_direct_directory(path)
         _set_private_windows_acl(path)
     else:
+        _require_direct_current_owner_directory(path)
         os.chmod(path, 0o700)
     _verify_private_path(path, directory=True)
 

@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed-off tag, for example v0.1.0a1
+        description: Existing signed-off tag, for example v0.1.0a2
         required: true
         type: string
 
@@ -89,6 +89,7 @@ jobs:
       - name: Publish matching GitHub prerelease
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: >-
           gh release create "$RELEASE_TAG"

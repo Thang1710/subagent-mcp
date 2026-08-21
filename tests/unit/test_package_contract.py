@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a1"
+VERSION = "0.1.0a2"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -169,6 +169,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
 
     assert readme.startswith("# Subagent MCP")
     assert DIST_NAME in readme
+    assert "```mermaid" in readme
     assert VERSION in changelog
     assert "MIT License" in license_text
     assert "usage credits" in security.lower()
@@ -182,6 +183,14 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
         content = (ROOT / relative).read_text(encoding="utf-8")
         assert "Subagent MCP" in content
 
+    for content in (
+        readme,
+        security,
+        (ROOT / "docs/architecture.md").read_text(encoding="utf-8"),
+        (ROOT / "docs/threat-model.md").read_text(encoding="utf-8"),
+    ):
+        assert "AgentBridge" not in content
+
 
 def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -193,6 +202,7 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "environment: pypi" in release
     assert "id-token: write" in release
     assert "pypa/gh-action-pypi-publish@release/v1" in release
+    assert "GH_REPO: ${{ github.repository }}" in release
     assert "password:" not in release
     assert "api-token:" not in release
     assert "release-manifest.json" in release

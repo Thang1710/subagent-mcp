@@ -1,62 +1,95 @@
 # Subagent MCP
 
-Subagent MCP is an MIT-licensed local MCP that lets Codex and other compliant
-MCP clients orchestrate native external coding-agent harnesses through one
-normalized lifecycle. The distribution, repository, and command name is
-`subagent-harness-mcp`.
+Subagent MCP gives Codex and other stdio MCP clients one local lifecycle for
+delegating work to external coding-agent harnesses. Each adapter uses the
+provider's native harness while Subagent MCP keeps status, sessions, input, and
+results consistent for the client.
 
-## Windows Managed Preview
+The project and repository are named **Subagent MCP**. The Python distribution
+and command are **`subagent-harness-mcp`** because the shorter package name was
+already taken.
 
-`0.1.0a1` is a pre-release, not a provider-readiness claim. The package contains
-the stdio MCP, revisioned local state, deterministic fake adapter, guarded Claude
-Code managed adapter, conservative Windows runtime lifecycle, and an opt-in
-localhost settings/activity UI.
+> **Preview:** `0.1.0a2` targets Windows. The local MCP, deterministic adapter,
+> package, and localhost UI are usable. Live Claude Code work remains gated
+> until the exact native-harness and no-overage canary passes.
 
-| Capability | Preview status |
-|---|---|
-| Normalized fake lifecycle and stdio MCP | Deterministic artifact test |
-| Localhost settings/activity UI | Loopback-only artifact test |
-| Claude Code managed SDK | `needs_canary`; unavailable until the exact live no-overage gate passes |
-| Project/local Claude context and hooks | Disabled until `project_scan`/`project_trust` can bind canonical path + content hash |
-| Claude visible-background and promotion | Unsupported |
-| Native Codex Subagents-panel row | Unsupported; no documented public host capability |
-| Windows release support | Not claimed until installed-artifact Task 9 gates pass |
-| macOS/Linux release support | Not claimed in this preview |
+## Install
 
-Model IDs and reasoning objects are provider-native opaque values. Subagent MCP
-does not contain a model allowlist, choose a fallback, enable usage credits, or
-change billing settings.
-
-Claude's native SDK publishes its provider rate event only after a turn starts.
-Subagent MCP therefore disables 1M context, fast mode, and the in-session usage
-credits command for every managed process. The canary refuses output until the
-event attests `allowed`, `isUsingOverage=false`, and rejected overage; ordinary
-turns require that exact persisted ready attestation and still interrupt on any
-later unsafe rate/error event. Missing or unsafe evidence pauses the exact
-runtime variant. The selected effort is pinned again through the provider-native
-process environment so user settings and skills cannot replace it.
-
-For `0.1.0a1`, ordinary Claude turns load only the native **user** setting
-source. User skills remain available, but project/local `CLAUDE.md`, `.claude`
-hooks, agents, skills, and declared project MCP are disabled until the trust
-gate is implemented; this is reported as an explicit capability gap.
-
-## Install and inspect
-
-After `0.1.0a1` is published, install the exact pre-release into an isolated tool
-environment:
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first if
+you do not already have it:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a1
+winget install --id=astral-sh.uv -e
+```
+
+Then install the pinned preview and connect it to Codex:
+
+```powershell
+uv tool install subagent-harness-mcp==0.1.0a2
+codex mcp add subagent-mcp -- subagent-harness-mcp serve
+```
+
+Start a new Codex task after registration. You can confirm the installation at
+any time:
+
+```powershell
 subagent-harness-mcp --version
+codex mcp list
+```
+
+If `0.1.0a2` has not reached PyPI yet, install the current checkout instead:
+
+```powershell
+uv tool install .
+```
+
+## Open the local UI
+
+```powershell
 subagent-harness-mcp ui
 ```
 
-`pipx install subagent-harness-mcp==0.1.0a1` is also supported. The UI opens only
-on a temporary loopback port and stops with its process. It is settings and
-read-only activity, not an agent chat console.
+This opens a temporary browser session on localhost for settings, health, and
+read-only activity. It is not an agent chat window, and the server stops when
+the command exits.
 
-For a generic MCP client, use the installed executable with fixed arguments:
+## How it fits together
+
+```mermaid
+flowchart LR
+    C["Codex or another MCP client"] -->|"stdio MCP"| S["Subagent MCP"]
+    U["Browser UI<br/>localhost only"] --> S
+    S --> D[("Local config and activity")]
+    S --> L["Normalized subagent lifecycle"]
+    L --> F["Deterministic adapter"]
+    L --> N["Native harness adapters"]
+    N --> H["Claude Code"]
+    N -.-> X["Future harnesses"]
+```
+
+The service owns lifecycle state, idempotency, redaction, leases, and circuits.
+Adapters translate that contract to a native harness and do not write shared
+state directly. See [the architecture](docs/architecture.md) for details.
+
+## What works in this preview
+
+| Capability | Status |
+|---|---|
+| 13-tool normalized lifecycle over stdio | Works |
+| Deterministic adapter for integration testing | Works without provider quota |
+| Localhost settings and activity UI | Works |
+| Windows install, update, rollback, registration, and conservative uninstall | Implemented; final public-install verification is pending |
+| Claude Code native adapter | Implemented but remains `needs_canary` until its live no-overage gate passes |
+| Provider model selection | Opaque native model IDs; no hard-coded model allowlist or silent fallback |
+| Project-local Claude context and hooks | Disabled until canonical path and content-hash trust are enforced |
+| macOS, Linux, visible-background handoff, and native client side-panel rows | Not supported in this preview |
+
+Green deterministic tests prove the local contract; they do not prove that a
+live provider is ready.
+
+## Other MCP clients
+
+Point any stdio-compatible MCP client at the installed command:
 
 ```json
 {
@@ -65,34 +98,25 @@ For a generic MCP client, use the installed executable with fixed arguments:
 }
 ```
 
-Windows lifecycle commands are explicit and support `--dry-run`:
+The MCP exposes versioned runtime, project-trust, agent-lifecycle, and workspace
+tools. Public schemas live in [`schemas/`](schemas/).
 
-```text
-subagent-harness-mcp install --runtime <immutable-runtime-dir> --runtime-version <version> --dry-run
-subagent-harness-mcp update --runtime <immutable-runtime-dir> --runtime-version <version> --dry-run
-subagent-harness-mcp rollback --dry-run
-subagent-harness-mcp register --client codex --dry-run
-subagent-harness-mcp uninstall --client codex --dry-run
-```
+## Safety and billing
 
-Registration uses the client's official command and exact read-back. Uninstall
-preserves configuration, state, native sessions, and worktrees by default.
+- Subagent MCP never enables usage credits or changes billing settings.
+- Managed provider work fails closed on missing identity, model, workspace,
+  session, or no-overage evidence; it does not silently choose a fallback.
+- Provider model IDs and reasoning settings remain native, opaque values.
+- Product data stays in explicit local config, state, and data roots. Optional
+  client registration uses the client's official command and verifies the exact
+  entry instead of directly rewriting unrelated configuration.
+- Native transcripts remain owned by the native harness. Treat agent output as
+  untrusted advice and verify it before applying changes.
 
-## Public contract
+Read the full [threat model](docs/threat-model.md) and report vulnerabilities
+privately as described in [SECURITY.md](SECURITY.md).
 
-The MCP exposes the same 13 lifecycle/configuration tools for every adapter. See
-[architecture](docs/architecture.md), [adapter authoring](docs/adapter-authoring.md),
-and the [threat model](docs/threat-model.md). Versioned schemas live in
-[`schemas/`](schemas/): config, adapter manifest, normalized agent descriptor,
-and MCP tools.
+## Development
 
-Subagent MCP owns only its explicit config, state, data, and staged runtime
-roots. It never uses AgentBridge state or edits existing Codex/Claude
-configuration, authentication, caches, transcripts, or processes.
-
-## Development and security
-
-See [CONTRIBUTING.md](CONTRIBUTING.md) for deterministic checks and
-[SECURITY.md](SECURITY.md) for private vulnerability reporting. Do not use a
-fake adapter, static inspection, or green CI as evidence that a live provider is
-ready. Subagent MCP is released under the [MIT License](LICENSE).
+[CONTRIBUTING.md](CONTRIBUTING.md) contains the deterministic test workflow and
+adapter guidelines. Subagent MCP is released under the [MIT License](LICENSE).

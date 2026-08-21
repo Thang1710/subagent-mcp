@@ -2,7 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
-## 0.1.0a1 - Unreleased
+## 0.1.0a2 - Unreleased
+
+- Fix Windows private-root creation when the runner's default object owner is
+  different from its current user SID.
+- Make GitHub Release publication explicitly target this repository after the
+  PyPI trusted-publishing step.
+- Replace internal release notes in the public README with a short install path,
+  verified Codex registration command, and architecture diagram.
 
 - Publish the `subagent-harness-mcp` Python package, typed console entry point,
   four versioned public schemas, static localhost UI assets, and MIT metadata.

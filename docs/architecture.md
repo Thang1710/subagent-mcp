@@ -36,9 +36,9 @@ runtimes are immutable and selected through an atomic pointer. Conservative
 uninstall removes only byte/identity-matching owned resources and preserves
 user config, state, sessions, and worktrees.
 
-Native harness transcripts remain native-harness-owned. AgentBridge, Codex
-private app state, user authentication stores, caches, and billing settings are
-outside the product boundary.
+Native harness transcripts remain native-harness-owned. Private client state,
+user authentication stores, unrelated local tooling, caches, and billing
+settings are outside the product boundary.
 
 ## Preview boundary
 
@@ -46,7 +46,7 @@ The deterministic fake adapter proves the local contract without provider
 quota. The Claude managed adapter cannot run normal work until its exact
 standalone CLI/SDK/model/reasoning/transport pair passes the dedicated live
 no-overage canary. Visible-background, promotion, and native Codex-panel
-integration are explicit preview gaps. Ordinary `0.1.0a1` Claude turns select
+integration are explicit preview gaps. Ordinary `0.1.0a2` Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
