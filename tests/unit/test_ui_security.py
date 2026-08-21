@@ -11,6 +11,7 @@ import pytest
 from subagent_harness_mcp import cli
 from subagent_harness_mcp import ui
 from subagent_harness_mcp.ui import LoopbackUiServer, UiError
+from subagent_harness_mcp.ui_process import CONTROL_HEADER, CONTROL_STOP_PATH
 
 
 def _server(
@@ -130,7 +131,9 @@ def test_cli_routes_ui_without_importing_a_provider(
 ) -> None:
     ports: list[int] = []
 
-    def run_ui(*, port: int) -> int:
+    def run_ui(*, port: int, open_browser: bool = True, control_file=None) -> int:
+        assert open_browser is True
+        assert control_file is None
         ports.append(port)
         return 23
 
@@ -143,7 +146,9 @@ def test_cli_routes_ui_without_importing_a_provider(
 def test_cli_accepts_an_explicit_ui_port(monkeypatch: pytest.MonkeyPatch) -> None:
     ports: list[int] = []
 
-    def run_ui(*, port: int) -> int:
+    def run_ui(*, port: int, open_browser: bool = True, control_file=None) -> int:
+        assert open_browser is True
+        assert control_file is None
         ports.append(port)
         return 0
 
@@ -151,6 +156,21 @@ def test_cli_accepts_an_explicit_ui_port(monkeypatch: pytest.MonkeyPatch) -> Non
 
     assert cli.main(["ui", "--port", "9123"]) == 0
     assert ports == [9123]
+
+
+def test_cli_can_run_the_foreground_ui_without_opening_a_browser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[int, bool, object]] = []
+
+    def run_ui(*, port: int, open_browser: bool, control_file=None) -> int:
+        calls.append((port, open_browser, control_file))
+        return 0
+
+    monkeypatch.setattr(ui, "run_ui", run_ui)
+
+    assert cli.main(["ui", "--no-open"]) == 0
+    assert calls == [(8765, False, None)]
 
 
 def test_cli_rejects_an_invalid_ui_port_without_a_value_dump(
@@ -182,6 +202,35 @@ def test_loopback_ui_server_binds_an_explicit_port() -> None:
         assert fixed.bound_port == port
     finally:
         fixed.close()
+
+
+def test_background_stop_requires_both_exact_origin_and_control_token() -> None:
+    token = "control-token-with-enough-entropy-for-security"
+    server = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        control_token=token,
+    )
+    thread = server.start()
+    try:
+        wrong_token, _, _ = _request(
+            server,
+            "POST",
+            CONTROL_STOP_PATH,
+            headers={"Origin": server.origin, CONTROL_HEADER: "x" * 40},
+        )
+        wrong_origin, _, _ = _request(
+            server,
+            "POST",
+            CONTROL_STOP_PATH,
+            headers={"Origin": "https://attacker.invalid", CONTROL_HEADER: token},
+        )
+
+        assert wrong_token == 401
+        assert wrong_origin == 403
+        assert thread.is_alive()
+    finally:
+        server.close()
 
 
 def test_static_assets_have_restrictive_headers_and_no_cors() -> None:

@@ -26,6 +26,10 @@ class ProductPaths:
     def database_file(self) -> Path:
         return self.state_dir / "state.db"
 
+    @property
+    def ui_control_file(self) -> Path:
+        return self.state_dir / "ui-control.json"
+
 
 def resolve_paths(
     env: Mapping[str, str] | None = None,

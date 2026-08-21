@@ -2,6 +2,22 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a16 - 2026-08-22
+
+- Add an optional detached localhost UI with explicit `--background`,
+  `--status`, and graceful `--stop` commands; it remains independent of the MCP
+  server and keeps stable port `8765` by default.
+- Authenticate background shutdown with a random control token, exact loopback
+  Host/Origin checks, and a bounded atomic Local control record removed only
+  when its bytes still match the process that published it.
+- Add `--no-open` for foreground or background use without launching a browser;
+  background mode never creates an automatic Windows login/startup entry.
+- Give native DeepSeek turns a separate 15-minute completion budget instead of
+  failing slow Ox Alpha work at the five-minute lifecycle-operation boundary;
+  the adapter still performs no automatic retry or model change. If that
+  deadline is reached, it sends native cancellation and closes the ACP process
+  so provider usage cannot continue in the background.
+
 ## 0.1.0a15 - 2026-08-21
 
 - Discover standard Windows Node installs from `SystemDrive` when an MCP client

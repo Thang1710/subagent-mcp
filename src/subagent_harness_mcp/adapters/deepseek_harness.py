@@ -29,6 +29,7 @@ from .base import (
 RUNTIME_ID = "deepseek-harness"
 TRANSPORT = "native-acp"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
 CONTROLLER_RESULT_MAX_CHARS = 4_096
 MAX_WIRE_LINE_BYTES = 1024 * 1024
 _TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
@@ -123,11 +124,17 @@ class DeepSeekHarnessAdapter:
         client_factory: ClientFactory | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self._binding_locator = binding_locator or locate_dsh_binding
         self._timeout = timeout_seconds
+        self._turn_timeout = turn_timeout_seconds
         self._client_factory = client_factory or (
-            lambda launch: _StdioAcpClient(launch, timeout_seconds=self._timeout)
+            lambda launch: _StdioAcpClient(
+                launch,
+                timeout_seconds=self._timeout,
+                turn_timeout_seconds=self._turn_timeout,
+            )
         )
         if data_root is None:
             from ..paths import resolve_paths
@@ -142,7 +149,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a15",
+            adapter_version="0.1.0a16",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -448,13 +455,16 @@ class DeepSeekHarnessAdapter:
     ) -> None:
         result: tuple[str, str] | None = None
         failure: BaseException | None = None
+        timeout_cleanup_confirmed: bool | None = None
         try:
             result = await asyncio.wait_for(
                 session.client.prompt(session.snapshot.external_session_id, prompt),
-                timeout=self._timeout,
+                timeout=self._turn_timeout,
             )
         except BaseException as exc:
             failure = exc
+            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                timeout_cleanup_confirmed = await self._stop_timed_out_turn(session)
         async with session.lock:
             turn = session.turn
             if turn is None or turn.execution_id != execution_id:
@@ -474,7 +484,11 @@ class DeepSeekHarnessAdapter:
                 if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
                     code = "RECOVERY_REQUIRED"
                     category = "adapter"
-                    message = "DeepSeek ACP turn did not complete"
+                    message = (
+                        "DeepSeek ACP turn timed out and process cleanup was confirmed"
+                        if timeout_cleanup_confirmed
+                        else "DeepSeek ACP turn timed out and process cleanup was not confirmed"
+                    )
                 elif _QUOTA_EXHAUSTED.search(str(failure)):
                     code = "QUOTA_PAUSED"
                     category = "quota"
@@ -531,11 +545,32 @@ class DeepSeekHarnessAdapter:
                 result_text=_bounded_result(text),
             )
 
+    async def _stop_timed_out_turn(self, session: _Session) -> bool:
+        try:
+            await asyncio.wait_for(
+                session.client.cancel(session.snapshot.external_session_id),
+                timeout=self._timeout,
+            )
+        except BaseException:
+            pass
+        try:
+            await asyncio.wait_for(session.client.close(), timeout=self._timeout)
+        except BaseException:
+            return False
+        return True
+
 
 class _StdioAcpClient:
-    def __init__(self, launch: DshLaunch, *, timeout_seconds: float) -> None:
+    def __init__(
+        self,
+        launch: DshLaunch,
+        *,
+        timeout_seconds: float,
+        turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+    ) -> None:
         self._launch = launch
         self._timeout = timeout_seconds
+        self._turn_timeout = turn_timeout_seconds
         self._process: asyncio.subprocess.Process | None = None
         self._reader_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
@@ -569,7 +604,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a15"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a16"},
                 },
             ),
             timeout=self._timeout,
@@ -596,7 +631,7 @@ class _StdioAcpClient:
                     "prompt": [{"type": "text", "text": prompt}],
                 },
             ),
-            timeout=self._timeout,
+            timeout=self._turn_timeout,
         )
         if not isinstance(result, Mapping) or not isinstance(result.get("stopReason"), str):
             raise RuntimeError("ACP prompt response is invalid")

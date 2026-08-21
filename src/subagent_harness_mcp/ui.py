@@ -7,6 +7,7 @@ import copy
 import hmac
 import ipaddress
 import json
+import os
 import secrets
 import socket
 import threading
@@ -16,12 +17,14 @@ from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib import resources
+from pathlib import Path
 from typing import Any
 from urllib.parse import quote, unquote, urlsplit
 
 from . import __version__
 from .config import ConfigError, ConfigStore
 from .contracts import ServiceError
+from .ui_process import CONTROL_HEADER, CONTROL_STOP_PATH
 
 
 _ASSETS = {
@@ -279,10 +282,12 @@ class _UiState:
         snapshot_provider: SnapshotProvider,
         config_patcher: ConfigPatcher,
         provider_refresher: ProviderRefresher | None,
+        control_token: str | None,
     ) -> None:
         self.snapshot_provider = snapshot_provider
         self.config_patcher = config_patcher
         self.provider_refresher = provider_refresher
+        self.control_token = control_token
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.sessions: dict[str, str] = {}
         self.lock = threading.Lock()
@@ -303,6 +308,10 @@ class _UiState:
     def csrf_for(self, session_id: str) -> str | None:
         with self.lock:
             return self.sessions.get(session_id)
+
+    def control_allowed(self, supplied: str) -> bool:
+        expected = self.control_token
+        return expected is not None and hmac.compare_digest(supplied, expected)
 
     def clear(self) -> None:
         with self.lock:
@@ -329,6 +338,7 @@ class LoopbackUiServer:
         config_patcher: ConfigPatcher,
         *,
         provider_refresher: ProviderRefresher | None = None,
+        control_token: str | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
     ) -> None:
@@ -343,7 +353,18 @@ class LoopbackUiServer:
             raise UiError("UI_BACKEND_INVALID", "UI callbacks must be callable")
         if provider_refresher is not None and not callable(provider_refresher):
             raise UiError("UI_BACKEND_INVALID", "provider refresh callback must be callable")
-        self._state = _UiState(snapshot_provider, config_patcher, provider_refresher)
+        if control_token is not None and (
+            not isinstance(control_token, str)
+            or not 24 <= len(control_token) <= 256
+            or not control_token.isascii()
+        ):
+            raise UiError("UI_CONTROL_INVALID", "UI control token is invalid")
+        self._state = _UiState(
+            snapshot_provider,
+            config_patcher,
+            provider_refresher,
+            control_token,
+        )
         server_type = (
             _Ipv6ThreadingHttpServer if host == "::1" else _Ipv4ThreadingHttpServer
         )
@@ -442,18 +463,37 @@ def create_local_backend() -> LocalUiBackend:
     return LocalUiBackend(config=config, service=service, store=store)
 
 
-def run_ui(*, port: int = 8765, browser_opener: BrowserOpener = webbrowser.open) -> int:
+def run_ui(
+    *,
+    port: int = 8765,
+    browser_opener: BrowserOpener = webbrowser.open,
+    open_browser: bool = True,
+    control_file: Path | None = None,
+) -> int:
     """Bind first, open the fragment URL, and run until interrupted."""
 
     backend = create_local_backend()
+    control_token = secrets.token_urlsafe(32) if control_file is not None else None
     server = LoopbackUiServer(
         backend.snapshot,
         backend.patch_config,
         provider_refresher=backend.refresh_provider,
+        control_token=control_token,
         port=port,
     )
+    control_payload: bytes | None = None
     try:
-        if not server.open_browser(browser_opener):
+        if control_file is not None:
+            from .ui_process import publish_control_record
+
+            assert control_token is not None
+            control_payload = publish_control_record(
+                control_file,
+                pid=os.getpid(),
+                port=server.bound_port,
+                token=control_token,
+            )
+        if open_browser and not server.open_browser(browser_opener):
             raise UiError("BROWSER_OPEN_FAILED", "the browser declined the local URL")
         try:
             server.serve_forever()
@@ -462,6 +502,10 @@ def run_ui(*, port: int = 8765, browser_opener: BrowserOpener = webbrowser.open)
         return 0
     finally:
         server.close()
+        if control_file is not None and control_payload is not None:
+            from .ui_process import remove_control_record
+
+            remove_control_record(control_file, control_payload)
 
 
 def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
@@ -530,6 +574,19 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
             path = self._request_path(require_origin=True)
             if path is None:
                 return
+            if path == CONTROL_STOP_PATH:
+                if not self._control_allowed():
+                    self._discard_bounded_body()
+                    return
+                if not self._require_empty_body():
+                    return
+                self._send_json(HTTPStatus.ACCEPTED, {"state": "stopping"})
+                threading.Thread(
+                    target=self.server.shutdown,
+                    name="subagent-mcp-ui-stop",
+                    daemon=True,
+                ).start()
+                return
             if path == "/api/v1/refresh":
                 if self._session(require_csrf=True) is None:
                     self._discard_bounded_body()
@@ -572,6 +629,18 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                 {"csrf_token": csrf},
                 extra_headers={"Set-Cookie": cookie},
             )
+
+        def _control_allowed(self) -> bool:
+            values = self.headers.get_all(CONTROL_HEADER, [])
+            if (
+                len(values) != 1
+                or not values[0]
+                or len(values[0]) > 256
+                or not state.control_allowed(values[0])
+            ):
+                self._json_error(HTTPStatus.UNAUTHORIZED, "CONTROL_REJECTED")
+                return False
+            return True
 
         def do_PATCH(self) -> None:
             path = self._request_path(require_origin=True)

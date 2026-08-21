@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a15` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a16` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -44,7 +44,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a15
+uv tool install subagent-harness-mcp==0.1.0a16
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -56,7 +56,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a15` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a16` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -69,15 +69,39 @@ subagent-harness-mcp ui
 ```
 
 This opens `http://127.0.0.1:8765` for settings, health, and read-only activity.
-It does not require the MCP server to be active. Keep the command running while
-the UI is open; it is not an agent chat window and leaves no background daemon
-after exit.
+It does not require the MCP server to be active. The default foreground command
+runs until you press `Ctrl+C`; the page is not an agent chat window.
+
+To keep the UI available after the terminal closes, start the optional managed
+background process. It remains independent of MCP until you stop it or the
+Windows session ends:
+
+```powershell
+subagent-harness-mcp ui --background
+subagent-harness-mcp ui --status
+subagent-harness-mcp ui --stop
+```
+
+Use `--background --no-open` when you want the service available without
+opening a browser tab. Subagent MCP does not add itself to Windows login or
+startup automatically.
 
 Choose another fixed port, or ask the OS for a temporary one, when needed:
 
 ```powershell
 subagent-harness-mcp ui --port 9123
 subagent-harness-mcp ui --port 0
+```
+
+Background mode requires a fixed port so status and graceful stop target the
+same loopback service.
+
+On Windows, stop the background UI before upgrading or removing the `uv` tool
+so the running Python environment does not hold package files open:
+
+```powershell
+subagent-harness-mcp ui --stop
+uv tool install --reinstall subagent-harness-mcp==0.1.0a16
 ```
 
 ## Use it from Codex
@@ -164,7 +188,7 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a15` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a16` |
 | Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Opaque native model IDs; user-ordered fallback only after explicit quota exhaustion |
 

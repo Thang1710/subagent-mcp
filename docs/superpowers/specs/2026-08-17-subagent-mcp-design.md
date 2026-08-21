@@ -50,7 +50,7 @@ flowchart TD
 - Keep a narrow, capability-based adapter seam for future harnesses.
 - Publish versioned MCP and adapter schemas so adding a provider does not change the Codex-facing lifecycle.
 - Install from PyPI/GitHub without a personal plugin, register through official client commands, and update through immutable staged runtimes with rollback.
-- Provide a simple opt-in loopback UI for runtime/model/context/trust settings and health without introducing an always-on daemon or frontend build toolchain.
+- Provide a simple opt-in loopback UI for runtime/model/context/trust settings and health, with an explicit managed background mode and no frontend build toolchain.
 - Release-support Windows, macOS, and Linux only after each platform passes its own real install, lifecycle, update, rollback, and uninstall gates.
 
 ## 3. Non-goals
@@ -111,7 +111,7 @@ Standalone installation/login and the already approved probes do not authorize a
 | Distribution | PyPI wheel/sdist plus GitHub Releases |
 | License | MIT |
 | Settings UI | Opt-in `subagent-harness-mcp ui`; static assets; settings and health only |
-| UI lifecycle | Loopback-only process; no daemon or auto-start |
+| UI lifecycle | Loopback-only foreground by default; explicit managed background start/status/stop; no automatic login/startup entry |
 | Release platforms | Windows, macOS, and Linux, each with independent real gates |
 | Claude 1.0 transports | Both managed SDK and visible background must pass before 1.0 |
 
@@ -168,7 +168,7 @@ The common contract stores a provider-native `reasoning` object. A future adapte
 
 Requested model/effort and actual model/effort from initialization/hooks are both persisted. A silent downgrade or unexpected model is a policy error.
 
-Provider-native model IDs are bounded opaque strings at the common adapter boundary: nonempty, free of control characters, and at most 256 UTF-8 bytes. The common `reasoning` object remains defined and validated by each adapter's versioned schema; the core neither coerces it to an effort scalar nor imposes cross-provider effort names. The core has no provider-name allowlist and passes the selected values through exactly; the adapter manifest and runtime policy decide which variants are selectable. Fallback remains disabled, and requested/effective mismatch fails closed. An official `model_not_found` result marks only that variant `CAPABILITY_MISSING`/`needs_canary`; it never silently selects another model or disables unrelated variants.
+Provider-native model IDs are bounded opaque strings at the common adapter boundary: nonempty, free of control characters, and at most 256 UTF-8 bytes. The common `reasoning` object remains defined and validated by each adapter's versioned schema; the core neither coerces it to an effort scalar nor imposes cross-provider effort names. The core has no provider-name allowlist and passes the selected values through exactly; the adapter manifest and runtime policy decide which variants are selectable. Fallback is explicit and user-ordered only: Codex may advance to the next configured variant after the current variant returns terminal `QUOTA_PAUSED`, never after an ambiguous transport/provider failure. Requested/effective mismatch still fails closed. An official `model_not_found` result marks only that variant `CAPABILITY_MISSING`/`needs_canary`; it never silently selects another model or disables unrelated variants.
 
 ### 7.1 Public adapter contract and customization
 
@@ -556,13 +556,13 @@ Native Claude transcripts are owned and written only by Claude Code. Subagent MC
 
 ### 14.1 Opt-in localhost settings UI
 
-`subagent-harness-mcp ui` starts a temporary loopback-only HTTP server on stable default port `8765` and opens the default browser. `--port` selects another fixed port and `--port 0` requests an OS-assigned port. It serves package-owned static HTML/CSS/JavaScript and calls the same `SubagentMcpService` used by MCP and CLI; the HTTP layer contains no duplicate policy or persistence logic. It requires no active MCP process, Node runtime, or frontend build step. Version 1 does not install an always-on daemon; the UI process and its in-memory authorization disappear when the command exits.
+`subagent-harness-mcp ui` starts a loopback-only HTTP server on stable default port `8765` and opens the default browser. `--port` selects another fixed port and `--port 0` requests an OS-assigned port for foreground use. It serves package-owned static HTML/CSS/JavaScript and calls the same `SubagentMcpService` used by MCP and CLI; the HTTP layer contains no duplicate policy or persistence logic. It requires no active MCP process, Node runtime, or frontend build step. Foreground mode disappears when the command exits. Explicit `ui --background`, `ui --status`, and `ui --stop` keep one managed UI available after the invoking terminal closes and stop it gracefully; background mode requires a fixed port and does not install a login/startup entry.
 
 Version 1 exposes runtime enablement, executable discovery, variants, context and semantic-permission policies, project trust, health/capability results, update state, and quota-circuit state. It also exposes a read-only current/recent external-agent activity list using the section 11.5 descriptor; this is status visibility, not a chat/operator console. The context settings show separate editable `auto_compaction_trigger_tokens` and provider `auto_compaction_window_tokens` fields with the selected adapter's declared ranges; the default trigger target is `274000`, and values outside the ranges are rejected. Unsupported exact-trigger policies are visibly unavailable rather than translated to a provider window. It does not expose agent prompts, transcripts, send/interrupt/close controls, raw events, or arbitrary file browsing.
 
 For `claude-code`, the health page presents explicit onboarding states: missing CLI with official per-platform install guidance and Re-check; installed but logged out with `claude auth login` guidance; incompatible/changed CLI with canary requirements; or ready with only version/auth-method/provider metadata. It never displays account email, organization identifiers, credential material, or private usage-history data.
 
-The server listens only on explicit loopback addresses, rejects non-loopback peers and unexpected `Host`/`Origin` headers, sends no CORS allowlist, uses a per-process cryptographically random bootstrap token plus CSRF token, sets a restrictive CSP, and never persists the browser token. The bootstrap secret is carried in the initial URL fragment rather than query/path, exchanged once through `X-Subagent-MCP-Token` for a `Secure`-when-applicable, `HttpOnly`, `SameSite=Strict` session cookie, removed from browser history, and never placed in logs or referrers. It fails rather than fall back to a public interface. Closing the process stops the UI; there is no service, tray application, startup entry, telemetry, or remote-access mode in version 1.
+The server listens only on explicit loopback addresses, rejects non-loopback peers and unexpected `Host`/`Origin` headers, sends no CORS allowlist, uses a per-process cryptographically random bootstrap token plus CSRF token, sets a restrictive CSP, and never persists the browser token. The bootstrap secret is carried in the initial URL fragment rather than query/path, exchanged once through `X-Subagent-MCP-Token` for a `Secure`-when-applicable, `HttpOnly`, `SameSite=Strict` session cookie, removed from browser history, and never placed in logs or referrers. It fails rather than fall back to a public interface. Managed background stop uses a separate random control token in a bounded product-owned Local file, requires the exact loopback Host and Origin, shuts down cooperatively, and removes only its byte-identical control record. There is no tray application, automatic startup entry, telemetry, or remote-access mode in version 1.
 
 ## 15. Quota circuit breaker
 
@@ -791,7 +791,7 @@ Release requires all of the following:
 - Stable launcher update and rollback pass on the real machine.
 - PyPI wheel/sdist and GitHub Release artifacts install from a clean environment, carry matching version/checksum provenance, and expose the documented CLI/MCP entry points.
 - Windows, macOS, and Linux each pass clean install, official/generic client registration, MCP restart, staged update, rollback, and uninstall-preserves-data evidence before being labeled supported.
-- `subagent-harness-mcp ui` binds only to loopback, passes hostile Host/Origin/CSRF tests, edits revisioned settings through the shared service, reflects health/circuit state, and leaves no daemon/token after exit.
+- `subagent-harness-mcp ui` binds only to loopback, passes hostile Host/Origin/CSRF/control-token tests, edits revisioned settings through the shared service, reflects health/circuit state, leaves no process/token after foreground exit or managed stop, and never adds an automatic startup entry.
 - A separately packaged sample adapter discovered through `subagent_harness_mcp.adapters` passes the public conformance suite without importing Subagent MCP private modules or registering alternate lifecycle tools.
 - Public docs include installation, update/rollback/uninstall, common schemas, adapter authoring, customization examples, threat model, security reporting, and exact support boundaries.
 - Committed/release artifacts and model-facing summaries pass credential/PII scans; raw local probe identifiers never appear in the public repository or release bundle.

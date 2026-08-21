@@ -73,7 +73,89 @@ def _ui_parser() -> argparse.ArgumentParser:
         metavar="PORT",
         help="Loopback port (default: 8765; use 0 for an ephemeral port)",
     )
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument(
+        "--background",
+        action="store_true",
+        help="Keep the localhost UI running after this command exits",
+    )
+    mode.add_argument("--status", action="store_true", help="Show localhost UI status")
+    mode.add_argument("--stop", action="store_true", help="Stop the managed background UI")
+    mode.add_argument("--background-child", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument(
+        "--no-open",
+        action="store_true",
+        help="Do not open the UI in the default browser",
+    )
     return parser
+
+
+def _print_ui_result(action: str, result: object) -> None:
+    from .ui_process import BackgroundUiResult
+
+    if not isinstance(result, BackgroundUiResult):
+        raise TypeError("invalid UI process result")
+    origin = f"http://127.0.0.1:{result.port}"
+    if action == "start":
+        state = "started in background" if result.changed else "already running"
+        print(f"ui: {state} at {origin}")
+    elif action == "status":
+        if not result.running:
+            print("ui: stopped")
+        else:
+            mode = "background" if result.managed else "foreground"
+            print(f"ui: running in {mode} at {origin}")
+    elif result.changed:
+        print("ui: stopped")
+    else:
+        print("ui: already stopped")
+
+
+def _run_ui_command(command_args: Sequence[str]) -> int:
+    from .paths import resolve_paths
+    from .ui import UiError, run_ui
+    from .ui_process import (
+        UiProcessError,
+        start_background_ui,
+        status_background_ui,
+        stop_background_ui,
+    )
+
+    parser = _ui_parser()
+    arguments = parser.parse_args(command_args)
+    if (arguments.background or arguments.background_child) and arguments.port == 0:
+        parser.error("background UI requires a fixed PORT")
+    if (arguments.stop or arguments.status) and arguments.no_open:
+        parser.error("--no-open is only valid when starting the UI")
+    try:
+        if arguments.background:
+            result = start_background_ui(
+                resolve_paths(),
+                port=arguments.port,
+                open_browser=not arguments.no_open,
+            )
+            _print_ui_result("start", result)
+            return 0
+        if arguments.status:
+            result = status_background_ui(resolve_paths(), port=arguments.port)
+            _print_ui_result("status", result)
+            return 0
+        if arguments.stop:
+            result = stop_background_ui(resolve_paths(), port=arguments.port)
+            _print_ui_result("stop", result)
+            return 0
+        control_file = resolve_paths().ui_control_file if arguments.background_child else None
+        return run_ui(
+            port=arguments.port,
+            open_browser=not arguments.no_open,
+            control_file=control_file,
+        )
+    except (UiError, UiProcessError) as exc:
+        print(f"{PROGRAM_NAME}: error: {exc.code}: {exc}", file=sys.stderr)
+        return 1
+    except Exception:
+        print(f"{PROGRAM_NAME}: error: localhost UI could not start", file=sys.stderr)
+        return 1
 
 
 def _print_lifecycle_result(result: object) -> None:
@@ -161,20 +243,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     if arguments.command == "ui":
-        ui_arguments = _ui_parser().parse_args(arguments.command_args)
-        try:
-            from .ui import UiError, run_ui
-
-            return run_ui(port=ui_arguments.port)
-        except UiError as exc:
-            print(
-                f"{PROGRAM_NAME}: error: {exc.code}: {exc}",
-                file=sys.stderr,
-            )
-            return 1
-        except Exception:
-            print(f"{PROGRAM_NAME}: error: localhost UI could not start", file=sys.stderr)
-            return 1
+        return _run_ui_command(arguments.command_args)
     if arguments.command in {"install", "update", "rollback", "register", "uninstall"}:
         return _run_lifecycle(arguments.command, arguments.command_args)
     return _command_error(

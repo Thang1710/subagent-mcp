@@ -286,6 +286,151 @@ def test_acp_wire_error_preserves_terminal_quota_detail_for_classification(
     asyncio.run(scenario())
 
 
+def test_acp_prompt_uses_the_long_turn_budget_not_the_operation_budget(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            tmp_path / "persistence",
+            tmp_path / "config.yml",
+        )
+        client = _StdioAcpClient(
+            launch,
+            timeout_seconds=0.01,
+            turn_timeout_seconds=0.2,
+        )
+
+        async def delayed_request(method: str, params: object) -> object:
+            assert method == "session/prompt"
+            assert params is not None
+            await asyncio.sleep(0.05)
+            return {"stopReason": "end_turn"}
+
+        client._request = delayed_request  # type: ignore[method-assign]
+
+        assert await client.prompt("session-1", "Review") == ("end_turn", "")
+
+    asyncio.run(scenario())
+
+
+def test_adapter_keeps_a_turn_alive_past_the_short_operation_budget(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[_FakeAcpClient] = []
+
+        def factory(launch: DshLaunch) -> _FakeAcpClient:
+            client = _FakeAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=0.01,
+            turn_timeout_seconds=0.2,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        task = TaskPacket(
+            title="Long review",
+            prompt="Keep working beyond the operation budget.",
+            acceptance_criteria=("Return a result",),
+            role="reviewer",
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest("conversation-1", "execution-1", task, context)
+        )
+
+        await asyncio.sleep(0.05)
+        still_running = await adapter.snapshot(
+            AdapterSessionRequest(
+                "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+            )
+        )
+        assert still_running.execution_state == "running"
+
+        clients[0].responses.put_nowait(("end_turn", "Long review complete."))
+        for _ in range(20):
+            completed = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+                )
+            )
+            if completed.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+        assert completed.execution_state == "succeeded"
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("cancel_fails", [False, True])
+def test_adapter_closes_provider_process_after_turn_timeout(
+    tmp_path: Path, cancel_fails: bool
+) -> None:
+    class TimeoutAcpClient(_FakeAcpClient):
+        async def cancel(self, session_id: str) -> None:
+            self.cancelled.append(session_id)
+            if cancel_fails:
+                raise RuntimeError("ACP cancel failed")
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[TimeoutAcpClient] = []
+
+        def factory(launch: DshLaunch) -> TimeoutAcpClient:
+            client = TimeoutAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=0.1,
+            turn_timeout_seconds=0.01,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        task = TaskPacket(
+            title="Timeout review",
+            prompt="Keep working until the local deadline.",
+            acceptance_criteria=("Stop at the deadline",),
+            role="reviewer",
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest("conversation-1", "execution-1", task, context)
+        )
+
+        for _ in range(50):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0.005)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "RECOVERY_REQUIRED"
+        assert clients[0].cancelled == ["dsh-session-1"]
+        assert clients[0].closed is True
+
+    asyncio.run(scenario())
+
+
 def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
     tmp_path: Path,
 ) -> None:

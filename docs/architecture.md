@@ -25,7 +25,9 @@ metadata. Side-effecting requests use idempotency keys.
 Every execution records requested/effective model, reasoning, transport,
 workspace, session, and context identity. Provider differences appear only in
 the descriptor and explicit capability gaps. Unknown or mismatched critical
-identity fails closed; there is no fallback.
+identity fails closed. Model fallback is never implicit: an adapter may expose
+the user's explicit ordered variants, and Codex may advance only after the
+current variant returns the terminal `QUOTA_PAUSED` classification.
 
 Each runtime can publish a neutral `delegation_priority` from 0 to 100. Higher
 values appear first in `runtime_list` and the localhost UI so the orchestrator
@@ -41,6 +43,14 @@ revisioned atomic replacements; SQLite migrations are additive. Versioned
 runtimes are immutable and selected through an atomic pointer. Conservative
 uninstall removes only byte/identity-matching owned resources and preserves
 user config, state, sessions, and worktrees.
+
+The UI is foreground by default. `ui --background` starts one detached local
+process on a fixed loopback port; `ui --status` identifies whether it is the
+managed process, and `ui --stop` requests graceful shutdown through a random
+control token. The token lives only in a bounded product-owned Local state file,
+the stop endpoint still requires the exact loopback Origin and Host, and the
+file is removed only when its bytes still match the process that published it.
+There is no automatic login/startup entry.
 
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside
