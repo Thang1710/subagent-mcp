@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a10"
+VERSION = "0.1.0a11"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -209,6 +209,7 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "api-token:" not in release
     assert "release-manifest.json" in release
     assert "SHA256SUMS.txt" in release
+    assert 'item.name.endswith((".whl", ".tar.gz"))' in release
 
 
 def test_source_import_is_lightweight_and_typed(tmp_path: Path) -> None:

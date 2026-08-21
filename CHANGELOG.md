@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a11 - 2026-08-21
+
+- Restrict release manifests and checksums to the wheel and source archive so
+  every listed integrity artifact is actually published and verifiable.
+
 ## 0.1.0a10 - 2026-08-21
 
 - Clamp rollback command and verification budgets to the documented 30-second

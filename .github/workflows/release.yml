@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed-off tag, for example v0.1.0a10
+        description: Existing signed-off tag, for example v0.1.0a11
         required: true
         type: string
 
@@ -54,7 +54,14 @@ jobs:
           import re
 
           root = pathlib.Path("dist")
-          packages = sorted((root / "packages").iterdir(), key=lambda item: item.name)
+          packages = sorted(
+              (
+                  item
+                  for item in (root / "packages").iterdir()
+                  if item.is_file() and item.name.endswith((".whl", ".tar.gz"))
+              ),
+              key=lambda item: item.name,
+          )
           project_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
           version_matches = re.findall(r'^version = "([^"]+)"$', project_text, re.MULTILINE)
           if len(version_matches) != 1:
