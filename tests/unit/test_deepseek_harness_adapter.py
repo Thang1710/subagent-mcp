@@ -213,6 +213,13 @@ def test_background_lifecycle_reuses_native_session_and_interrupts(tmp_path: Pat
         assert done.execution_state == "succeeded"
         assert done.result_text == "DeepSeek review complete."
         assert "Return only the final result" in clients[0].prompts[0][1]
+        late_interrupt = await adapter.interrupt(
+            AdapterSessionRequest(
+                "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+            )
+        )
+        assert late_interrupt.execution_state == "succeeded"
+        assert clients[0].cancelled == []
 
         sent = await adapter.send(
             AdapterSendRequest(

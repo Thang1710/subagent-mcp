@@ -12,6 +12,9 @@ All notable changes to Subagent MCP are documented here.
   provider credit/quota exhaustion from ambiguous provider failures, while
   returning only a generic public billing notice and never buying or reloading
   credits.
+- Reconcile a late interrupt with an already completed native DeepSeek turn so
+  the normalized lifecycle records its terminal result instead of leaving a
+  stale running execution.
 
 ## 0.1.0a14 - 2026-08-21
 

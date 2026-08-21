@@ -337,7 +337,9 @@ class DeepSeekHarnessAdapter:
         _require_execution(request, session.snapshot)
         async with session.lock:
             turn = session.turn
-            if turn is None or turn.task.done():
+            if turn is not None and turn.task.done():
+                return session.snapshot
+            if turn is None:
                 raise ServiceError("CAPABILITY_MISSING", "DeepSeek ACP turn is not active")
             turn.interrupted = True
             await asyncio.wait_for(
