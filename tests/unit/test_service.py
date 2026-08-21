@@ -41,6 +41,7 @@ class _QuotaFakeAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
         self.canary_calls = 0
+        self.canary_error_code: str | None = None
         self.quota_calls = 0
         self.quota_error_code: str | None = None
         self.quota_cleanup_confirmed = True
@@ -53,6 +54,17 @@ class _QuotaFakeAdapter(FakeAdapter):
 
     async def runtime_canary(self, request: CanaryRequest) -> CanaryResult:
         self.canary_calls += 1
+        if self.canary_error_code is not None:
+            return CanaryResult(
+                False,
+                request.pair_key,
+                error=AdapterFailure(
+                    self.canary_error_code,
+                    "adapter",
+                    False,
+                    "deterministic canary failure",
+                ),
+            )
         return CanaryResult(
             True,
             request.pair_key,
@@ -268,6 +280,26 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
 
     assert refreshed["quota"]["state"] == "quota_paused"
     assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+
+
+def test_runtime_check_explains_unknown_guarded_canary_failure(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    adapter.canary_error_code = "CAPABILITY_MISSING"
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    refreshed = asyncio.run(service.runtime_check("fake", refresh_quota=True))
+
+    assert refreshed["quota"] == {
+        "state": "unknown",
+        "variants": [
+            {
+                "variant_id": "future-deep",
+                "state": "unknown",
+                "error_code": "CAPABILITY_MISSING",
+            }
+        ],
+    }
 
 
 def test_runtime_check_requires_cleanup_after_ambiguous_quota_probe(

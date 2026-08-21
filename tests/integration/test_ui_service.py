@@ -232,6 +232,52 @@ def test_ui_provider_refresh_reports_unknown_without_backend_details(
     assert "must-not-escape" not in json.dumps(refreshed)
 
 
+def test_ui_provider_refresh_explains_guarded_canary_timeout(tmp_path: Path) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+
+    class TimedOutService:
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "needs_canary",
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [],
+                },
+            )
+
+        async def runtime_check(self, _runtime_id: str, refresh_quota: bool = False):
+            assert refresh_quota is True
+            return {
+                "runtime_id": "fake",
+                "state": "needs_canary",
+                "quota": {
+                    "state": "unknown",
+                    "variants": [
+                        {
+                            "variant_id": "configured",
+                            "state": "unknown",
+                            "error_code": "CAPABILITY_MISSING",
+                        }
+                    ],
+                },
+            }
+
+    refreshed = LocalUiBackend(config=config, service=TimedOutService()).refresh_provider()
+
+    assert refreshed["quota"] == {
+        "state": "unknown",
+        "label": "Unknown",
+        "detail": (
+            "The native harness did not complete the guarded quota check. "
+            "No quota evidence was accepted."
+        ),
+        "reason_code": "CAPABILITY_MISSING",
+    }
+
+
 def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) -> None:
     home = tmp_path / "home"
     backend, config = _configured_backend(home)

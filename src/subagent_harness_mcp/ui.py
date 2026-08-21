@@ -221,6 +221,7 @@ class LocalUiBackend:
     def refresh_provider(self) -> Mapping[str, Any]:
         runtime_ids = _configured_runtime_ids(self._config.load())
         states: list[str] = []
+        error_code: str | None = None
         overage_blocked = True
         for runtime_id in runtime_ids:
             try:
@@ -237,6 +238,16 @@ class LocalUiBackend:
             quota = checked.get("quota") if isinstance(checked, Mapping) else None
             state = quota.get("state") if isinstance(quota, Mapping) else "unknown"
             states.append(state if isinstance(state, str) else "unknown")
+            variants = quota.get("variants") if isinstance(quota, Mapping) else ()
+            if isinstance(variants, Sequence) and not isinstance(
+                variants, (str, bytes, bytearray)
+            ):
+                if any(
+                    isinstance(item, Mapping)
+                    and item.get("error_code") == "CAPABILITY_MISSING"
+                    for item in variants
+                ):
+                    error_code = "CAPABILITY_MISSING"
             overage_blocked = bool(
                 overage_blocked
                 and isinstance(quota, Mapping)
@@ -253,6 +264,7 @@ class LocalUiBackend:
         self._provider_quota = _quota_presentation(
             state,
             overage_blocked=overage_blocked,
+            error_code=error_code,
         )
         return self.snapshot()
 
@@ -954,6 +966,7 @@ def _quota_presentation(
     state: str,
     *,
     overage_blocked: bool = False,
+    error_code: str | None = None,
 ) -> dict[str, Any]:
     labels = {
         "available": "Available · overage blocked",
@@ -975,6 +988,12 @@ def _quota_presentation(
         "label": labels[checked],
         "detail": details[checked],
     }
+    if checked == "unknown" and error_code == "CAPABILITY_MISSING":
+        result["detail"] = (
+            "The native harness did not complete the guarded quota check. "
+            "No quota evidence was accepted."
+        )
+        result["reason_code"] = error_code
     if overage_blocked and checked in {"available", "quota_paused"}:
         result["overage_blocked"] = True
     return result

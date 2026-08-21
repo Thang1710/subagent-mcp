@@ -256,6 +256,7 @@ class SubagentMcpService:
                                 if exc.code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
                                 else "unknown"
                             ),
+                            "error_code": exc.code,
                         }
                     )
                     continue
