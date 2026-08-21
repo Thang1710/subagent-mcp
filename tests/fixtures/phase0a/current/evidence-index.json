@@ -1,0 +1,44 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "fixture_hashes",
+      "fixture_kinds"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "evidence_index",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "fixtures": {
+      "agents-normalized.json": {
+        "kind": "agents_normalized",
+        "sha256": "985d3f9d9376bc2fd456be5a709cf92b66e5383971012ab78fcb444dfca288c4"
+      },
+      "auth-status.json": {
+        "kind": "auth_status",
+        "sha256": "3b1021a03cfb119d916e3499ce6886d2207bf0b13c68ff5e4da19aaf873ccff3"
+      },
+      "context-attestation.json": {
+        "kind": "context_attestation",
+        "sha256": "6316d2243a361a0337f41c63d62ea938f8bf68170d2517f1304a3b4ac57f4842"
+      },
+      "model-outcomes.json": {
+        "kind": "model_outcomes",
+        "sha256": "ba5b457a740e6b6fed0065532fe71b48e9e8cabeb37df82a7a1e9f632f0ca49b"
+      },
+      "stop-failure-contract.json": {
+        "kind": "stop_failure_contract",
+        "sha256": "bf303890e57e3830346f813d464187b774f82c469a14c59f3b5c4f1f1e086797"
+      },
+      "strict-mcp-control.json": {
+        "kind": "strict_mcp_control",
+        "sha256": "ca9c600d7d0fb83a053ab72c38b4b532c3c3ed2678c09b1ff2984339a79fddec"
+      }
+    }
+  },
+  "source": {
+    "kind": "committed_fixture_set",
+    "sha256": "133d357a90330f84441373064229aee9e827a144ca7d291df2d965a834402cbb"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "auth.api_provider",
+      "auth.auth_method",
+      "auth.logged_in"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "auth_status",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "auth": {
+      "api_provider": "firstParty",
+      "auth_method": "claude.ai",
+      "logged_in": true
+    }
+  },
+  "source": {
+    "kind": "auth_status_json",
+    "sha256": "988f6701f039e3635359f8bfc9ac0a960d3a470f1e90f77806e18bd811224115"
+  }
+}

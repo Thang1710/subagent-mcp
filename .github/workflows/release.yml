@@ -1,0 +1,96 @@
+name: publish-preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing signed-off tag, for example v0.1.0a1
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      UV_PROJECT_ENVIRONMENT: .preview/runtime/release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          enable-cache: true
+      - name: Require the exact version tag
+        shell: pwsh
+        run: |
+          $version = python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          if ("v$version" -ne "${{ inputs.tag }}") { throw "tag does not match project version" }
+          $tags = @(git tag --points-at HEAD)
+          if ($tags -notcontains "${{ inputs.tag }}") { throw "checkout is not the requested tag" }
+      - name: Sync, build, and verify deterministic release inputs
+        shell: pwsh
+        run: |
+          uv sync --frozen --group dev
+          uv build --out-dir dist/packages
+          $env:SUBAGENT_MCP_TEST_DIST_DIR = (Resolve-Path dist/packages).Path
+          uv run --frozen pytest -p no:cacheprovider -q -m "not real_git_worktree"
+      - name: Write reproducible manifest and checksums
+        shell: pwsh
+        run: |
+          @'
+          import hashlib
+          import json
+          import pathlib
+          import tomllib
+
+          root = pathlib.Path("dist")
+          packages = sorted((root / "packages").iterdir(), key=lambda item: item.name)
+          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          records = [
+              {"file": item.name, "sha256": hashlib.sha256(item.read_bytes()).hexdigest(), "size": item.stat().st_size}
+              for item in packages
+          ]
+          manifest = {"schema_version": 1, "distribution": "subagent-harness-mcp", "version": version, "artifacts": records}
+          manifest_path = root / "release-manifest.json"
+          manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
+          checksum_records = records + [{"file": manifest_path.name, "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()}]
+          (root / "SHA256SUMS.txt").write_text("".join(f"{item['sha256']}  {item['file']}\n" for item in checksum_records), encoding="utf-8", newline="\n")
+          '@ | uv run --frozen python -
+      - uses: actions/upload-artifact@v4
+        with:
+          name: subagent-harness-mcp-${{ inputs.tag }}
+          path: dist/**
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: subagent-harness-mcp-${{ inputs.tag }}
+          path: dist
+      - name: Publish with PyPI trusted publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/packages/
+      - name: Publish matching GitHub prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: >-
+          gh release create "$RELEASE_TAG"
+          dist/packages/* dist/release-manifest.json dist/SHA256SUMS.txt
+          --verify-tag --prerelease --generate-notes --title "Subagent MCP $RELEASE_TAG"

@@ -1,0 +1,38 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "additive_state",
+      "atomic_pointer",
+      "crash_recovery",
+      "health_rollback",
+      "locked_runtime",
+      "managed_restart",
+      "process_identity",
+      "visible_restart"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "phase0b_update_simulation",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "checks": {
+      "additive_state_preserved": true,
+      "atomic_pointer_switch": true,
+      "corrupt_state_quarantined": true,
+      "crash_stage_recovered": true,
+      "exact_pointer_rollback": true,
+      "health_failure_preserved_current": true,
+      "locked_runtime_readable": true,
+      "managed_restart_idempotent": true,
+      "pid_reuse_not_targeted": true,
+      "visible_public_roster_only": true
+    },
+    "restart_rollback": "pass",
+    "sdk_version": "0.2.142"
+  },
+  "source": {
+    "kind": "deterministic_tmp_path_simulation",
+    "sha256": "730b1edb2d3e62175bb9fb2c73168536cf5adee41abf9fdab03c332075045570"
+  }
+}

@@ -1,0 +1,78 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://subagent-harness-mcp.dev/schemas/tools-v1.json",
+  "schema_version": 1,
+  "server": {
+    "name": "Subagent MCP",
+    "transport": "stdio",
+    "content": "text-only Markdown followed by one final subagent-mcp-meta JSON fence"
+  },
+  "tools": {
+    "runtime_list": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "purpose": "List runtime capabilities, health, policy, and circuit state"
+    },
+    "runtime_check": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "purpose": "Run no-model compatibility and authentication checks"
+    },
+    "runtime_configure": {
+      "approval": "prompt",
+      "request_id_required": true,
+      "purpose": "Apply a revisioned runtime configuration patch"
+    },
+    "runtime_canary": {
+      "approval": "prompt",
+      "request_id_required": true,
+      "purpose": "Run the separately gated live adapter canary"
+    },
+    "project_scan": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "purpose": "Scan project executable content and hashes"
+    },
+    "project_trust": {
+      "approval": "prompt",
+      "request_id_required": true,
+      "purpose": "Trust or revoke exact project path and hash entries"
+    },
+    "agent_spawn": {
+      "approval": "automatic",
+      "request_id_required": true,
+      "purpose": "Create one conversation and its first execution"
+    },
+    "agent_status": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "purpose": "Read normalized conversation status and events"
+    },
+    "agent_send": {
+      "approval": "automatic",
+      "request_id_required": true,
+      "purpose": "Continue one native session with a new execution"
+    },
+    "agent_wait": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "purpose": "Wait boundedly for one to eight targets"
+    },
+    "agent_interrupt": {
+      "approval": "automatic",
+      "request_id_required": true,
+      "purpose": "Interrupt the current native-harness execution"
+    },
+    "agent_close": {
+      "approval": "automatic",
+      "request_id_required": true,
+      "purpose": "Close the logical conversation without deleting native state"
+    },
+    "workspace_release": {
+      "approval": "prompt",
+      "request_id_required": true,
+      "purpose": "Release an owned workspace after safety checks"
+    }
+  },
+  "type": "object"
+}

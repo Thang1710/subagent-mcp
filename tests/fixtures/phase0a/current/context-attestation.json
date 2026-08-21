@@ -1,0 +1,84 @@
+{
+  "coverage": {
+    "missing": [
+      "additional_directories",
+      "agents",
+      "auto_compaction_window",
+      "auto_memory_mode",
+      "background_environment_equivalence",
+      "bridge_hooks",
+      "claude_rule_sources",
+      "cleanup_period",
+      "content_hashes",
+      "inherited_hooks",
+      "nested_agent_cap",
+      "nested_agent_depth",
+      "setting_sources",
+      "skills",
+      "system_prompt_append",
+      "system_prompt_preset"
+    ],
+    "observed": [
+      "capabilities",
+      "cost_metadata_present",
+      "cwd_present",
+      "final_result",
+      "forbidden_surface_presence",
+      "mcp_servers",
+      "model",
+      "permission_mode",
+      "plugin_disable_effective",
+      "rate_limit_advisory",
+      "relative_plugin_delta",
+      "tool_count",
+      "usage_credits_disabled_inferred"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "context_attestation",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "final_result": {
+      "is_error": false,
+      "stop_reason": "end_turn",
+      "subtype": "success"
+    },
+    "init": {
+      "capabilities": [
+        "interrupt_cancel_queued_v1",
+        "interrupt_receipt_v1",
+        "msg_lifecycle_v1"
+      ],
+      "cwd_present": true,
+      "forbidden_surface_presence": {
+        "agent_bridge": false,
+        "codex": false,
+        "subagent_mcp": false
+      },
+      "mcp_servers": [],
+      "model": "claude-sonnet-5",
+      "permission_mode": "default",
+      "tool_count": 31
+    },
+    "cost_metadata_present": true,
+    "plugin_disable_effective": "BLOCKED",
+    "rate_limit_advisory": [
+      {
+        "error_code": null,
+        "is_using_overage": false,
+        "overage_disabled_reason": "out_of_credits",
+        "overage_status": "rejected",
+        "rate_limit_type": "five_hour",
+        "status": "allowed",
+        "unknown_keys": [],
+        "usage_credits_disabled_inferred": true,
+        "utilization": null
+      }
+    ],
+    "relative_plugin_delta": null
+  },
+  "source": {
+    "kind": "managed_proxy",
+    "sha256": "87f227115db91487b8e3c649b1df796f894a9c3a2acdf8e26d650d2a40ffdb7f"
+  }
+}

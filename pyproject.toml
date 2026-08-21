@@ -1,0 +1,73 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "subagent-harness-mcp"
+version = "0.1.0a1"
+description = "Subagent MCP for orchestrating native external coding-agent harnesses."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["mcp", "subagent", "coding-agent", "orchestration"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
+dependencies = [
+    "mcp>=2.0.0,<2.1",
+    "claude-agent-sdk==0.2.142",
+]
+
+[project.scripts]
+subagent-harness-mcp = "subagent_harness_mcp.cli:main"
+
+[dependency-groups]
+dev = ["pytest>=8,<9"]
+phase0b = [
+    "claude-agent-sdk==0.2.142",
+]
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/subagent_harness_mcp"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"schemas" = "subagent_harness_mcp/schemas"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/subagent_harness_mcp",
+    "/README.md",
+    "/LICENSE",
+    "/SECURITY.md",
+    "/CHANGELOG.md",
+    "/CONTRIBUTING.md",
+    "/CODE_OF_CONDUCT.md",
+    "/docs/architecture.md",
+    "/docs/adapter-authoring.md",
+    "/docs/threat-model.md",
+    "/schemas",
+    "/pyproject.toml",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+pythonpath = ["."]
+markers = [
+    "real_git_worktree: creates and removes only pytest-temporary Git worktrees",
+]

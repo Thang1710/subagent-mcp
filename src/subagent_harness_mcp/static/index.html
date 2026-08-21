@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en" data-state="boot">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta name="color-scheme" content="dark light">
+<title>Subagent MCP — Settings</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"><b>S</b></span>
+    <span class="brand-text">
+      <span class="brand-name">Subagent MCP</span>
+      <span class="brand-dist" id="dist-line">subagent-harness-mcp</span>
+    </span>
+  </div>
+  <p class="badge badge-preview" id="channel-badge">Windows Managed Preview</p>
+  <div class="topbar-end">
+    <p class="pill" id="health-pill" data-tone="unknown">
+      <span class="dot" aria-hidden="true"></span>
+      <span id="health-pill-text">Checking…</span>
+    </p>
+    <button type="button" id="refresh" class="btn btn-quiet">
+      <span aria-hidden="true">↻</span> Refresh
+    </button>
+  </div>
+</header>
+
+<p class="live" id="live" role="status" aria-live="polite"></p>
+
+<main id="main" tabindex="-1">
+
+  <section class="panel panel-wide" id="banner-panel" hidden aria-labelledby="banner-title">
+    <h2 class="sr-only" id="banner-title">Attention</h2>
+    <div id="banners" class="banners"></div>
+  </section>
+
+  <section class="panel" aria-labelledby="health-title" id="health-panel" aria-busy="true">
+    <div class="panel-head">
+      <h2 id="health-title">Runtime health</h2>
+      <span class="stamp" id="health-stamp"></span>
+    </div>
+    <div id="health-body" class="skeleton-block" aria-hidden="true"></div>
+    <div id="health-content" hidden>
+      <ul class="checklist" id="health-messages"></ul>
+      <h3 class="subhead">Circuits</h3>
+      <ul class="circuits" id="circuits"></ul>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="status-title">
+    <div class="panel-head"><h2 id="status-title">Quota &amp; updates</h2></div>
+    <dl class="kv" id="status-kv">
+      <div class="kv-row"><dt>Quota</dt><dd id="quota-state">—</dd></div>
+      <div class="kv-row"><dt>Update</dt><dd id="update-state">—</dd></div>
+      <div class="kv-row"><dt>Version</dt><dd id="version-state">—</dd></div>
+    </dl>
+    <p class="note" id="status-note" hidden></p>
+  </section>
+
+  <section class="panel panel-wide" aria-labelledby="runtimes-title" id="runtimes-panel" aria-busy="true">
+    <div class="panel-head">
+      <h2 id="runtimes-title">Runtimes &amp; settings</h2>
+      <span class="stamp" id="config-revision"></span>
+    </div>
+    <p class="hint">Model, reasoning, and context options are published by each adapter. Saving writes the shared configuration used by the MCP server and CLI.</p>
+    <div id="runtimes" class="runtimes"></div>
+    <p class="empty" id="runtimes-empty" hidden>No runtimes are registered.</p>
+  </section>
+
+  <section class="panel panel-wide" aria-labelledby="trust-title">
+    <div class="panel-head"><h2 id="trust-title">Project trust</h2></div>
+    <p class="hint">Trusted projects may run their local command hooks and imports. Trust is bound to the canonical path and content hash.</p>
+    <ul class="trust" id="trust-list"></ul>
+    <p class="empty" id="trust-empty" hidden>No projects have been scanned yet.</p>
+    <div class="row-end">
+      <p class="err" id="trust-error" hidden></p>
+      <button type="button" class="btn btn-primary" id="trust-save" disabled>Save trust</button>
+    </div>
+  </section>
+
+  <section class="panel panel-wide" aria-labelledby="activity-title" id="activity-panel" aria-busy="true">
+    <div class="panel-head">
+      <h2 id="activity-title">Current &amp; recent activity</h2>
+      <span class="stamp">Read-only</span>
+    </div>
+    <ol class="activity" id="activity"></ol>
+    <p class="empty" id="activity-empty" hidden>No agent activity recorded yet.</p>
+    <p class="hint">Prompts, transcripts, and raw events are never shown here.</p>
+  </section>
+
+</main>
+
+<footer class="foot">
+  <p>Local loopback interface. Settings and status only — no chat, no transcripts, no lifecycle controls.</p>
+</footer>
+
+<div class="veil" id="fatal" hidden>
+  <div class="veil-card" role="alertdialog" aria-labelledby="fatal-title" aria-describedby="fatal-text">
+    <h2 id="fatal-title">Session unavailable</h2>
+    <p id="fatal-text"></p>
+    <p class="hint">Re-run <code>subagent-harness-mcp ui</code> to open a fresh authorized session.</p>
+  </div>
+</div>
+
+<template id="tpl-runtime">
+  <article class="card" data-runtime>
+    <header class="card-head">
+      <div class="card-id">
+        <h3 data-name></h3>
+        <p class="mono" data-transport></p>
+      </div>
+      <p class="pill" data-status><span class="dot" aria-hidden="true"></span><span data-status-text></span></p>
+    </header>
+    <p class="detail" data-status-detail hidden></p>
+    <ul class="caps" data-caps></ul>
+    <form data-form novalidate>
+      <div class="switch-row">
+        <label class="switch"><input type="checkbox" data-enabled><span data-enabled-label>Enabled</span></label>
+      </div>
+      <div data-groups class="groups"></div>
+      <div class="row-end">
+        <p class="err" data-error hidden></p>
+        <p class="ok" data-saved hidden>Saved</p>
+        <button type="submit" class="btn btn-primary" data-save disabled>Save changes</button>
+      </div>
+    </form>
+  </article>
+</template>
+
+<template id="tpl-group">
+  <fieldset class="group" data-group>
+    <legend data-legend></legend>
+    <div class="fields" data-fields></div>
+  </fieldset>
+</template>
+
+<template id="tpl-field">
+  <div class="field" data-field>
+    <label data-label></label>
+    <p class="help" data-help hidden></p>
+  </div>
+</template>
+</body>
+</html>

@@ -1,0 +1,9 @@
+.venv/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+.phase0a/
+.phase0b/
+.preview/
+artifacts/phase0a/raw/
+.worktrees/

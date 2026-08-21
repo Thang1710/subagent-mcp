@@ -1,0 +1,36 @@
+{
+  "coverage": {
+    "missing": [
+      "live_stop_failure_observation"
+    ],
+    "observed": [
+      "documented_categories",
+      "non_hook_transport_conditions",
+      "unknown_value_policy"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "stop_failure_contract",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "documented_categories": [
+      "rate_limit",
+      "authentication_failed",
+      "oauth_org_not_allowed",
+      "billing_error",
+      "invalid_request",
+      "server_error",
+      "max_output_tokens",
+      "unknown"
+    ],
+    "non_hook_transport_conditions": [
+      "model_not_found",
+      "overloaded"
+    ],
+    "unknown_value_policy": "map_to_unknown_with_bounded_redacted_safe_raw_category"
+  },
+  "source": {
+    "kind": "subagent-harness-mcp_contract_source",
+    "sha256": "f7978d0f315cecff422fbdab54a4d8df140380f81cf801dd4486c47995fed1d9"
+  }
+}

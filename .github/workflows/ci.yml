@@ -1,0 +1,43 @@
+name: deterministic-ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  safe-suite:
+    name: Windows Python ${{ matrix.python }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.10", "3.12"]
+    env:
+      UV_PROJECT_ENVIRONMENT: .preview/runtime/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.11.14"
+          enable-cache: true
+      - name: Sync locked deterministic environment
+        run: uv sync --frozen --group dev
+      - name: Build preview artifacts
+        run: uv build --out-dir .preview/dist
+      - name: Run safe suite from built artifacts
+        shell: pwsh
+        run: |
+          $env:SUBAGENT_MCP_TEST_DIST_DIR = (Resolve-Path .preview/dist).Path
+          uv run --frozen pytest -p no:cacheprovider -q -m "not real_git_worktree"
+

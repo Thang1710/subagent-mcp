@@ -1,0 +1,134 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "classification",
+      "cost_metadata_present",
+      "observed_model",
+      "rate_limits",
+      "requested_model",
+      "result_is_error",
+      "result_subtype",
+      "usage_credits_disabled_inferred"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "model_outcomes",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "outcomes": [
+      {
+        "classification": "success",
+        "cost_metadata_present": true,
+        "observed_model": "claude-opus-4-8",
+        "rate_limits": [
+          {
+            "error_code": null,
+            "is_using_overage": false,
+            "overage_disabled_reason": "out_of_credits",
+            "overage_status": "rejected",
+            "status": "allowed",
+            "usage_credits_disabled_inferred": true
+          }
+        ],
+        "requested_model": "claude-opus-4-8",
+        "result_is_error": false,
+        "result_subtype": "success"
+      },
+      {
+        "classification": "success",
+        "cost_metadata_present": true,
+        "observed_model": "claude-opus-5",
+        "rate_limits": [
+          {
+            "error_code": null,
+            "is_using_overage": false,
+            "overage_disabled_reason": "out_of_credits",
+            "overage_status": "rejected",
+            "status": "allowed",
+            "usage_credits_disabled_inferred": true
+          }
+        ],
+        "requested_model": "claude-opus-5",
+        "result_is_error": false,
+        "result_subtype": "success"
+      },
+      {
+        "classification": "success",
+        "cost_metadata_present": true,
+        "observed_model": "claude-sonnet-5",
+        "rate_limits": [
+          {
+            "error_code": null,
+            "is_using_overage": false,
+            "overage_disabled_reason": null,
+            "overage_status": null,
+            "status": "allowed_warning",
+            "usage_credits_disabled_inferred": false
+          }
+        ],
+        "requested_model": "claude-sonnet-5",
+        "result_is_error": false,
+        "result_subtype": "success"
+      },
+      {
+        "classification": "success",
+        "cost_metadata_present": true,
+        "observed_model": "claude-sonnet-5",
+        "rate_limits": [
+          {
+            "error_code": null,
+            "is_using_overage": false,
+            "overage_disabled_reason": "out_of_credits",
+            "overage_status": "rejected",
+            "status": "allowed",
+            "usage_credits_disabled_inferred": true
+          }
+        ],
+        "requested_model": "claude-sonnet-5",
+        "result_is_error": false,
+        "result_subtype": "success"
+      },
+      {
+        "classification": "terminal_credits_required",
+        "cost_metadata_present": true,
+        "observed_model": "claude-fable-5",
+        "rate_limits": [
+          {
+            "error_code": "credits_required",
+            "is_using_overage": false,
+            "overage_disabled_reason": "out_of_credits",
+            "overage_status": null,
+            "status": "rejected",
+            "usage_credits_disabled_inferred": false
+          }
+        ],
+        "requested_model": "fable",
+        "result_is_error": true,
+        "result_subtype": "success"
+      },
+      {
+        "classification": "success",
+        "cost_metadata_present": true,
+        "observed_model": "claude-sonnet-5",
+        "rate_limits": [
+          {
+            "error_code": null,
+            "is_using_overage": false,
+            "overage_disabled_reason": null,
+            "overage_status": null,
+            "status": "allowed_warning",
+            "usage_credits_disabled_inferred": false
+          }
+        ],
+        "requested_model": "sonnet",
+        "result_is_error": false,
+        "result_subtype": "success"
+      }
+    ]
+  },
+  "source": {
+    "kind": "managed_model_stream_set",
+    "sha256": "fdb33366806e1b00f13baa48398d97c9e77bc91c6d1949581e448724ff4258cf"
+  }
+}

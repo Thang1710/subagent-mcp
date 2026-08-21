@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.subagent-mcp.dev/config-v1.json",
+  "title": "Subagent MCP config v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "revision",
+    "runtimes"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": 1
+    },
+    "revision": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "runtimes": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 128
+      },
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "enabled",
+          "selection_mode",
+          "fallback",
+          "variants"
+        ],
+        "properties": {
+          "enabled": {
+            "type": "boolean"
+          },
+          "selection_mode": {
+            "enum": [
+              "fixed",
+              "lead-selects"
+            ]
+          },
+          "fallback": {
+            "const": false
+          },
+          "variants": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "model",
+                "reasoning"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "model": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "reasoning": {
+                  "type": "object"
+                }
+              },
+              "additionalProperties": true
+            }
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "selection_mode": {
+                  "const": "fixed"
+                }
+              },
+              "required": [
+                "selection_mode"
+              ]
+            },
+            "then": {
+              "properties": {
+                "variants": {
+                  "minItems": 1,
+                  "maxItems": 1
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "enabled": {
+                  "const": true
+                }
+              },
+              "required": [
+                "enabled"
+              ]
+            },
+            "then": {
+              "properties": {
+                "variants": {
+                  "minItems": 1
+                }
+              }
+            }
+          }
+        ],
+        "additionalProperties": true
+      }
+    }
+  },
+  "additionalProperties": true
+}

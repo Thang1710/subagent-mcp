@@ -1,0 +1,31 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "agents"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "agents_normalized",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "agents": [
+      {
+        "cwd_present": true,
+        "id_present": false,
+        "kind": "interactive",
+        "name_present": true,
+        "pid_present": true,
+        "session_id_present": true,
+        "started_at_present": true,
+        "state": null,
+        "status": null,
+        "waiting_for_present": false
+      }
+    ]
+  },
+  "source": {
+    "kind": "agents_json",
+    "sha256": "6639a4b8bcecb2916c887157a5817a37d90cc165fbf4e6f7963942ffcb8fd633"
+  }
+}

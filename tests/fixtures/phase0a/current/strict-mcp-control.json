@@ -1,0 +1,33 @@
+{
+  "coverage": {
+    "missing": [],
+    "observed": [
+      "control_exit_success",
+      "control_marker_spawned",
+      "declared_server_count",
+      "source_hashes",
+      "strict_exit_success",
+      "strict_marker_spawned"
+    ]
+  },
+  "fixture_schema_version": 1,
+  "kind": "strict_mcp_control",
+  "observed_cli_version": "2.1.224 (Claude Code)",
+  "payload": {
+    "control_exit_success": true,
+    "control_marker_spawned": true,
+    "declared_server_count": 0,
+    "source_hashes": [
+      "13a41fd3b0bb3559487076881b343fe3effc61592cbeffd504c9a3fa24be89f2",
+      "af03b26b01c67cb540b656a6d51fde40c23dc702ca1469df1f18822d544fb89c",
+      "b8b2a6eaf44828b50ec85034bd1fb14eec60326c9a7187666f3b69e12901d0d9",
+      "d8e397af03b5b032f21d0aa967086f0c78b33c87b76f2e9898ae0a144df7de02"
+    ],
+    "strict_exit_success": true,
+    "strict_marker_spawned": false
+  },
+  "source": {
+    "kind": "subagent-harness-mcp_marker_artifact_set",
+    "sha256": "651d9ac59c7c06828e3408723098865ad91d23dbe2def46d959b536c1754ffc8"
+  }
+}
