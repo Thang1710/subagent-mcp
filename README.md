@@ -77,6 +77,11 @@ Codex decides what to delegate, observes the result, and keeps the final
 judgment. Underneath, each adapter maps the same lifecycle to its native
 harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
 
+To keep Codex supervision lean, leave lifecycle responses in their default
+`compact` mode and use one `agent_wait` call with its five-minute default. The
+MCP waits locally and wakes Codex only for completion, required input, or a
+timeout; request `full` mode only when diagnosing a problem.
+
 ## How it fits together
 
 ```mermaid
