@@ -16,7 +16,7 @@ from subagent_harness_mcp.contracts import (
     AgentStatus,
     ServiceError,
 )
-from subagent_harness_mcp.server import create_server
+from subagent_harness_mcp.server import create_default_service, create_server
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -49,6 +49,18 @@ SIDE_EFFECTING_TOOL_NAMES = {
 
 def _run(awaitable):
     return asyncio.run(awaitable)
+
+
+def test_default_service_publishes_only_real_runtime_adapters(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SUBAGENT_MCP_HOME", str(tmp_path / "home"))
+    service = create_default_service()
+
+    runtime_ids = {item["runtime_id"] for item in _run(service.runtime_list())}
+
+    assert runtime_ids == {"claude-code", "deepseek-harness"}
 
 
 def _metadata(result: CallToolResult) -> dict[str, Any]:

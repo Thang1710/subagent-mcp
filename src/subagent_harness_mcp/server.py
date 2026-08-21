@@ -343,8 +343,8 @@ def create_server(service: object) -> MCPServer:
 def create_default_service() -> object:
     """Create the one shared service owned by a stdio server process."""
 
-    from .adapters.fake import FakeAdapter
     from .adapters.claude_code import ClaudeCodeAdapter
+    from .adapters.deepseek_harness import DeepSeekHarnessAdapter
     from .adapters.registry import AdapterRegistry
     from .config import ConfigStore
     from .paths import resolve_paths
@@ -352,7 +352,9 @@ def create_default_service() -> object:
     from .store import StateStore
 
     paths = resolve_paths()
-    registry = AdapterRegistry(builtin_factories=(FakeAdapter, ClaudeCodeAdapter))
+    registry = AdapterRegistry(
+        builtin_factories=(ClaudeCodeAdapter, DeepSeekHarnessAdapter)
+    )
     registry.discover()
     return SubagentMcpService(
         config=ConfigStore(paths),

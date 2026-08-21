@@ -120,6 +120,7 @@ def _service(
             "runtimes": {
                 "fake": {
                     "enabled": True,
+                    "delegation_priority": 73,
                     "selection_mode": "lead-selects",
                     "fallback": False,
                     "variants": [
@@ -170,6 +171,15 @@ def _spawn_request(
         transport="managed-sdk",
         permissions=("repo_read", "workspace_write") if write else ("repo_read",),
     )
+
+
+def test_runtime_list_publishes_external_delegation_priority(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, FakeHarness())
+
+    runtimes = asyncio.run(service.runtime_list())
+
+    assert runtimes[0]["runtime_id"] == "fake"
+    assert runtimes[0]["delegation_priority"] == 73
 
 
 def test_runtime_check_refreshes_ready_quota_only_when_explicit(tmp_path: Path) -> None:
@@ -238,7 +248,7 @@ def test_runtime_check_pauses_ready_circuit_on_unsafe_quota(tmp_path: Path) -> N
     assert adapter.quota_calls == 1
 
 
-def test_runtime_check_pauses_ready_circuit_when_quota_evidence_is_missing(
+def test_runtime_check_gates_ready_circuit_without_claiming_quota_is_exhausted(
     tmp_path: Path,
 ) -> None:
     harness = FakeHarness()
@@ -261,11 +271,11 @@ def test_runtime_check_pauses_ready_circuit_when_quota_evidence_is_missing(
     refreshed = asyncio.run(run())
 
     assert refreshed["quota"] == {
-        "state": "quota_paused",
+        "state": "unknown",
         "variants": [
             {
                 "variant_id": "future-deep",
-                "state": "quota_paused",
+                "state": "unknown",
                 "error_code": "CAPABILITY_MISSING",
             }
         ],

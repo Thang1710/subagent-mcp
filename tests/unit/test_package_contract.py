@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a13"
+VERSION = "0.1.0a14"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -164,6 +164,7 @@ def test_preview_directory_is_ignored_exactly_once() -> None:
 
 def test_public_documents_use_display_and_distribution_identities() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_flat = " ".join(readme.split())
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     license_text = (ROOT / "LICENSE").read_text(encoding="utf-8")
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
@@ -171,6 +172,13 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert readme.startswith("# Subagent MCP")
     assert DIST_NAME in readme
     assert "```mermaid" in readme
+    assert "**Claude Code — Ready.**" in readme
+    assert "**DeepSeek Harness — In development.**" in readme
+    assert "fail-closed" not in readme
+    assert "subscription-only policy before starting work" not in readme_flat
+    assert "no provider task starts" not in readme_flat
+    assert "before accepting its output" in readme_flat
+    assert "can consume included subscription quota" in readme_flat
     assert VERSION in changelog
     assert "MIT License" in license_text
     assert "usage credits" in security.lower()

@@ -254,11 +254,14 @@ def test_ui_provider_refresh_explains_no_model_preflight_gap(tmp_path: Path) -> 
                 "runtime_id": "fake",
                 "state": "needs_canary",
                 "quota": {
-                    "state": "unknown",
+                    # Older backends could misclassify missing evidence as a
+                    # quota pause. The UI must not tell users their quota is
+                    # exhausted when the reason code says otherwise.
+                    "state": "quota_paused",
                     "variants": [
                         {
                             "variant_id": "configured",
-                            "state": "unknown",
+                            "state": "quota_paused",
                             "error_code": "CAPABILITY_MISSING",
                         }
                     ],
@@ -269,10 +272,10 @@ def test_ui_provider_refresh_explains_no_model_preflight_gap(tmp_path: Path) -> 
 
     assert refreshed["quota"] == {
         "state": "unknown",
-        "label": "Unknown",
+        "label": "Safety check unavailable",
         "detail": (
-            "The native harness did not expose quota evidence without starting "
-            "a model. Refresh started no provider task."
+            "Your provider quota is not known to be exhausted. The native harness "
+            "did not expose no-overage evidence, so Refresh started no provider task."
         ),
         "reason_code": "CAPABILITY_MISSING",
     }
@@ -368,7 +371,7 @@ def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) ->
     assert os.environ.get("SUBAGENT_MCP_HOME") != str(home.resolve())
 
 
-def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
+def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -393,12 +396,13 @@ def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
     by_id = {runtime["id"]: runtime for runtime in fresh["runtimes"]}
 
     assert fresh["revision"] == 0
-    assert set(by_id) == {"claude-code"}
+    assert set(by_id) == {"claude-code", "deepseek-harness"}
     assert fresh["health"]["state"] == "setup_required"
     assert {
         item["label"]: item["state"] for item in fresh["health"]["messages"]
     } == {
         "Claude sub-agent": "not_configured",
+        "DeepSeek Harness": "not_configured",
     }
     claude = by_id["claude-code"]
     assert claude["manifest"]["runtime_id"] == "claude-code"
@@ -410,12 +414,32 @@ def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
     assert claude["enabledLabel"] == "Available to Codex"
     assert "delegate" in claude["enabledHelp"].lower()
 
+    deepseek = by_id["deepseek-harness"]
+    assert deepseek["manifest"]["runtime_id"] == "deepseek-harness"
+    assert deepseek["status"]["state"] == "not_configured"
+    assert deepseek["enabled"] is False
+    assert deepseek["locked"] is False
+    assert deepseek["subtitle"] == "External provider model · DeepSeek Harness native harness"
+    deepseek_fields = {
+        field["id"]: field
+        for group in deepseek["groups"]
+        for field in group["fields"]
+    }
+    assert set(deepseek_fields) == {"delegation_priority", "variant.0.model"}
+    assert deepseek_fields["delegation_priority"]["value"] == 0
+    assert deepseek_fields["variant.0.model"]["kind"] == "model"
+    assert deepseek_fields["variant.0.model"]["placeholder"] == (
+        "provider-name::model-id"
+    )
+    assert "provider::model" in deepseek_fields["variant.0.model"]["help"]
+
     fields = {
         field["id"]: field
         for group in claude["groups"]
         for field in group["fields"]
     }
     assert set(fields) == {
+        "delegation_priority",
         "variant.0.model",
         "variant.0.reasoning.effort",
     }
@@ -452,6 +476,7 @@ def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
                 "options": {
                     "variant.0.model": model,
                     "variant.0.reasoning.effort": reasoning["effort"],
+                    "delegation_priority": 50,
                 },
             }
         }
@@ -474,6 +499,7 @@ def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
     }
     assert updated["revision"] == 1
     assert updated_claude["enabled"] is True
+    assert updated_fields["delegation_priority"]["value"] == 50
     assert updated_fields["variant.0.model"]["value"] == model
     assert updated_fields["variant.0.reasoning.effort"]["value"] == "xhigh"
 
@@ -485,6 +511,7 @@ def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
     ).load()
     assert persisted["runtimes"]["claude-code"] == {
         "enabled": True,
+        "delegation_priority": 50,
         "fallback": False,
         "selection_mode": "fixed",
         "transport": "managed-sdk",

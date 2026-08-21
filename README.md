@@ -2,30 +2,33 @@
 
 <!-- mcp-name: io.github.Thang1710/subagent-mcp -->
 
-Most agent setups ask one model inside one harness to plan, implement, and
-review the same work. That can leave the same assumptions in every role —
-closer to grading your own homework than getting an independent review.
+One agent that plans, implements, and reviews the same work is also grading its
+own assumptions. Subagent MCP keeps Codex as the main agent and orchestrator,
+then lets it delegate bounded work to external agent runtimes. Each runtime is
+an independent model paired with its native harness, so implementation and
+review can come from a different model, context, and set of assumptions.
 
-Subagent MCP lets Codex remain the main agent and orchestrator while delegating
-work to external agent runtimes. An external agent runtime is a model paired
-with its native harness. Claude with Claude Code, a Cursor-supported model with
-Cursor's harness, and Qwen with its native harness are examples, not hard-coded
-branches: adapters connect each runtime through the same normalized lifecycle.
+Adapters translate each native harness into one normalized lifecycle. The core
+does not hard-code provider roles or model names. These runtimes supplement
+Codex's native subagent pool and can use provider quota under an explicit
+runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
+silently opts into usage credits or paid overage.
 
-These runtimes supplement Codex's native subagent pool. Where a native harness
-supports subscription-backed use, work can draw on that provider's existing
-quota; actual concurrency and capabilities still depend on installed adapters
-and provider limits. Subagent MCP does not enable usage credits or overage, and
-managed provider work fails closed when no-overage evidence or required
-identity, model, workspace, or session data is missing.
+> **Preview:** `0.1.0a14` targets Windows. The local MCP, deterministic adapter,
+> package, localhost UI, and Claude Code native-harness integration are ready.
 
-The project and repository are named **Subagent MCP**. The Python distribution
-and command are **`subagent-harness-mcp`** because the shorter package name was
-already taken.
+### Runtime status
 
-> **Preview:** `0.1.0a13` targets Windows. The local MCP, deterministic adapter,
-> package, and localhost UI are usable. Live Claude Code work remains gated
-> until the exact native-harness and no-overage canary passes.
+- **Claude Code — Ready.** It delegates through the native Claude Code harness,
+  keeps model and reasoning choices provider-native, and verifies subscription
+  OAuth identity plus live no-overage evidence before accepting its output.
+  Current provider availability is shown separately in the localhost UI.
+- **DeepSeek Harness — In development.** The current source includes a first
+  native ACP vertical slice. It discovers a standard Windows Node install and
+  the source checkout linked by the native `~/.dsh` profile without depending
+  on a separate web launcher. Provider-backed and release-install proof remain
+  in progress. Billing may use credits or unlimited offers the user already
+  authorizes; auto-top-up and overage are never enabled.
 
 ## Install
 
@@ -39,7 +42,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a13
+uv tool install subagent-harness-mcp==0.1.0a14
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -51,7 +54,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a13` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a14` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -87,10 +90,31 @@ Codex decides what to delegate, observes the result, and keeps the final
 judgment. Underneath, each adapter maps the same lifecycle to its native
 harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
 
+### Configure DeepSeek Harness (development)
+
+Install and configure DeepSeek Harness normally, then open the Subagent MCP UI
+and enable **DeepSeek Harness**. Enter the exact native model as
+`provider-name::model-id`; Subagent MCP does not maintain a provider or model
+allowlist. The adapter uses DeepSeek Harness's native ACP transport, not its web
+UI.
+
+Enabling this runtime authorizes the selected route to consume quota from an
+existing subscription or unlimited offer, or an already funded provider
+balance. Subagent MCP does not purchase, reload, or increase that balance and
+cannot verify a promotion or price that the native harness does not expose.
+
+On Windows, the adapter discovers Node from `PATH` or the standard Program
+Files installation and follows the native `~/.dsh` profile link to the source
+checkout. Non-standard installations can set `SUBAGENT_MCP_DSH_NODE` and
+`SUBAGENT_MCP_DSH_SOURCE_ROOT` before starting the MCP or UI.
+
 To keep Codex supervision lean, leave lifecycle responses in their default
 `compact` mode and use one `agent_wait` call with its five-minute default. The
 MCP waits locally and wakes Codex only for completion, required input, or a
-timeout; request `full` mode only when diagnosing a problem.
+timeout; request `full` mode only when diagnosing a problem. Native agents are
+asked for final-only reports, and returned final text is capped at 4,096
+characters so hidden reasoning and long work logs do not inflate the controller
+context.
 
 ## How it fits together
 
@@ -131,14 +155,12 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a13` |
-| Claude Code native adapter | Implemented but remains `needs_canary` until its live no-overage gate passes |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a14` |
+| Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Opaque native model IDs; no hard-coded model allowlist or silent fallback |
-| Project-local Claude context and hooks | Disabled until canonical path and content-hash trust are enforced |
-| macOS, Linux, visible-background handoff, and native client side-panel rows | Not supported in this preview |
 
-Green deterministic tests prove the local contract; they do not prove that a
-live provider is ready.
+Live provider availability still depends on the user's installed native
+harness, authentication, selected model, and current provider limits.
 
 ## Other MCP clients
 
@@ -157,8 +179,17 @@ tools. Public schemas live in [`schemas/`](schemas/).
 ## Safety and billing
 
 - Subagent MCP never enables usage credits or changes billing settings.
-- Managed provider work fails closed on missing identity, model, workspace,
-  session, or no-overage evidence; it does not silently choose a fallback.
+- Each Claude turn is a bounded live native-harness request. The adapter accepts
+  its output only after `claude auth status`, the live OAuth init event, and a
+  safe no-overage rate event agree. Missing or unsafe evidence interrupts the
+  request and discards its output.
+- Claude exposes that rate evidence only on the live stream, so this guard can
+  consume included subscription quota. It cannot inspect or change Claude's
+  account-level usage-credit toggle; subscription-only users must keep usage
+  credits disabled in Claude. Subagent MCP never turns them on.
+- Missing local model, workspace, or session configuration blocks launch. Live
+  identity or rate mismatches interrupt before output is accepted, and the
+  adapter never silently chooses a fallback.
 - Provider Refresh is a no-model preflight. It never launches a canary or task;
   when a native harness cannot expose pre-turn quota evidence, the UI reports
   `Unknown` instead of spending provider quota to manufacture an answer.

@@ -39,9 +39,20 @@ RECURSION_DENIES = (
     "mcp__subagent_harness_mcp__*",
 )
 CREDENTIAL_OVERRIDE_NAMES = (
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    "CLAUDE_CODE_USE_FOUNDRY",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
+    "ANTHROPIC_PROFILE",
+    "ANTHROPIC_FEDERATION_RULE_ID",
+    "ANTHROPIC_ORGANIZATION_ID",
+    "ANTHROPIC_SERVICE_ACCOUNT_ID",
+    "ANTHROPIC_IDENTITY_TOKEN_FILE",
+    "ANTHROPIC_IDENTITY_TOKEN",
+    "ANTHROPIC_WORKSPACE_ID",
+    "ANTHROPIC_BASE_URL",
 )
 CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROVIDER_SAFETY_ENV = {
@@ -50,6 +61,9 @@ PROVIDER_SAFETY_ENV = {
     "DISABLE_EXTRA_USAGE_COMMAND": "1",
 }
 QUOTA_EVIDENCE_GRACE_SECONDS = 0.5
+DEFAULT_PROVIDER_TIMEOUT_SECONDS = 180.0
+CONTROLLER_RESULT_MAX_CHARS = 4_096
+_CONTROLLER_TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,7 +90,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a13",
+            "adapter_version": "0.1.0a14",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -103,7 +117,7 @@ class ClaudeCodeAdapter:
         client_factory: Callable[[Any], Any] | None = None,
         sdk_version: str | None = None,
         bundled_cli_paths: Sequence[Path] | None = None,
-        canary_timeout_seconds: float = 30.0,
+        canary_timeout_seconds: float = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     ) -> None:
         self._cli_path = cli_path
         self._command_runner = command_runner or _run_command
@@ -120,7 +134,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a13",
+            adapter_version="0.1.0a14",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -356,6 +370,7 @@ class ClaudeCodeAdapter:
                 if (
                     data.get("model") != request.model
                     or data.get("mcp_servers") != []
+                    or not _subscription_oauth_source(data)
                     or not isinstance(data.get("session_id"), str)
                     or not data["session_id"]
                 ):
@@ -379,6 +394,7 @@ class ClaudeCodeAdapter:
                     {
                         "model": request.model,
                         "effort": effort,
+                        "rate_evidence_seen": True,
                         "is_using_overage": False,
                         "overage_blocked": True,
                     },
@@ -428,6 +444,7 @@ class ClaudeCodeAdapter:
                 if (
                     data.get("model") != request.model
                     or data.get("mcp_servers") != []
+                    or not _subscription_oauth_source(data)
                     or not isinstance(data.get("session_id"), str)
                     or not data["session_id"]
                 ):
@@ -464,8 +481,12 @@ class ClaudeCodeAdapter:
                         request.pair_key,
                         unsafe,
                     )
+                rate_seen = True
             elif isinstance(message, AssistantMessage):
-                if message.model != request.model or message.session_id != init_session:
+                if message.model != request.model or (
+                    message.session_id is not None
+                    and message.session_id != init_session
+                ):
                     return _failure(
                         request.pair_key,
                         AdapterFailure(
@@ -505,6 +526,7 @@ class ClaudeCodeAdapter:
                         "effort": effort,
                         "session_id": init_session,
                         "context_hash": context_hash,
+                        "rate_evidence_seen": rate_seen,
                         "is_using_overage": False,
                         "overage_blocked": True,
                     },
@@ -784,6 +806,7 @@ class ClaudeCodeAdapter:
                     data.get("model") != context.effective_model
                     or data.get("mcp_servers") != []
                     or data.get("cwd") != context.workspace_path
+                    or not _subscription_oauth_source(data)
                     or not isinstance(candidate, str)
                     or not candidate
                     or (expected_session_id is not None and candidate != expected_session_id)
@@ -826,6 +849,7 @@ class ClaudeCodeAdapter:
 
         assistant_seen = False
         text_parts: list[str] = []
+        captured_chars = 0
         while True:
             message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
             if isinstance(message, RateLimitEvent):
@@ -834,7 +858,10 @@ class ClaudeCodeAdapter:
                     await _interrupt_or_recovery(client, unsafe, self._canary_timeout)
                 continue
             if isinstance(message, AssistantMessage):
-                if message.model != context.effective_model or message.session_id != session_id:
+                if message.model != context.effective_model or (
+                    message.session_id is not None
+                    and message.session_id != session_id
+                ):
                     await _interrupt_or_recovery(
                         client,
                         AdapterFailure("CONTEXT_DRIFT", "adapter", False, "Claude model or session changed"),
@@ -845,9 +872,11 @@ class ClaudeCodeAdapter:
                 assistant_seen = True
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
-                        remaining = 16_384 - sum(len(item) for item in text_parts)
+                        remaining = CONTROLLER_RESULT_MAX_CHARS + 1 - captured_chars
                         if remaining > 0:
-                            text_parts.append(block.text[:remaining])
+                            part = block.text[:remaining]
+                            text_parts.append(part)
+                            captured_chars += len(part)
             elif isinstance(message, ResultMessage):
                 if message.session_id != session_id:
                     raise ServiceError("CONTEXT_DRIFT", "Claude terminal session changed")
@@ -857,7 +886,7 @@ class ClaudeCodeAdapter:
                     or message.terminal_reason in {"aborted_streaming", "aborted_tools"}
                 ):
                     raise _service_failure(_result_error(message))
-                result_text = "".join(text_parts).strip() or "Claude task completed."
+                result_text = _bounded_controller_result(text_parts)
                 return _terminal_snapshot(
                     context,
                     session_id=session_id,
@@ -867,7 +896,7 @@ class ClaudeCodeAdapter:
                 )
 
     def _bind_no_model(self) -> tuple[str, _BoundRuntime | None, Mapping[str, Any]]:
-        if any(os.environ.get(name) for name in CREDENTIAL_OVERRIDE_NAMES):
+        if any(name in os.environ for name in CREDENTIAL_OVERRIDE_NAMES):
             return "incompatible", None, {"code": "CREDENTIAL_OVERRIDE"}
         path = self._discover_cli()
         if path is None:
@@ -908,7 +937,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a13",
+            "adapter_version": "0.1.0a14",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],
@@ -943,7 +972,6 @@ class ClaudeCodeAdapter:
             if candidate.is_file():
                 return candidate
         return None
-
 
 def _build_canary_options(request: CanaryRequest, bound: _BoundRuntime):
     from claude_agent_sdk import ClaudeAgentOptions, EffortLevel
@@ -1128,6 +1156,7 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
         f"Role: {task.role}",
         f"Task: {task.title}",
         task.prompt,
+        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning.",
         "Acceptance criteria:",
         *(f"- {item}" for item in task.acceptance_criteria),
     ]
@@ -1137,7 +1166,10 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
 
 
 def _send_prompt(request: AdapterSendRequest) -> str:
-    lines = [request.prompt]
+    lines = [
+        request.prompt,
+        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning.",
+    ]
     if request.reply_to is not None:
         lines.append(f"Reply to: {request.reply_to}")
     if request.answers:
@@ -1178,7 +1210,7 @@ def _terminal_snapshot(
         evidence={
             "source": "claude-code-managed-sdk",
             "terminal_synchronous": True,
-            "quota_guard": "allowed-and-no-overage",
+            "quota_guard": "subscription-hard-stop-and-live-monitor",
         },
     )
 
@@ -1264,6 +1296,20 @@ def _variant_pair_key(
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ValueError("Claude variant identity is not canonical") from exc
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _subscription_oauth_source(data: Mapping[str, Any]) -> bool:
+    return data.get("apiKeySource") in {"none", "oauth"}
+
+
+def _bounded_controller_result(parts: Sequence[str]) -> str:
+    result = "".join(parts).strip()
+    if not result:
+        return "Claude task completed."
+    if len(result) <= CONTROLLER_RESULT_MAX_CHARS:
+        return result
+    content_chars = CONTROLLER_RESULT_MAX_CHARS - len(_CONTROLLER_TRUNCATION_MARKER)
+    return result[:content_chars] + _CONTROLLER_TRUNCATION_MARKER
 
 
 def _unsafe_rate(info: Any) -> AdapterFailure | None:

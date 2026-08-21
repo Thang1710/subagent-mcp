@@ -33,7 +33,7 @@
       "type": "array",
       "minItems": 1,
       "uniqueItems": true,
-      "items": {"enum": ["visible-background", "managed-sdk"]}
+      "items": {"enum": ["visible-background", "managed-sdk", "native-acp"]}
     },
     "capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
     "semantic_permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},

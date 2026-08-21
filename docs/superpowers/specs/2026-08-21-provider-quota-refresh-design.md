@@ -9,16 +9,18 @@ Let a user explicitly refresh current provider availability from the localhost U
 
 ## Source of truth
 
-Claude documents interactive allocation views but does not publish a stable machine-readable subscription-quota endpoint or a pre-request Agent SDK control method. Subagent MCP therefore does not parse terminal screen output, scrape Claude's browser UI, read private account files, or persist guessed reset times.
+Claude documents interactive allocation views but does not publish a stable machine-readable subscription-quota endpoint or a pre-request Agent SDK control method. Subagent MCP therefore does not parse private account/cache files, terminal screen output, or browser UI, and does not persist guessed reset times.
 
-The supported programmatic evidence is Claude Agent SDK's `RateLimitEvent` emitted by the native Claude Code harness. This event is normally post-request evidence, not proof available before a provider request. A safe event must attest all of the following before any assistant output is accepted:
+Subscription identity requires `claude auth status` to report `claude.ai`, no documented higher-precedence credential route to be present, and `system/init.apiKeySource` to be `none` or `oauth`.
+
+Claude Agent SDK's live `RateLimitEvent` is the no-overage control contract. A safe event must arrive before assistant output and attest all of the following:
 
 - primary status is `allowed` or `allowed_warning`;
 - `raw.isUsingOverage` is exactly `false`;
 - overage status is exactly `rejected`;
 - no billing, credit, or rate error is reported.
 
-Any missing, ambiguous, or overage evidence fails closed as `QUOTA_PAUSED`. An `allowed_warning` is safe only when the two independent no-overage fields above remain explicit. Authentication must remain first-party Claude subscription auth with no credential override environment variable.
+Missing or ambiguous identity/rate evidence fails closed before output. An absent rate event is reported as absent, not fabricated, and leaves the runtime gated. Any unsafe event fails closed as `QUOTA_PAUSED`.
 
 ## Explicit refresh flow
 
@@ -33,11 +35,11 @@ Refreshing after a plan upgrade therefore uses current provider evidence rather 
 
 ## Spawn flow
 
-UI evidence is advisory and may become stale immediately. `agent_spawn` and `agent_send` retain the existing mandatory lifecycle guard: they wait for a new `RateLimitEvent` and interrupt before assistant output if the no-overage conditions are not all true. A UI refresh never grants durable permission to spend.
+UI evidence is advisory and may become stale immediately. `agent_spawn` and `agent_send` recheck credential precedence and require fresh subscription init identity plus a safe live rate event before accepting output. They interrupt immediately on unsafe evidence. A UI refresh never grants durable permission to spend.
 
 ## Billing boundary
 
-Current Anthropic policy separates included Agent SDK credit from optional usage credits. Subagent MCP may consume only provider-included allowance available to the authenticated subscription. It never opts into, purchases, reloads, or consents to usage credits. If the included allowance is exhausted, the runtime becomes unavailable until a later explicit refresh succeeds.
+The Claude adapter may consume only provider-included allowance available to the authenticated subscription. It never opts into, purchases, reloads, or consents to usage credits. If authoritative no-overage evidence is unavailable, the runtime stays unavailable.
 
 ## UI states
 
@@ -54,7 +56,7 @@ No countdown or reset timestamp is shown unless a future adapter publishes a doc
 - Page boot causes zero provider client creation.
 - One Refresh click causes at most one bounded connect-only check per configured variant and zero model queries.
 - Safe refresh output contains `overage_blocked=true` and no provider output.
-- Unsafe or ambiguous rate evidence interrupts before assistant output and reports quota paused.
+- Unsafe or ambiguous hard-stop/identity evidence blocks output; any unsafe rate event interrupts and reports quota paused.
 - A paused circuit can recover only from fresh safe provider evidence.
 - Spawn/send still recheck quota even after a successful refresh.
 - UI refresh endpoint enforces loopback, host, origin, session, CSRF, empty body, response redaction, and size limits.

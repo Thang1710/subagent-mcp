@@ -104,6 +104,7 @@ class SubagentMcpService:
                     "runtime_id": record.runtime_id,
                     "state": record.state,
                     "enabled": policy.get("enabled", False),
+                    "delegation_priority": policy.get("delegation_priority", 0),
                     "manifest": None if record.manifest is None else record.manifest.to_dict(),
                     "reason": record.reason,
                     "circuits": [
@@ -117,7 +118,15 @@ class SubagentMcpService:
                     ],
                 }
             )
-        return tuple(result)
+        return tuple(
+            sorted(
+                result,
+                key=lambda item: (
+                    -int(item["delegation_priority"]),
+                    str(item["runtime_id"]),
+                ),
+            )
+        )
 
     async def runtime_check(
         self,
@@ -275,17 +284,12 @@ class SubagentMcpService:
                         error_code=(
                             code
                             if code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
-                            else "QUOTA_PAUSED"
+                            else "USAGE_CREDITS_FORBIDDEN"
                         ),
                     )
-                state = (
-                    "quota_paused"
-                    if ready_was_paused
-                    or code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
-                    else "unknown"
-                )
+                state = "quota_paused" if code == "QUOTA_PAUSED" else "unknown"
                 item = {"variant_id": variant_id, "state": state}
-                if code not in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}:
+                if code != "QUOTA_PAUSED":
                     item["error_code"] = code
                 results.append(item)
                 continue

@@ -248,9 +248,27 @@ def test_real_stdio_subprocess_uses_temp_home_and_protocol_only_stdout(
     _write_fake_config(home)
 
     async def run() -> dict[str, Any]:
+        test_server = "\n".join(
+            (
+                "from subagent_harness_mcp.adapters.fake import FakeAdapter",
+                "from subagent_harness_mcp.adapters.registry import AdapterRegistry",
+                "from subagent_harness_mcp.config import ConfigStore",
+                "from subagent_harness_mcp.paths import resolve_paths",
+                "from subagent_harness_mcp.server import create_server",
+                "from subagent_harness_mcp.service import SubagentMcpService",
+                "from subagent_harness_mcp.store import StateStore",
+                "paths = resolve_paths()",
+                "service = SubagentMcpService(",
+                "    config=ConfigStore(paths),",
+                "    store=StateStore.open(paths),",
+                "    registry=AdapterRegistry(builtin_factories=(FakeAdapter,)),",
+                ")",
+                "create_server(service).run('stdio')",
+            )
+        )
         parameters = StdioServerParameters(
             command=sys.executable,
-            args=["-m", "subagent_harness_mcp.cli", "serve"],
+            args=["-c", test_server],
             env={"SUBAGENT_MCP_HOME": str(home)},
             cwd=ROOT,
             encoding="utf-8",

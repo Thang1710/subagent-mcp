@@ -44,6 +44,12 @@
           "fallback": {
             "const": false
           },
+          "delegation_priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100,
+            "default": 0
+          },
           "variants": {
             "type": "array",
             "items": {

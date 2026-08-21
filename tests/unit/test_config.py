@@ -26,6 +26,7 @@ def _document() -> dict[str, object]:
         "runtimes": {
             "claude-code": {
                 "enabled": True,
+                "delegation_priority": 73,
                 "selection_mode": "fixed",
                 "fallback": False,
                 "variants": [
@@ -224,8 +225,27 @@ def test_public_config_schema_matches_revisioned_model_agnostic_contract() -> No
     assert schema["properties"]["revision"]["minimum"] == 0
     runtime = schema["properties"]["runtimes"]["additionalProperties"]
     assert runtime["properties"]["fallback"] == {"const": False}
+    assert runtime["properties"]["delegation_priority"] == {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 100,
+        "default": 0,
+    }
     variant = runtime["properties"]["variants"]["items"]
     assert variant["properties"]["reasoning"]["type"] == "object"
     assert runtime["additionalProperties"] is True
     assert variant["additionalProperties"] is True
 
+
+@pytest.mark.parametrize("priority", [-1, 101, True, 1.5])
+def test_delegation_priority_is_a_bounded_integer(
+    tmp_path: Path,
+    priority: object,
+) -> None:
+    document = _document()
+    document["runtimes"]["claude-code"]["delegation_priority"] = priority  # type: ignore[index]
+
+    with pytest.raises(ConfigError) as captured:
+        ConfigStore(_paths(tmp_path)).save(document, expected_revision=0)
+
+    assert captured.value.code == "CONFIG_INVALID"

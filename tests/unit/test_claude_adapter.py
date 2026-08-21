@@ -14,17 +14,27 @@ from claude_agent_sdk import (
     SystemMessage,
     TextBlock,
 )
-
 from subagent_harness_mcp.adapters import (
     AdapterContextRequest,
     AdapterSpawnRequest,
     CanaryRequest,
 )
 from subagent_harness_mcp.adapters.claude_code import (
+    CONTROLLER_RESULT_MAX_CHARS,
+    CREDENTIAL_OVERRIDE_NAMES,
+    DEFAULT_PROVIDER_TIMEOUT_SECONDS,
     ClaudeCodeAdapter,
     CommandResult,
+    _bounded_controller_result,
+    _subscription_oauth_source,
 )
 from subagent_harness_mcp.contracts import ServiceError, TaskPacket
+
+
+@pytest.fixture(autouse=True)
+def _clean_auth_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in CREDENTIAL_OVERRIDE_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 class _Runner:
@@ -83,6 +93,64 @@ def test_manifest_publishes_exact_model_suggestions_and_reasoning_efforts() -> N
     ]
 
 
+def test_default_provider_timeout_covers_slow_native_opus_turns() -> None:
+    adapter = ClaudeCodeAdapter()
+
+    assert DEFAULT_PROVIDER_TIMEOUT_SECONDS == 180.0
+    assert adapter._canary_timeout == DEFAULT_PROVIDER_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("source", ["none", "oauth"])
+def test_only_subscription_oauth_init_sources_are_accepted(source: str) -> None:
+    assert _subscription_oauth_source({"apiKeySource": source}) is True
+
+
+@pytest.mark.parametrize("source", [None, "user", "project", "org", "temporary"])
+def test_non_subscription_init_sources_are_rejected(source: str | None) -> None:
+    assert _subscription_oauth_source({"apiKeySource": source}) is False
+
+
+def test_controller_result_is_compact_and_explicitly_truncated() -> None:
+    result = _bounded_controller_result(["x" * (CONTROLLER_RESULT_MAX_CHARS * 2)])
+
+    assert len(result) == CONTROLLER_RESULT_MAX_CHARS
+    assert result.endswith("\n[truncated by Subagent MCP]")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "CLAUDE_CODE_USE_BEDROCK",
+        "CLAUDE_CODE_USE_VERTEX",
+        "CLAUDE_CODE_USE_FOUNDRY",
+        "ANTHROPIC_PROFILE",
+        "ANTHROPIC_FEDERATION_RULE_ID",
+        "ANTHROPIC_ORGANIZATION_ID",
+        "ANTHROPIC_BASE_URL",
+    ],
+)
+def test_probe_rejects_every_higher_precedence_auth_route(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    monkeypatch.setenv(name, "present")
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    result = asyncio.run(adapter.probe())
+
+    assert name in CREDENTIAL_OVERRIDE_NAMES
+    assert result.state == "incompatible"
+    assert result.details == {"code": "CREDENTIAL_OVERRIDE"}
+
+
 class _UnsafeClient:
     def __init__(self, options) -> None:
         self.options = options
@@ -103,6 +171,7 @@ class _UnsafeClient:
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": "session-1",
             },
         )
@@ -110,7 +179,7 @@ class _UnsafeClient:
             rate_limit_info=RateLimitInfo(
                 status="allowed_warning",
                 overage_status=None,
-                raw={"isUsingOverage": False},
+                raw={"isUsingOverage": True},
             ),
             uuid="rate-1",
             session_id="session-1",
@@ -139,6 +208,7 @@ class _PostQueryUnsafeClient(_UnsafeClient):
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": "session-1",
             },
         )
@@ -157,7 +227,7 @@ class _PostQueryUnsafeClient(_UnsafeClient):
             rate_limit_info=RateLimitInfo(
                 status="allowed_warning",
                 overage_status=None,
-                raw={"isUsingOverage": False},
+                raw={"isUsingOverage": True},
             ),
             uuid="rate-2",
             session_id="session-1",
@@ -175,6 +245,7 @@ class _SafeQuotaClient(_UnsafeClient):
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": "quota-session-1",
             },
         )
@@ -197,6 +268,7 @@ class _StartupUnsafeClient(_UnsafeClient):
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": "quota-session-unsafe",
             },
         )
@@ -204,7 +276,7 @@ class _StartupUnsafeClient(_UnsafeClient):
             rate_limit_info=RateLimitInfo(
                 status="allowed_warning",
                 overage_status=None,
-                raw={"isUsingOverage": False},
+                raw={"isUsingOverage": True},
             ),
             uuid="quota-rate-unsafe",
             session_id="quota-session-unsafe",
@@ -212,6 +284,9 @@ class _StartupUnsafeClient(_UnsafeClient):
 
 
 class _ModelBeforeRateClient(_UnsafeClient):
+    assistant_session_id: str | None = "session-before-rate"
+    publish_safe_rate = False
+
     async def receive_messages(self):
         while not self.query_calls:
             await asyncio.sleep(0)
@@ -221,14 +296,25 @@ class _ModelBeforeRateClient(_UnsafeClient):
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": "session-before-rate",
                 "cwd": str(self.options.cwd),
             },
         )
+        if self.publish_safe_rate:
+            yield RateLimitEvent(
+                rate_limit_info=RateLimitInfo(
+                    status="allowed",
+                    overage_status="rejected",
+                    raw={"isUsingOverage": False},
+                ),
+                uuid="rate-before-output",
+                session_id="session-before-rate",
+            )
         yield AssistantMessage(
             content=[TextBlock("must not be accepted")],
             model="vendor/future-model",
-            session_id="session-before-rate",
+            session_id=self.assistant_session_id,
         )
         yield ResultMessage(
             subtype="success",
@@ -243,8 +329,14 @@ class _ModelBeforeRateClient(_UnsafeClient):
         )
 
 
-def test_lifecycle_interrupts_model_output_before_safe_rate_evidence(
+@pytest.mark.parametrize(
+    ("publish_safe_rate", "assistant_session_id"),
+    [(False, "session-before-rate"), (True, "session-before-rate"), (True, None)],
+)
+def test_lifecycle_requires_safe_rate_before_accepting_optional_session_output(
     tmp_path: Path,
+    publish_safe_rate: bool,
+    assistant_session_id: str | None,
 ) -> None:
     cli = tmp_path / "claude.exe"
     cli.write_bytes(b"standalone-cli")
@@ -254,6 +346,8 @@ def test_lifecycle_interrupts_model_output_before_safe_rate_evidence(
 
     def factory(options):
         client = _ModelBeforeRateClient(options)
+        client.publish_safe_rate = publish_safe_rate
+        client.assistant_session_id = assistant_session_id
         clients.append(client)
         return client
 
@@ -283,25 +377,85 @@ def test_lifecycle_interrupts_model_output_before_safe_rate_evidence(
         )
     )
 
-    with pytest.raises(ServiceError) as caught:
-        asyncio.run(
-            adapter.spawn(
-                AdapterSpawnRequest(
-                    conversation_id="conversation-1",
-                    execution_id="execution-1",
-                    task=TaskPacket(
-                        "Review",
-                        "Review only.",
-                        ("Return one result.",),
-                        "sub-agent",
-                    ),
-                    context=context,
-                )
+    request = AdapterSpawnRequest(
+        conversation_id="conversation-1",
+        execution_id="execution-1",
+        task=TaskPacket(
+            "Review",
+            "Review only.",
+            ("Return one result.",),
+            "sub-agent",
+        ),
+        context=context,
+    )
+    if publish_safe_rate:
+        snapshot = asyncio.run(adapter.spawn(request))
+        assert snapshot.execution_state == "succeeded"
+        assert snapshot.result_text == "must not be accepted"
+        assert clients[0].interrupt_calls == 0
+    else:
+        with pytest.raises(ServiceError) as caught:
+            asyncio.run(adapter.spawn(request))
+        assert caught.value.code == "USAGE_CREDITS_FORBIDDEN"
+        assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
+@pytest.mark.parametrize(
+    ("publish_safe_rate", "assistant_session_id"),
+    [(False, "session-before-rate"), (True, "session-before-rate"), (True, None)],
+)
+def test_canary_requires_safe_rate_before_accepting_optional_session_output(
+    tmp_path: Path,
+    publish_safe_rate: bool,
+    assistant_session_id: str | None,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    clients: list[_ModelBeforeRateClient] = []
+
+    def factory(options):
+        client = _ModelBeforeRateClient(options)
+        client.publish_safe_rate = publish_safe_rate
+        client.assistant_session_id = assistant_session_id
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+    probe = asyncio.run(adapter.probe())
+    base_pair_key = str(probe.details["pair_key"])
+
+    result = asyncio.run(
+        adapter.runtime_canary(
+            CanaryRequest(
+                runtime_id="claude-code",
+                variant_id="future-deep",
+                model="vendor/future-model",
+                reasoning={"effort": "xhigh"},
+                transport="managed-sdk",
+                base_pair_key=base_pair_key,
+                pair_key=_pair(base_pair_key),
             )
         )
+    )
 
-    assert caught.value.code == "USAGE_CREDITS_FORBIDDEN"
-    assert clients[0].interrupt_calls == 1
+    if publish_safe_rate:
+        assert result.passed is True
+        assert result.details["rate_evidence_seen"] is True
+        assert result.details["overage_blocked"] is True
+        assert clients[0].interrupt_calls == 0
+    else:
+        assert result.passed is False
+        assert result.error is not None
+        assert result.error.code == "USAGE_CREDITS_FORBIDDEN"
+        assert clients[0].interrupt_calls == 1
     assert clients[0].disconnected is True
 
 
@@ -344,6 +498,7 @@ def test_quota_probe_accepts_safe_warning_before_model_output(tmp_path: Path) ->
     assert result.details == {
         "model": "vendor/future-model",
         "effort": "xhigh",
+        "rate_evidence_seen": True,
         "is_using_overage": False,
         "overage_blocked": True,
         "cleanup_confirmed": True,

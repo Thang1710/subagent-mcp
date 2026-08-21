@@ -13,6 +13,8 @@ from subagent_harness_mcp.contracts import (
     AgentStatus,
     ContractError,
     ExecutionState,
+    SpawnRequest,
+    TaskPacket,
     WaitRequest,
     WaitTarget,
     require_execution_transition,
@@ -183,6 +185,22 @@ def test_public_schemas_cover_adapter_and_normalized_descriptor() -> None:
         "reasoning_schema",
     } <= set(adapter["required"])
     assert adapter["properties"]["model_schema"]["type"] == "object"
+    assert "native-acp" in adapter["properties"]["supported_transports"]["items"]["enum"]
     assert descriptor["properties"]["schema_version"]["const"] == 1
     assert descriptor["properties"]["model_display_name"]["type"] == "string"
+    assert "native-acp" in descriptor["properties"]["transport"]["enum"]
     assert descriptor["additionalProperties"] is True
+
+
+def test_spawn_contract_accepts_native_acp_transport() -> None:
+    request = SpawnRequest(
+        request_id="spawn-1",
+        runtime_id="deepseek-harness",
+        variant_id="ox-alpha",
+        task=TaskPacket("Review", "Review it.", ("Report",), "reviewer"),
+        cwd="workspace",
+        mode="review",
+        transport="native-acp",
+    )
+
+    assert request.transport == "native-acp"

@@ -27,6 +27,12 @@ workspace, session, and context identity. Provider differences appear only in
 the descriptor and explicit capability gaps. Unknown or mismatched critical
 identity fails closed; there is no fallback.
 
+Each runtime can publish a neutral `delegation_priority` from 0 to 100. Higher
+values appear first in `runtime_list` and the localhost UI so the orchestrator
+can prefer one external runtime over another without hard-coded provider roles.
+Selection remains explicit: the MCP does not silently reroute a request or
+control the Codex host's native-subagent fallback.
+
 ## State and ownership
 
 `SUBAGENT_MCP_HOME` creates `config/`, `state/`, and `data/` children for tests
@@ -37,8 +43,8 @@ uninstall removes only byte/identity-matching owned resources and preserves
 user config, state, sessions, and worktrees.
 
 Native harness transcripts remain native-harness-owned. Private client state,
-user authentication stores, unrelated local tooling, caches, and billing
-settings are outside the product boundary.
+credentials, unrelated local tooling, caches, and billing settings stay outside
+product ownership and are not parsed as a control contract.
 
 ## Preview boundary
 
@@ -46,7 +52,7 @@ The deterministic fake adapter proves the local contract without provider
 quota. The Claude managed adapter cannot run normal work until its exact
 standalone CLI/SDK/model/reasoning/transport pair passes the dedicated live
 no-overage canary. Visible-background, promotion, and native Codex-panel
-integration are explicit preview gaps. Ordinary `0.1.0a13` Claude turns select
+integration are explicit preview gaps. Ordinary `0.1.0a14` Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
@@ -54,12 +60,14 @@ canonical path + content-hash trust gate exists. User skills remain available.
 The native SDK emits its rate-limit attestation only after a turn starts, not
 during `connect(None)`. The provider Refresh path therefore performs only a
 connection-level probe and reports `Unknown` when no pre-turn rate evidence is
-available; it never launches a canary or provider task. Canary and ordinary
-turns start with 1M context, fast mode, and the usage-credits command disabled
-per process, and no
-canary output is accepted before an exact safe rate event. Ordinary turns
-require the resulting exact ready attestation because the CLI does not promise
-a fresh rate event before every assistant message; any later unsafe rate/error
-event still interrupts and pauses the circuit. The requested effort is pinned
-through both the SDK option and provider-native process environment because
-`system.init` does not publish an effort field.
+available; it never launches a canary or provider task. Before any turn, the
+adapter rejects documented non-subscription credential routes. The native
+`system/init` event must attest OAuth/none as the active API-key source, and a
+live rate event must report `isUsingOverage=false` with overage rejected before
+output is accepted. Missing or ambiguous evidence leaves the runtime gated.
+Canary and ordinary turns also disable 1M context, fast mode, and the
+usage-credits command per process. Any later unsafe rate event interrupts and
+pauses the circuit. The requested effort is pinned through both the SDK option
+and provider-native process environment because `system.init` does not publish
+an effort field. Final text returned to the controller is bounded to 4,096
+characters.

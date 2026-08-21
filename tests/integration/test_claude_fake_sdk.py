@@ -15,8 +15,11 @@ from claude_agent_sdk import (
     TextBlock,
     ThinkingBlock,
 )
-
-from subagent_harness_mcp.adapters.claude_code import ClaudeCodeAdapter, CommandResult
+from subagent_harness_mcp.adapters.claude_code import (
+    CREDENTIAL_OVERRIDE_NAMES,
+    ClaudeCodeAdapter,
+    CommandResult,
+)
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigStore
 from subagent_harness_mcp.contracts import (
@@ -29,6 +32,12 @@ from subagent_harness_mcp.contracts import (
 from subagent_harness_mcp.paths import resolve_paths
 from subagent_harness_mcp.service import SubagentMcpService
 from subagent_harness_mcp.store import StateStore, VerifiedCleanupReceipt
+
+
+@pytest.fixture(autouse=True)
+def _clean_auth_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in CREDENTIAL_OVERRIDE_NAMES:
+        monkeypatch.delenv(name, raising=False)
 
 
 class _Ids:
@@ -80,6 +89,7 @@ class _PassingClient:
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": self.session_id,
                 "cwd": None if self.options.cwd is None else str(self.options.cwd),
             },
@@ -139,6 +149,7 @@ class _QuotaClient(_PassingClient):
                 "model": "vendor/future-model",
                 "effort": "xhigh",
                 "mcp_servers": [],
+                "apiKeySource": "none",
                 "session_id": self.session_id,
                 "cwd": None if self.options.cwd is None else str(self.options.cwd),
             },
@@ -157,7 +168,7 @@ class _QuotaClient(_PassingClient):
             rate_limit_info=RateLimitInfo(
                 status="allowed_warning",
                 overage_status=None,
-                raw={"isUsingOverage": False},
+                raw={"isUsingOverage": True},
             ),
             uuid="rate-unsafe",
             session_id=self.session_id,

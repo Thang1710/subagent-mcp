@@ -8,12 +8,12 @@
     "source": "github"
   },
   "websiteUrl": "https://github.com/Thang1710/subagent-mcp",
-  "version": "0.1.0a13",
+  "version": "0.1.0a14",
   "packages": [
     {
       "registryType": "pypi",
       "identifier": "subagent-harness-mcp",
-      "version": "0.1.0a13",
+      "version": "0.1.0a14",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

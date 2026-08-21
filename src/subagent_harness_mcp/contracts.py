@@ -356,7 +356,12 @@ class SpawnRequest:
         validate_bounded_text(self.cwd, "cwd", 4096, strip=True)
         if self.mode not in {"review", "plan", "test", "implement"}:
             raise ContractError("REQUEST_INVALID", "mode is unsupported")
-        if self.transport not in {"auto", "visible-background", "managed-sdk"}:
+        if self.transport not in {
+            "auto",
+            "visible-background",
+            "managed-sdk",
+            "native-acp",
+        }:
             raise ContractError("REQUEST_INVALID", "transport is unsupported")
         validate_identifier(self.context_policy_id, "context_policy_id")
         validate_identifier(self.permission_policy_id, "permission_policy_id")

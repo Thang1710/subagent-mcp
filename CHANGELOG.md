@@ -2,6 +2,29 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a14 - 2026-08-21
+
+- Reject documented credential routes above subscription OAuth and verify the
+  active credential source from the native `system/init` event.
+- Keep the no-overage gate on documented live SDK evidence: a safe rate event
+  must arrive before output is accepted; missing evidence interrupts the turn
+  and discards its output. Private Claude cache files are not used as a control
+  contract.
+- Distinguish a confirmed provider quota pause from missing no-overage evidence,
+  so the UI never reports an exhausted allowance when the harness simply could
+  not expose a safe preflight signal.
+- Cap the final text returned to the Codex controller at 4,096 characters and
+  ask native agents for concise final-only reports to reduce supervision cost.
+- Allow up to 180 seconds for the exact native canary so Opus xhigh startup is
+  not rejected by the previous 30-second preview timeout.
+- Accept SDK assistant events that omit their optional session ID while still
+  requiring any reported assistant ID and the terminal result ID to match.
+- Add the first in-development DeepSeek Harness native ACP vertical slice with
+  exact `provider::model` selection, confined workspace permissions, bounded
+  lifecycle output, and automatic native Node/source-checkout discovery.
+- Publish an advisory per-runtime delegation priority in the config, MCP
+  runtime list, and localhost UI without silently rerouting requests.
+
 ## 0.1.0a13 - 2026-08-21
 
 - Match the official MCP Registry namespace to the canonical GitHub owner

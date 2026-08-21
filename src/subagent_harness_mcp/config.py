@@ -121,6 +121,12 @@ def _validate_runtime_policy(policy: object, runtime_id: str) -> None:
         raise ConfigError("CONFIG_INVALID", f"runtime {runtime_id} selection_mode is invalid")
     if policy.get("fallback") is not False:
         raise ConfigError("CONFIG_INVALID", f"runtime {runtime_id} fallback must be false")
+    priority = policy.get("delegation_priority", 0)
+    if type(priority) is not int or not 0 <= priority <= 100:
+        raise ConfigError(
+            "CONFIG_INVALID",
+            f"runtime {runtime_id} delegation_priority must be an integer from 0 to 100",
+        )
 
     variants = policy.get("variants")
     if not isinstance(variants, list):

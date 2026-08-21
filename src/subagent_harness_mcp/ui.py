@@ -237,8 +237,8 @@ class LocalUiBackend:
                 continue
             quota = checked.get("quota") if isinstance(checked, Mapping) else None
             state = quota.get("state") if isinstance(quota, Mapping) else "unknown"
-            states.append(state if isinstance(state, str) else "unknown")
             variants = quota.get("variants") if isinstance(quota, Mapping) else ()
+            runtime_error_code: str | None = None
             if isinstance(variants, Sequence) and not isinstance(
                 variants, (str, bytes, bytearray)
             ):
@@ -247,7 +247,11 @@ class LocalUiBackend:
                     and item.get("error_code") == "CAPABILITY_MISSING"
                     for item in variants
                 ):
-                    error_code = "CAPABILITY_MISSING"
+                    runtime_error_code = "CAPABILITY_MISSING"
+                    error_code = runtime_error_code
+            if state == "quota_paused" and runtime_error_code == "CAPABILITY_MISSING":
+                state = "unknown"
+            states.append(state if isinstance(state, str) else "unknown")
             overage_blocked = bool(
                 overage_blocked
                 and isinstance(quota, Mapping)
@@ -421,6 +425,7 @@ def create_local_backend() -> LocalUiBackend:
     """Create the same config/state/service stack used by the stdio surface."""
 
     from .adapters.claude_code import ClaudeCodeAdapter
+    from .adapters.deepseek_harness import DeepSeekHarnessAdapter
     from .adapters.registry import AdapterRegistry
     from .paths import resolve_paths
     from .service import SubagentMcpService
@@ -429,7 +434,9 @@ def create_local_backend() -> LocalUiBackend:
     paths = resolve_paths()
     config = ConfigStore(paths)
     store = StateStore.open(paths)
-    registry = AdapterRegistry(builtin_factories=(ClaudeCodeAdapter,))
+    registry = AdapterRegistry(
+        builtin_factories=(ClaudeCodeAdapter, DeepSeekHarnessAdapter)
+    )
     registry.discover()
     service = SubagentMcpService(config=config, store=store, registry=registry)
     return LocalUiBackend(config=config, service=service, store=store)
@@ -993,9 +1000,10 @@ def _quota_presentation(
         "detail": details[checked],
     }
     if checked == "unknown" and error_code == "CAPABILITY_MISSING":
+        result["label"] = "Safety check unavailable"
         result["detail"] = (
-            "The native harness did not expose quota evidence without starting "
-            "a model. Refresh started no provider task."
+            "Your provider quota is not known to be exhausted. The native harness "
+            "did not expose no-overage evidence, so Refresh started no provider task."
         )
         result["reason_code"] = error_code
     if overage_blocked and checked in {"available", "quota_paused"}:
@@ -1056,7 +1064,11 @@ def _schema_options(schema: object) -> list[dict[str, Any]]:
 
 
 def _runtime_subtitle(manifest: Mapping[str, Any]) -> str:
-    proper_names = {"claude-code": "Claude Code"}
+    proper_names = {
+        "claude-code": "Claude Code",
+        "deepseek-harness": "DeepSeek Harness",
+        "multi-provider": "External provider",
+    }
     provider_id = str(manifest.get("provider_id", ""))
     harness_id = str(manifest.get("harness_id", ""))
     provider = proper_names.get(provider_id, _human_state(provider_id))
@@ -1107,6 +1119,8 @@ def _simple_reasoning_fields(
     schema = manifest.get("reasoning_schema")
     if not isinstance(schema, Mapping):
         return None
+    if schema.get("additionalProperties") is False and schema.get("maxProperties") == 0:
+        return []
     properties = schema.get("properties")
     if not isinstance(properties, Mapping) or len(properties) != 1:
         return None
@@ -1142,6 +1156,7 @@ def _new_runtime_policy(manifest: Mapping[str, Any]) -> dict[str, Any]:
     transports = _manifest_strings(manifest, "supported_transports")
     return {
         "enabled": False,
+        "delegation_priority": 0,
         "selection_mode": "fixed",
         "fallback": False,
         "transport": transports[0] if len(transports) == 1 else "",
@@ -1167,7 +1182,17 @@ def _runtime_cards(
         for record in records
         if isinstance(record.get("runtime_id"), str)
     }
-    runtime_ids = sorted(set(by_id) | {str(key) for key in policies})
+    runtime_ids = sorted(
+        set(by_id) | {str(key) for key in policies},
+        key=lambda runtime_id: (
+            -int(
+                policies.get(runtime_id, {}).get("delegation_priority", 0)
+                if isinstance(policies.get(runtime_id), Mapping)
+                else 0
+            ),
+            runtime_id,
+        ),
+    )
     cards: list[dict[str, Any]] = []
     for runtime_id in runtime_ids:
         record = by_id.get(runtime_id, {})
@@ -1238,6 +1263,22 @@ def _runtime_groups(
         selected_transport = transports[0] if len(transports) == 1 else ""
     groups: list[dict[str, Any]] = []
     policy_fields: list[dict[str, Any]] = []
+    policy_fields.append(
+        {
+            "id": "delegation_priority",
+            "label": "Delegation priority",
+            "kind": "number",
+            "value": rendered_policy.get("delegation_priority", 0),
+            "min": 0,
+            "max": 100,
+            "step": 1,
+            "required": True,
+            "help": (
+                "Higher values are preferred by the orchestrator. This orders "
+                "external runtimes; the Codex host still controls native fallback."
+            ),
+        }
+    )
     if len(variants) > 1:
         policy_fields.append(
             {
@@ -1285,6 +1326,16 @@ def _runtime_groups(
         if not isinstance(variant, Mapping):
             continue
         variant_id = str(variant.get("id", index))
+        model_schema = manifest.get("model_schema", {})
+        if not isinstance(model_schema, Mapping):
+            model_schema = {}
+        model_placeholder = model_schema.get(
+            "placeholder", "Choose a model or enter an exact model ID"
+        )
+        model_help = model_schema.get(
+            "description",
+            "Choose a suggested model or enter another exact provider model ID.",
+        )
         reasoning_fields = _simple_reasoning_fields(variant, manifest, index)
         if reasoning_fields is None:
             reasoning_fields = [
@@ -1307,17 +1358,21 @@ def _runtime_groups(
         groups.append(
             {
                 "id": f"variant-{index}",
-                "label": "Model & reasoning" if len(variants) == 1 else f"Variant {variant_id}",
+                "label": (
+                    ("Model & reasoning" if reasoning_fields else "Model")
+                    if len(variants) == 1
+                    else f"Variant {variant_id}"
+                ),
                 "fields": [
                     {
                         "id": f"variant.{index}.model",
                         "label": "Model",
                         "kind": "model",
                         "value": variant.get("model", ""),
-                        "options": _schema_options(manifest.get("model_schema")),
+                        "options": _schema_options(model_schema),
                         "required": True,
-                        "placeholder": "Choose a model or enter an exact model ID",
-                        "help": "Choose a suggested model or enter another exact provider model ID.",
+                        "placeholder": str(model_placeholder),
+                        "help": str(model_help),
                     },
                     *reasoning_fields,
                 ],
@@ -1415,6 +1470,11 @@ def _apply_runtime_option(
     *,
     manifest: Mapping[str, Any],
 ) -> None:
+    if field_id == "delegation_priority":
+        if type(value) is not int or not 0 <= value <= 100:
+            raise UiError("UI_PATCH_INVALID", "delegation priority is invalid")
+        policy["delegation_priority"] = value
+        return
     if field_id == "selection_mode":
         if value not in {"fixed", "lead-selects"}:
             raise UiError("UI_PATCH_INVALID", "selection mode is invalid")

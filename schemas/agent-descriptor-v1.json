@@ -22,7 +22,7 @@
     "harness_id": {"type": "string"},
     "display_name": {"type": "string"},
     "model_display_name": {"type": "string"},
-    "transport": {"enum": ["visible-background", "managed-sdk"]},
+    "transport": {"enum": ["visible-background", "managed-sdk", "native-acp"]},
     "capability_gaps": {"type": "array", "items": {"type": "string"}},
     "icon": {"type": "object"},
     "ui_surfaces": {
