@@ -21,7 +21,7 @@ The project and repository are named **Subagent MCP**. The Python distribution
 and command are **`subagent-harness-mcp`** because the shorter package name was
 already taken.
 
-> **Preview:** `0.1.0a5` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a6` targets Windows. The local MCP, deterministic adapter,
 > package, and localhost UI are usable. Live Claude Code work remains gated
 > until the exact native-harness and no-overage canary passes.
 
@@ -37,7 +37,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a5
+uv tool install subagent-harness-mcp==0.1.0a6
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -49,7 +49,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a5` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a6` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -115,7 +115,7 @@ for details.
 | 13-tool normalized lifecycle over stdio | Works |
 | Deterministic adapter for integration testing | Works without provider quota |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Passed fresh public-user acceptance for `0.1.0a5` |
+| Windows install, update, rollback, registration, and conservative uninstall | Passed release-candidate lifecycle gates; fresh `0.1.0a6` public install follows publication |
 | Claude Code native adapter | Implemented but remains `needs_canary` until its live no-overage gate passes |
 | Provider model selection | Opaque native model IDs; no hard-coded model allowlist or silent fallback |
 | Project-local Claude context and hooks | Disabled until canonical path and content-hash trust are enforced |

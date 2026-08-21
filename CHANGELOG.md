@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a6 - 2026-08-21
+
+- Make the stable Windows launcher hash its staged runtime with the .NET
+  cryptography API available in PowerShell 5.1 instead of requiring the
+  optional `Get-FileHash` cmdlet.
+- Register the public MCP identity as `subagent-mcp` while keeping the Python
+  distribution and CLI identity `subagent-harness-mcp`.
+
 ## 0.1.0a5 - 2026-08-21
 
 - Report an automatically paused safety circuit as unavailable in the localhost

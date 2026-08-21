@@ -46,7 +46,7 @@ The deterministic fake adapter proves the local contract without provider
 quota. The Claude managed adapter cannot run normal work until its exact
 standalone CLI/SDK/model/reasoning/transport pair passes the dedicated live
 no-overage canary. Visible-background, promotion, and native Codex-panel
-integration are explicit preview gaps. Ordinary `0.1.0a5` Claude turns select
+integration are explicit preview gaps. Ordinary `0.1.0a6` Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
