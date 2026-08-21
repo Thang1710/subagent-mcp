@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a12"
+VERSION = "0.1.0a13"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -197,10 +197,10 @@ def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     server = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
 
-    assert "<!-- mcp-name: io.github.thang1710/subagent-mcp -->" in readme
+    assert "<!-- mcp-name: io.github.Thang1710/subagent-mcp -->" in readme
     assert server == {
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-        "name": "io.github.thang1710/subagent-mcp",
+        "name": "io.github.Thang1710/subagent-mcp",
         "title": "Subagent MCP",
         "description": "Let Codex orchestrate external coding agents through their native harnesses.",
         "repository": {

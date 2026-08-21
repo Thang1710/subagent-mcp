@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a13 - 2026-08-21
+
+- Match the official MCP Registry namespace to the canonical GitHub owner
+  casing so registry ownership verification succeeds.
+
 ## 0.1.0a12 - 2026-08-21
 
 - Interrupt Claude lifecycle work before accepting any model output unless a
