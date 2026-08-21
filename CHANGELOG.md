@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a5 - 2026-08-21
+
+- Report an automatically paused safety circuit as unavailable in the localhost
+  UI instead of presenting the runtime as ready for delegation.
+
 ## 0.1.0a4 - 2026-08-21
 
 - Keep external-agent waits inside the MCP service until completion or a real

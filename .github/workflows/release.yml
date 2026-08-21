@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed-off tag, for example v0.1.0a4
+        description: Existing signed-off tag, for example v0.1.0a5
         required: true
         type: string
 
