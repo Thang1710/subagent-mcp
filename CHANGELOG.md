@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a7 - 2026-08-21
+
+- Add a public deterministic adapter conformance runner and a separately
+  packaged sample adapter discovered through the standard Python entry-point
+  group.
+- Explain guarded quota-check capability failures in the localhost UI without
+  accepting unknown evidence or retrying provider work.
+
 ## 0.1.0a6 - 2026-08-21
 
 - Make the stable Windows launcher hash its staged runtime with the .NET
