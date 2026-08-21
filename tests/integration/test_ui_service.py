@@ -160,6 +160,43 @@ def test_ui_provider_refresh_is_explicit_and_uses_sanitized_quota_state(
     assert "must-not-escape" not in json.dumps(refreshed)
 
 
+def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
+    tmp_path: Path,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+
+    class PausedService:
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "available",
+                    "enabled": True,
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [
+                        {
+                            "variant_id": "configured",
+                            "state": "auto_paused",
+                            "revision": 1,
+                            "pair_key": "sha256:test",
+                        }
+                    ],
+                },
+            )
+
+    snapshot = LocalUiBackend(config=config, service=PausedService()).snapshot()
+
+    assert snapshot["runtimes"][0]["status"] == {
+        "state": "auto_paused",
+        "label": "Auto paused",
+        "detail": "",
+    }
+    assert snapshot["health"]["state"] == "unavailable"
+    assert snapshot["health"]["label"] == "Unavailable"
+
+
 def test_ui_provider_refresh_reports_unknown_without_backend_details(
     tmp_path: Path,
 ) -> None:

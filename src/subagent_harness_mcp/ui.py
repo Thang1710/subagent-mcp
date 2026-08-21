@@ -152,7 +152,9 @@ class LocalUiBackend:
         runtimes = _runtime_cards(document, records)
         circuits, activity = _read_ui_state(self._store)
         enabled_states = [item["status"]["state"] for item in runtimes if item["enabled"]]
-        if any(state in {"quarantined", "incompatible", "unhealthy"} for state in enabled_states):
+        if any(state == "auto_paused" for state in enabled_states):
+            health_state = "unavailable"
+        elif any(state in {"quarantined", "incompatible", "unhealthy"} for state in enabled_states):
             health_state = "degraded"
         elif any(state == "needs_canary" for state in enabled_states):
             health_state = "needs_canary"
@@ -1155,6 +1157,11 @@ def _runtime_cards(
         supported_transports = _manifest_strings(manifest, "supported_transports")
         capabilities = _manifest_strings(manifest, "capabilities")
         record_state = str(record.get("state", "unavailable"))
+        if any(
+            isinstance(circuit, Mapping) and circuit.get("state") == "auto_paused"
+            for circuit in record.get("circuits", ())
+        ):
+            record_state = "auto_paused"
         configured = bool(policy)
         enabled = policy.get("enabled") is True
         if record_state == "available" and not configured:
