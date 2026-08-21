@@ -30,7 +30,8 @@ RUNTIME_ID = "deepseek-harness"
 TRANSPORT = "native-acp"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
-CONTROLLER_RESULT_MAX_CHARS = 4_096
+DURABLE_RESULT_MAX_CHARS = 65_536
+CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 MAX_WIRE_LINE_BYTES = 1024 * 1024
 _TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
 _QUOTA_EXHAUSTED = re.compile(
@@ -150,7 +151,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a17",
+            adapter_version="0.1.0a18",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -624,7 +625,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a17"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a18"},
                 },
             ),
             timeout=self._timeout,
@@ -995,7 +996,7 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
     if task.authority:
         lines.extend(("Authority:", *(f"- {item}" for item in task.authority)))
     lines.append(
-        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning."
+        "Return only the final result. Begin with one concise CAPSULE: line, then put complete non-redundant detail under DETAILS:; omit progress narration and hidden reasoning."
     )
     return "\n".join(lines)
 
@@ -1010,7 +1011,7 @@ def _send_prompt(request: AdapterSendRequest) -> str:
             + json.dumps(request.answers, sort_keys=True, separators=(",", ":"))
         )
     lines.append(
-        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning."
+        "Return only the final result. Begin with one concise CAPSULE: line, then put complete non-redundant detail under DETAILS:; omit progress narration and hidden reasoning."
     )
     return "\n".join(lines)
 

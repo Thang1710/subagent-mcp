@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from subagent_harness_mcp.contracts import (
     AgentStatus,
     ContractError,
     ExecutionState,
+    ResultReadRequest,
     SpawnRequest,
     TaskPacket,
     WaitRequest,
@@ -94,8 +96,9 @@ def test_adapter_manifest_serializes_optional_model_schema() -> None:
     }
 
 
-def test_agent_status_compact_projection_omits_repeated_diagnostics() -> None:
-    result = {"text": "bounded final answer", "model": "vendor/model"}
+def test_agent_status_compact_projection_uses_result_artifact_metadata() -> None:
+    text = "native progress CAPSULE: bounded answer\nDETAILS:\ncomplete provider evidence"
+    result = {"text": text, "model": "vendor/model"}
     status = AgentStatus(
         conversation_id="conversation-1",
         execution_id="execution-1",
@@ -123,6 +126,7 @@ def test_agent_status_compact_projection_omits_repeated_diagnostics() -> None:
 
     payload = status.to_compact_dict()
 
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     assert payload == {
         "conversation_id": "conversation-1",
         "conversation_state": "idle",
@@ -130,12 +134,55 @@ def test_agent_status_compact_projection_omits_repeated_diagnostics() -> None:
         "status": "succeeded",
         "state_revision": 4,
         "next_event_cursor": 7,
-        "result": result,
+        "result": {
+            "artifact": {
+                "artifact_id": f"result:execution-1:{digest}",
+                "execution_id": "execution-1",
+                "sha256": digest,
+                "char_count": len(text),
+                "capsule": "bounded answer",
+            }
+        },
     }
     encoded = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    assert encoded.count("bounded final answer") == 1
-    metadata_only = payload | {"result": {"text": "<provider-result-excluded>"}}
-    assert len(json.dumps(metadata_only, separators=(",", ":")).encode()) <= 2048
+    assert "complete provider evidence" not in encoded
+    assert len(encoded.encode()) <= 2048
+
+
+def test_agent_status_compact_projection_keeps_terminal_error_direct() -> None:
+    status = AgentStatus(
+        conversation_id="conversation-error",
+        execution_id="execution-error",
+        external_session_id=None,
+        workspace_path="workspace",
+        conversation_state="idle",
+        execution_state="failed",
+        state_revision=1,
+        descriptor=AgentDescriptor.from_manifest(
+            _manifest(), model="vendor/model", transport="managed-sdk"
+        ),
+        result={"error": {"code": "PROVIDER_ERROR", "message": "turn failed"}},
+        needs_input=(),
+        events=(),
+        next_event_cursor=1,
+    )
+
+    assert status.to_compact_dict()["result"] == status.result
+
+
+def test_result_read_request_requires_exact_hash_and_bounded_character_slice() -> None:
+    request = ResultReadRequest(
+        "conversation-1", "execution-1", "a" * 64, offset=7, limit=8192
+    )
+
+    assert request.offset == 7
+    assert request.limit == 8192
+    with pytest.raises(ContractError, match="sha256"):
+        ResultReadRequest("conversation-1", "execution-1", "not-a-hash")
+    with pytest.raises(ContractError, match="sha256"):
+        ResultReadRequest("conversation-1", "execution-1", None)  # type: ignore[arg-type]
+    with pytest.raises(ContractError, match="limit"):
+        ResultReadRequest("conversation-1", "execution-1", "a" * 64, limit=8193)
 
 
 def test_agent_status_compact_projection_keeps_actionable_optional_state() -> None:

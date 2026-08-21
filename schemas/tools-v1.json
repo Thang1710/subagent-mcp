@@ -51,6 +51,13 @@
       "response_mode_default": "compact",
       "purpose": "Read normalized conversation status and events"
     },
+    "agent_result_read": {
+      "approval": "automatic",
+      "request_id_required": false,
+      "slice_chars_default": 4096,
+      "slice_chars_maximum": 8192,
+      "purpose": "Read one hash-bound slice of a persisted terminal result without calling a provider"
+    },
     "agent_send": {
       "approval": "automatic",
       "request_id_required": true,

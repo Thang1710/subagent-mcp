@@ -111,7 +111,7 @@ async def _exercise_protocol(
     expect_interrupt_success: bool,
 ) -> dict[str, Any]:
     discovered = await client.list_tools()
-    assert len(discovered.tools) == 13
+    assert len(discovered.tools) == 14
 
     runtimes = await client.call_tool("runtime_list", {})
     checked = await client.call_tool("runtime_check", {"runtime_id": "fake"})
@@ -123,6 +123,21 @@ async def _exercise_protocol(
     status = await client.call_tool(
         "agent_status",
         {"conversation_id": conversation_id, "response_mode": "full"},
+    )
+    compact_status = await client.call_tool(
+        "agent_status",
+        {"conversation_id": conversation_id},
+    )
+    compact_result = _meta(compact_status)["result"]
+    artifact = compact_result["result"]["artifact"]
+    artifact_read = await client.call_tool(
+        "agent_result_read",
+        {
+            "conversation_id": conversation_id,
+            "execution_id": artifact["execution_id"],
+            "expected_sha256": artifact["sha256"],
+            "limit": 8192,
+        },
     )
     sent = await client.call_tool(
         "agent_send",
@@ -169,6 +184,8 @@ async def _exercise_protocol(
         checked,
         spawned,
         status,
+        compact_status,
+        artifact_read,
         sent,
         waited,
         interrupted,
@@ -189,11 +206,16 @@ async def _exercise_protocol(
     close_meta = _meta(closed)
     assert closed.is_error is False, close_meta
     assert close_meta["result"]["conversation_state"] == "closed"
+    artifact_meta = _meta(artifact_read)
+    assert artifact_meta["result"]["sha256"] == artifact["sha256"]
+    assert artifact_meta["result"]["eof"] is True
+    assert artifact_meta["result"]["text"]
     return {
         "spawn": spawn_meta["result"],
         "send": send_meta["result"],
         "wait": _meta(waited)["result"][0],
         "interrupt": interrupt_meta,
+        "artifact": artifact_meta["result"],
     }
 
 

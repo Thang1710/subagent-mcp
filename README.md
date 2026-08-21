@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a17` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a18` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -44,7 +44,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a17
+uv tool install subagent-harness-mcp==0.1.0a18
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -56,7 +56,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a17` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a18` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -101,7 +101,7 @@ so the running Python environment does not hold package files open:
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a17
+uv tool install --reinstall subagent-harness-mcp==0.1.0a18
 ```
 
 ## Use it from Codex
@@ -141,13 +141,15 @@ Files installation and follows the native `~/.dsh` profile link to the source
 checkout. Non-standard installations can set `SUBAGENT_MCP_DSH_NODE` and
 `SUBAGENT_MCP_DSH_SOURCE_ROOT` before starting the MCP or UI.
 
-To keep Codex supervision lean, leave lifecycle responses in their default
-`compact` mode and use one `agent_wait` call with its five-minute default. The
-MCP waits locally and wakes Codex only for completion, required input, or a
-timeout; request `full` mode only when diagnosing a problem. Native agents are
-asked for final-only reports, and returned final text is capped at 4,096
-characters so hidden reasoning and long work logs do not inflate the controller
-context.
+To keep Codex supervision lean without discarding detail, leave lifecycle
+responses in their default `compact` mode and use one `agent_wait` call with its
+five-minute default. The MCP waits locally and wakes Codex only for completion,
+required input, or a timeout. A completed agent keeps its full redacted report
+in local product state, bounded at 65,536 characters. Compact status returns a
+short capsule or preview plus its SHA-256 and character count; Codex can use
+`agent_result_read` to pull only the hash-bound 4,096-character slices it needs.
+Transport compression such as gzip can reduce network bytes but does not reduce
+model tokens after decompression, so Subagent MCP avoids opaque compressed text.
 
 ## How it fits together
 
@@ -184,11 +186,11 @@ for details.
 
 | Capability | Status |
 |---|---|
-| 13-tool normalized lifecycle over stdio | Works |
+| 14-tool normalized lifecycle over stdio | Works |
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a17` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a18` |
 | Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Opaque native model IDs; user-ordered fallback only after explicit quota exhaustion |
 

@@ -12,16 +12,26 @@ from subagent_harness_mcp.adapters import (
     AdapterSpawnRequest,
 )
 from subagent_harness_mcp.adapters.deepseek_harness import (
+    CONTROLLER_RESULT_MAX_CHARS,
     DeepSeekHarnessAdapter,
     DshBinding,
     DshLaunch,
     _StdioAcpClient,
+    _bounded_result,
     render_dsh_config,
     _node_path,
     _dsh_env,
     _source_root,
 )
 from subagent_harness_mcp.contracts import ServiceError, TaskPacket
+
+
+def test_durable_result_has_large_bound_and_explicit_truncation() -> None:
+    result = _bounded_result("x" * (CONTROLLER_RESULT_MAX_CHARS * 2))
+
+    assert CONTROLLER_RESULT_MAX_CHARS == 65_536
+    assert len(result) == CONTROLLER_RESULT_MAX_CHARS
+    assert result.endswith("\n[truncated by Subagent MCP]")
 
 
 class _FakeAcpClient:
@@ -213,6 +223,9 @@ def test_background_lifecycle_reuses_native_session_and_interrupts(tmp_path: Pat
         assert done.execution_state == "succeeded"
         assert done.result_text == "DeepSeek review complete."
         assert "Return only the final result" in clients[0].prompts[0][1]
+        assert "CAPSULE:" in clients[0].prompts[0][1]
+        assert "DETAILS:" in clients[0].prompts[0][1]
+        assert "500 words" not in clients[0].prompts[0][1]
         late_interrupt = await adapter.interrupt(
             AdapterSessionRequest(
                 "conversation-1", "execution-1", "dsh-session-1", "execution-1"

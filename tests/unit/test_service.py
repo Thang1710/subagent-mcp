@@ -18,6 +18,7 @@ from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigStore
 from subagent_harness_mcp.contracts import (
     ActionRequest,
+    ResultReadRequest,
     ServiceError,
     SpawnRequest,
     TaskPacket,
@@ -559,6 +560,61 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     assert "user@example.com" not in durable
     assert "hidden-thinking" not in durable
     assert "private transcript" not in durable
+
+
+def test_terminal_result_is_hash_addressed_and_read_in_bounded_slices(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    full_text = "CAPSULE: critical result\nDETAILS:\n" + ("evidence " * 900)
+    harness.enqueue("done", result=full_text)
+    service, _ = _service(tmp_path, harness)
+
+    status = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    artifact = status.to_compact_dict()["result"]["artifact"]
+    first = asyncio.run(
+        service.agent_result_read(
+            ResultReadRequest(
+                status.conversation_id,
+                status.execution_id,
+                artifact["sha256"],
+                offset=0,
+                limit=127,
+            )
+        )
+    )
+    second = asyncio.run(
+        service.agent_result_read(
+            ResultReadRequest(
+                status.conversation_id,
+                status.execution_id,
+                artifact["sha256"],
+                offset=first["next_offset"],
+                limit=8192,
+            )
+        )
+    )
+
+    assert status.result == {"text": full_text}
+    assert artifact["char_count"] == len(full_text)
+    assert artifact["capsule"] == "critical result"
+    assert first["text"] + second["text"] == full_text
+    assert first["eof"] is False
+    assert second["eof"] is True
+    assert harness.call_count("spawn") == 1
+    with pytest.raises(ServiceError) as changed:
+        asyncio.run(
+            service.agent_result_read(
+                ResultReadRequest(
+                    status.conversation_id,
+                    status.execution_id,
+                    "f" * 64,
+                )
+            )
+        )
+    assert changed.value.code == "RESULT_CHANGED"
 
 
 def test_unimplemented_preview_surface_is_explicit_capability_gap(tmp_path: Path) -> None:

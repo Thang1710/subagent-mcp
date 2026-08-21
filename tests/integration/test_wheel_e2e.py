@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a17"
+VERSION = "0.1.0a18"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -229,7 +229,7 @@ create_server(service).run('stdio')
         read_timeout_seconds=15,
     ) as client:
         tools = await client.list_tools()
-        assert len(tools.tools) == 13
+        assert len(tools.tools) == 14
         spawned = await client.call_tool(
             "agent_spawn",
             {

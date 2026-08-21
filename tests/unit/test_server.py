@@ -29,6 +29,7 @@ EXPECTED_TOOL_NAMES = {
     "project_trust",
     "agent_spawn",
     "agent_status",
+    "agent_result_read",
     "agent_send",
     "agent_wait",
     "agent_interrupt",
@@ -158,6 +159,19 @@ class _RecordingService:
     async def agent_status(self, request):
         self.calls.append(("agent_status", request))
         return {"conversation_id": request.conversation_id, "status": "succeeded"}
+
+    async def agent_result_read(self, request):
+        self.calls.append(("agent_result_read", request))
+        return {
+            "artifact_id": f"result:{request.execution_id}:{request.expected_sha256}",
+            "execution_id": request.execution_id,
+            "sha256": request.expected_sha256,
+            "offset": request.offset,
+            "next_offset": request.offset,
+            "total_chars": 0,
+            "eof": True,
+            "text": "",
+        }
 
     async def agent_send(self, request):
         self.calls.append(("agent_send", request))
@@ -420,6 +434,37 @@ def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> 
     assert schemas["agent_wait"]["properties"]["timeout_seconds"]["default"] == 300.0
 
 
+def test_result_read_is_bounded_read_only_and_parses_exact_artifact_identity() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+    schemas = {tool.name: tool.input_schema for tool in _run(server.list_tools())}
+    digest = "a" * 64
+
+    result = _metadata(
+        _run(
+            server.call_tool(
+                "agent_result_read",
+                {
+                    "conversation_id": "conversation-1",
+                    "execution_id": "execution-1",
+                    "expected_sha256": digest,
+                    "offset": 9,
+                    "limit": 123,
+                },
+            )
+        )
+    )["result"]
+
+    assert result["sha256"] == digest
+    name, request = service.calls[-1]
+    assert name == "agent_result_read"
+    assert request.offset == 9
+    assert request.limit == 123
+    assert schemas["agent_result_read"]["properties"]["offset"]["default"] == 0
+    assert schemas["agent_result_read"]["properties"]["limit"]["default"] == 4096
+    assert schemas["agent_result_read"]["properties"]["limit"]["maximum"] == 8192
+
+
 def test_status_is_compact_by_default_and_full_only_when_requested() -> None:
     class _StatusService(_RecordingService):
         async def agent_status(self, request):
@@ -446,7 +491,8 @@ def test_status_is_compact_by_default_and_full_only_when_requested() -> None:
     assert "workspace_path" not in compact
     assert "events" not in compact
     assert compact["conversation_state"] == "idle"
-    assert json.dumps(compact).count("one provider result") == 1
+    assert "text" not in compact["result"]
+    assert json.dumps(compact).count("one provider result") <= 1
     assert full == _terminal_status().to_dict()
 
 

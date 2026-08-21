@@ -16,11 +16,20 @@ provider lifecycle implementations.
 
 ## Normalized lifecycle
 
-The stdio server declares 13 tools from `schemas/tools-v1.json`. Core lifecycle
-is `runtime_list/check`, `agent_spawn`, `agent_status`, `agent_send`,
-`agent_wait`, `agent_interrupt`, and `agent_close`; configuration, trust,
-canary, scan, and workspace-release operations retain their explicit approval
-metadata. Side-effecting requests use idempotency keys.
+The stdio server declares 14 tools from `schemas/tools-v1.json`. Core lifecycle
+is `runtime_list/check`, `agent_spawn`, `agent_status`, `agent_result_read`,
+`agent_send`, `agent_wait`, `agent_interrupt`, and `agent_close`; configuration,
+trust, canary, scan, and workspace-release operations retain their explicit
+approval metadata. Side-effecting requests use idempotency keys.
+
+Terminal text is redacted and retained in the existing execution state. Compact
+status replaces that text with an execution-bound artifact ID, SHA-256,
+character count, and a bounded capsule or preview. `agent_result_read` requires
+the exact conversation, execution, and hash, then returns only a bounded
+character slice without opening a native session or calling a provider. Full
+response mode remains available for compatibility. This keeps all bounded
+result information locally retrievable without repeating it in every Codex
+controller turn.
 
 Every execution records requested/effective model, reasoning, transport,
 workspace, session, and context identity. Provider differences appear only in
@@ -85,5 +94,6 @@ Canary and ordinary turns also disable 1M context, fast mode, and the
 usage-credits command per process. Any later unsafe rate event interrupts and
 pauses the circuit. The requested effort is pinned through both the SDK option
 and provider-native process environment because `system.init` does not publish
-an effort field. Final text returned to the controller is bounded to 4,096
-characters.
+an effort field. Complete redacted final text is bounded to 65,536 characters
+in local state; compact controller responses carry only artifact metadata and
+on-demand reads are limited to 8,192 characters per call.

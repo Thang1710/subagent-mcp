@@ -2,6 +2,16 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a18 - 2026-08-22
+
+- Preserve complete redacted native-agent reports in bounded local state while
+  returning only a capsule or preview, execution identity, SHA-256, and size in
+  compact lifecycle responses.
+- Add read-only `agent_result_read` for hash-bound, on-demand result slices; it
+  never opens a native session or calls a provider.
+- Replace the 500-word agent-output instruction with a `CAPSULE:` plus complete
+  `DETAILS:` contract and raise the durable result bound to 65,536 characters.
+
 ## 0.1.0a17 - 2026-08-22
 
 - Keep a DeepSeek turn timeout authoritative when an interrupt races its

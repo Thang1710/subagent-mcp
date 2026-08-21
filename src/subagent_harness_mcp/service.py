@@ -32,12 +32,14 @@ from .contracts import (
     AgentDescriptor,
     AgentEvent,
     AgentStatus,
+    ResultReadRequest,
     SendRequest,
     ServiceError,
     SpawnRequest,
     StatusRequest,
     TERMINAL_EXECUTION_STATES,
     WaitRequest,
+    result_artifact_metadata,
 )
 from .store import (
     CircuitRecord,
@@ -452,6 +454,55 @@ class SubagentMcpService:
                 category="adapter",
                 next_action="inspect_status",
             ) from exc
+
+    async def agent_result_read(self, request: ResultReadRequest) -> Mapping[str, Any]:
+        try:
+            record = self._store.load_execution(request.execution_id)
+            if record.conversation_id != request.conversation_id:
+                raise ServiceError(
+                    "RESULT_NOT_FOUND",
+                    "result artifact does not belong to the declared conversation",
+                )
+            if record.execution_state not in TERMINAL_EXECUTION_STATES:
+                raise ServiceError(
+                    "RESULT_NOT_AVAILABLE",
+                    "result artifact is not terminal",
+                    next_action="inspect_status",
+                )
+            result = record.result
+            artifact = (
+                result_artifact_metadata(record.execution_id, result)
+                if isinstance(result, Mapping)
+                else None
+            )
+            text = result.get("text") if isinstance(result, Mapping) else None
+            if artifact is None or not isinstance(text, str):
+                raise ServiceError(
+                    "RESULT_NOT_AVAILABLE",
+                    "execution has no readable text artifact",
+                    next_action="inspect_status",
+                )
+            if artifact["sha256"] != request.expected_sha256:
+                raise ServiceError(
+                    "RESULT_CHANGED",
+                    "result artifact hash no longer matches",
+                    next_action="inspect_status",
+                )
+            if request.offset > len(text):
+                raise ServiceError("REQUEST_INVALID", "result offset exceeds artifact length")
+            next_offset = min(len(text), request.offset + request.limit)
+            return {
+                **artifact,
+                "offset": request.offset,
+                "next_offset": next_offset,
+                "total_chars": len(text),
+                "eof": next_offset == len(text),
+                "text": text[request.offset:next_offset],
+            }
+        except ServiceError:
+            raise
+        except StateError as exc:
+            raise _public_error(exc) from exc
 
     async def agent_send(self, request: SendRequest) -> AgentStatus:
         execution_id = self._id_factory("execution")

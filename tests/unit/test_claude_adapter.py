@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from claude_agent_sdk import (
@@ -26,6 +27,7 @@ from subagent_harness_mcp.adapters.claude_code import (
     ClaudeCodeAdapter,
     CommandResult,
     _bounded_controller_result,
+    _spawn_prompt,
     _subscription_oauth_source,
 )
 from subagent_harness_mcp.contracts import ServiceError, TaskPacket
@@ -110,11 +112,29 @@ def test_non_subscription_init_sources_are_rejected(source: str | None) -> None:
     assert _subscription_oauth_source({"apiKeySource": source}) is False
 
 
-def test_controller_result_is_compact_and_explicitly_truncated() -> None:
+def test_durable_result_has_large_bound_and_explicit_truncation() -> None:
     result = _bounded_controller_result(["x" * (CONTROLLER_RESULT_MAX_CHARS * 2)])
 
+    assert CONTROLLER_RESULT_MAX_CHARS == 65_536
     assert len(result) == CONTROLLER_RESULT_MAX_CHARS
     assert result.endswith("\n[truncated by Subagent MCP]")
+
+
+def test_task_prompt_requests_capsule_plus_complete_detail_without_word_cap() -> None:
+    prompt = _spawn_prompt(
+        SimpleNamespace(
+            task=TaskPacket(
+                "Review",
+                "Inspect the change.",
+                ("Return evidence.",),
+                "sub-agent",
+            )
+        )
+    )
+
+    assert "CAPSULE:" in prompt
+    assert "DETAILS:" in prompt
+    assert "500 words" not in prompt
 
 
 @pytest.mark.parametrize(

@@ -62,7 +62,8 @@ PROVIDER_SAFETY_ENV = {
 }
 QUOTA_EVIDENCE_GRACE_SECONDS = 0.5
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 180.0
-CONTROLLER_RESULT_MAX_CHARS = 4_096
+DURABLE_RESULT_MAX_CHARS = 65_536
+CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 _CONTROLLER_TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
 
 
@@ -90,7 +91,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a17",
+            "adapter_version": "0.1.0a18",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -134,7 +135,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a17",
+            adapter_version="0.1.0a18",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -937,7 +938,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a17",
+            "adapter_version": "0.1.0a18",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],
@@ -1156,7 +1157,7 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
         f"Role: {task.role}",
         f"Task: {task.title}",
         task.prompt,
-        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning.",
+        "Return only the final result. Begin with one concise CAPSULE: line, then put complete non-redundant detail under DETAILS:; omit progress narration and hidden reasoning.",
         "Acceptance criteria:",
         *(f"- {item}" for item in task.acceptance_criteria),
     ]
@@ -1168,7 +1169,7 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
 def _send_prompt(request: AdapterSendRequest) -> str:
     lines = [
         request.prompt,
-        "Return only the final result in at most 500 words; omit progress narration and hidden reasoning.",
+        "Return only the final result. Begin with one concise CAPSULE: line, then put complete non-redundant detail under DETAILS:; omit progress narration and hidden reasoning.",
     ]
     if request.reply_to is not None:
         lines.append(f"Reply to: {request.reply_to}")

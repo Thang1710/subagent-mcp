@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import unicodedata
@@ -15,6 +16,9 @@ CONTRACT_SCHEMA_VERSION = 1
 TERMINAL_EXECUTION_STATES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
 )
+RESULT_CAPSULE_MAX_CHARS = 512
+RESULT_SLICE_DEFAULT_CHARS = 4_096
+RESULT_SLICE_MAX_CHARS = 8_192
 
 
 class ContractError(ValueError):
@@ -398,6 +402,38 @@ class StatusRequest:
 
 
 @dataclass(frozen=True, slots=True)
+class ResultReadRequest:
+    conversation_id: str
+    execution_id: str
+    expected_sha256: str
+    offset: int = 0
+    limit: int = RESULT_SLICE_DEFAULT_CHARS
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.conversation_id, "conversation_id")
+        validate_identifier(self.execution_id, "execution_id")
+        if not isinstance(self.expected_sha256, str) or len(self.expected_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.expected_sha256
+        ):
+            raise ContractError("REQUEST_INVALID", "expected_sha256 must be lowercase SHA-256")
+        if (
+            isinstance(self.offset, bool)
+            or not isinstance(self.offset, int)
+            or self.offset < 0
+        ):
+            raise ContractError("REQUEST_INVALID", "offset must be nonnegative")
+        if (
+            isinstance(self.limit, bool)
+            or not isinstance(self.limit, int)
+            or not 1 <= self.limit <= RESULT_SLICE_MAX_CHARS
+        ):
+            raise ContractError(
+                "REQUEST_INVALID",
+                f"limit must be between 1 and {RESULT_SLICE_MAX_CHARS}",
+            )
+
+
+@dataclass(frozen=True, slots=True)
 class WaitTarget:
     conversation_id: str
     after_revision: int = 0
@@ -474,7 +510,13 @@ class AgentStatus:
             "next_event_cursor": self.next_event_cursor,
         }
         if self.result is not None and self.execution_state in TERMINAL_EXECUTION_STATES:
-            payload["result"] = dict(self.result)
+            if "error" in self.result:
+                payload["result"] = dict(self.result)
+            else:
+                artifact = result_artifact_metadata(self.execution_id, self.result)
+                payload["result"] = (
+                    dict(self.result) if artifact is None else {"artifact": artifact}
+                )
         if self.needs_input:
             payload["needs_input"] = [dict(item) for item in self.needs_input]
         if self.recovery_required:
@@ -499,6 +541,32 @@ class AgentStatus:
             "next_event_cursor": self.next_event_cursor,
             "recovery_required": self.recovery_required,
         }
+
+
+def result_artifact_metadata(
+    execution_id: str,
+    result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    text = result.get("text")
+    if not isinstance(text, str):
+        return None
+    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+    metadata: dict[str, Any] = {
+        "artifact_id": f"result:{execution_id}:{digest}",
+        "execution_id": execution_id,
+        "sha256": digest,
+        "char_count": len(text),
+    }
+    capsule_at = text.casefold().find("capsule:")
+    if capsule_at >= 0:
+        capsule = text[capsule_at + len("capsule:") :].splitlines()[0].strip()
+        if capsule:
+            metadata["capsule"] = capsule[:RESULT_CAPSULE_MAX_CHARS]
+            return metadata
+    preview = " ".join(text.split())[:RESULT_CAPSULE_MAX_CHARS]
+    if preview:
+        metadata["preview"] = preview
+    return metadata
 
 
 def _validate_text_collection(

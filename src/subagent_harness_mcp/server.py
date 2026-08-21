@@ -6,15 +6,19 @@ import json
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
-from typing import Any
+from typing import Annotated, Any
 
 from mcp.server import MCPServer
 from mcp.types import CallToolResult, TextContent
+from pydantic import Field
 
 from . import __version__
 from .contracts import (
     ActionRequest,
     ContractError,
+    RESULT_SLICE_DEFAULT_CHARS,
+    RESULT_SLICE_MAX_CHARS,
+    ResultReadRequest,
     SendRequest,
     ServiceError,
     SpawnRequest,
@@ -33,7 +37,7 @@ _CURRENT_WORKSPACE = "current"
 
 
 def create_server(service: object) -> MCPServer:
-    """Create the static 13-tool MCP surface over one service instance."""
+    """Create the static 14-tool MCP surface over one service instance."""
 
     server = MCPServer(
         SERVER_NAME,
@@ -228,6 +232,35 @@ def create_server(service: object) -> MCPServer:
                 _status_request(api_version, conversation_id, after_cursor, refresh),
             ),
             response_mode=response_mode,
+        )
+
+    @server.tool(name="agent_result_read", structured_output=False)
+    async def agent_result_read(
+        conversation_id: str,
+        execution_id: str,
+        expected_sha256: str,
+        offset: Annotated[int, Field(ge=0)] = 0,
+        limit: Annotated[int, Field(ge=1, le=RESULT_SLICE_MAX_CHARS)] = (
+            RESULT_SLICE_DEFAULT_CHARS
+        ),
+        api_version: int = TOOL_API_VERSION,
+    ) -> CallToolResult:
+        """Read one hash-bound slice of a terminal result without calling a provider."""
+
+        return await _invoke(
+            "agent_result_read",
+            lambda: _call_request(
+                service,
+                "agent_result_read",
+                _result_read_request(
+                    api_version,
+                    conversation_id,
+                    execution_id,
+                    expected_sha256,
+                    offset,
+                    limit,
+                ),
+            ),
         )
 
     @server.tool(name="agent_send", structured_output=False)
@@ -543,6 +576,24 @@ def _status_request(
 ) -> StatusRequest:
     _api_version(api_version)
     return StatusRequest(conversation_id, after_cursor=after_cursor, refresh=refresh)
+
+
+def _result_read_request(
+    api_version: int,
+    conversation_id: str,
+    execution_id: str,
+    expected_sha256: str,
+    offset: int,
+    limit: int,
+) -> ResultReadRequest:
+    _api_version(api_version)
+    return ResultReadRequest(
+        conversation_id,
+        execution_id,
+        expected_sha256,
+        offset=offset,
+        limit=limit,
+    )
 
 
 def _send_request(
