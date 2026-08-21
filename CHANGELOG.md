@@ -2,6 +2,12 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a8 - 2026-08-21
+
+- Treat Claude's `allowed_warning` rate state as remaining subscription quota
+  only when overage is explicitly rejected and `isUsingOverage` is false.
+  Missing or unsafe no-overage evidence still pauses the runtime immediately.
+
 ## 0.1.0a7 - 2026-08-21
 
 - Add a public deterministic adapter conformance runner and a separately

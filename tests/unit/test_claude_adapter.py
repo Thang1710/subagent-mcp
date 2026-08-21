@@ -131,7 +131,7 @@ class _PostQueryUnsafeClient(_UnsafeClient):
         )
         yield RateLimitEvent(
             rate_limit_info=RateLimitInfo(
-                status="allowed",
+                status="allowed_warning",
                 overage_status="rejected",
                 raw={"isUsingOverage": False},
             ),
@@ -169,7 +169,7 @@ class _SafeQuotaClient(_UnsafeClient):
         )
         yield RateLimitEvent(
             rate_limit_info=RateLimitInfo(
-                status="allowed",
+                status="allowed_warning",
                 overage_status="rejected",
                 raw={"isUsingOverage": False},
             ),
@@ -178,7 +178,7 @@ class _SafeQuotaClient(_UnsafeClient):
         )
 
 
-def test_quota_probe_interrupts_after_safe_rate_before_model_output(tmp_path: Path) -> None:
+def test_quota_probe_accepts_safe_warning_before_model_output(tmp_path: Path) -> None:
     cli = tmp_path / "claude.exe"
     cli.write_bytes(b"standalone-cli")
     clients: list[_SafeQuotaClient] = []
