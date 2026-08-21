@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -22,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a11"
+VERSION = "0.1.0a12"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -190,6 +191,43 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
         (ROOT / "docs/threat-model.md").read_text(encoding="utf-8"),
     ):
         assert "AgentBridge" not in content
+
+
+def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    server = json.loads((ROOT / "server.json").read_text(encoding="utf-8"))
+
+    assert "<!-- mcp-name: io.github.thang1710/subagent-mcp -->" in readme
+    assert server == {
+        "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+        "name": "io.github.thang1710/subagent-mcp",
+        "title": "Subagent MCP",
+        "description": "Let Codex orchestrate external coding agents through their native harnesses.",
+        "repository": {
+            "url": "https://github.com/Thang1710/subagent-mcp",
+            "source": "github",
+        },
+        "websiteUrl": "https://github.com/Thang1710/subagent-mcp",
+        "version": VERSION,
+        "packages": [
+            {
+                "registryType": "pypi",
+                "identifier": DIST_NAME,
+                "version": VERSION,
+                "runtimeHint": "uvx",
+                "transport": {"type": "stdio"},
+                "packageArguments": [
+                    {
+                        "type": "positional",
+                        "value": "serve",
+                        "description": "Start the Subagent MCP stdio server.",
+                    }
+                ],
+            }
+        ],
+    }
+    sdist = _read_toml(ROOT / "pyproject.toml")["tool"]["hatch"]["build"]["targets"]["sdist"]
+    assert "/server.json" in sdist["include"]
 
 
 def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:

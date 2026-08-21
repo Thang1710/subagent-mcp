@@ -9,24 +9,24 @@ Let a user explicitly refresh current provider availability from the localhost U
 
 ## Source of truth
 
-Claude documents `/status` as an interactive allocation view but does not publish a stable machine-readable subscription-quota endpoint. Subagent MCP therefore does not parse terminal screen output, scrape Claude's browser UI, or persist guessed reset times.
+Claude documents interactive allocation views but does not publish a stable machine-readable subscription-quota endpoint or a pre-request Agent SDK control method. Subagent MCP therefore does not parse terminal screen output, scrape Claude's browser UI, read private account files, or persist guessed reset times.
 
-The supported programmatic evidence is Claude Agent SDK's `RateLimitEvent` emitted by the native Claude Code harness. A safe event must attest all of the following before any assistant output is accepted:
+The supported programmatic evidence is Claude Agent SDK's `RateLimitEvent` emitted by the native Claude Code harness. This event is normally post-request evidence, not proof available before a provider request. A safe event must attest all of the following before any assistant output is accepted:
 
-- primary status is exactly `allowed`;
+- primary status is `allowed` or `allowed_warning`;
 - `raw.isUsingOverage` is exactly `false`;
 - overage status is exactly `rejected`;
 - no billing, credit, or rate error is reported.
 
-Any missing, warning, ambiguous, or overage evidence fails closed as `QUOTA_PAUSED`. Authentication must remain first-party Claude subscription auth with no credential override environment variable.
+Any missing, ambiguous, or overage evidence fails closed as `QUOTA_PAUSED`. An `allowed_warning` is safe only when the two independent no-overage fields above remain explicit. Authentication must remain first-party Claude subscription auth with no credential override environment variable.
 
 ## Explicit refresh flow
 
 - Initial page load remains local and does not contact a model provider.
 - Clicking **Refresh status** sends an authenticated, same-origin, CSRF-protected `POST /api/v1/refresh` with no body.
 - The backend checks every configured runtime through `runtime_check(refresh_quota=True)`.
-- A ready Claude runtime performs a one-turn, no-tools probe and interrupts immediately after safe init/rate evidence, before assistant output.
-- A Claude runtime paused for quota or awaiting its first canary reruns the existing bounded canary. A safe result restores the circuit; an unsafe result remains paused.
+- The Claude adapter performs a bounded connect-only check with no query and no model invocation. If the native harness publishes no structured pre-request quota evidence, Refresh reports **Unknown**.
+- A paused runtime is not restored by a live canary from the UI. It can recover only if a future documented connect-only surface supplies fresh safe evidence, or through the separately guarded runtime canary path.
 - The response returns a new sanitized UI snapshot. It contains availability and action text, never credentials, raw provider events, prompts, output, or account identifiers.
 
 Refreshing after a plan upgrade therefore uses current provider evidence rather than the previous plan's reset time.
@@ -52,10 +52,9 @@ No countdown or reset timestamp is shown unless a future adapter publishes a doc
 ## Acceptance
 
 - Page boot causes zero provider client creation.
-- One Refresh click causes at most one bounded probe per configured variant.
+- One Refresh click causes at most one bounded connect-only check per configured variant and zero model queries.
 - Safe refresh output contains `overage_blocked=true` and no provider output.
 - Unsafe or ambiguous rate evidence interrupts before assistant output and reports quota paused.
 - A paused circuit can recover only from fresh safe provider evidence.
 - Spawn/send still recheck quota even after a successful refresh.
 - UI refresh endpoint enforces loopback, host, origin, session, CSRF, empty body, response redaction, and size limits.
-

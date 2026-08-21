@@ -4,13 +4,26 @@ build-backend = "hatchling.build"
 
 [project]
 name = "subagent-harness-mcp"
-version = "0.1.0a11"
-description = "Subagent MCP for orchestrating native external coding-agent harnesses."
+version = "0.1.0a12"
+description = "Subagent MCP gateway for Codex to orchestrate external coding agents through native harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
 license-files = ["LICENSE"]
-keywords = ["mcp", "subagent", "coding-agent", "orchestration"]
+keywords = [
+    "agent-orchestration",
+    "ai-agents",
+    "claude-code",
+    "codex",
+    "coding-agent",
+    "developer-tools",
+    "mcp",
+    "mcp-server",
+    "model-context-protocol",
+    "multi-agent",
+    "native-harness",
+    "subagent",
+]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Environment :: Console",
@@ -29,6 +42,12 @@ dependencies = [
     "mcp>=2.0.0,<2.1",
     "claude-agent-sdk==0.2.142",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Thang1710/subagent-mcp"
+Repository = "https://github.com/Thang1710/subagent-mcp"
+Issues = "https://github.com/Thang1710/subagent-mcp/issues"
+Changelog = "https://github.com/Thang1710/subagent-mcp/blob/main/CHANGELOG.md"
 
 [project.scripts]
 subagent-harness-mcp = "subagent_harness_mcp.cli:main"
@@ -60,6 +79,7 @@ include = [
     "/docs/architecture.md",
     "/docs/adapter-authoring.md",
     "/docs/threat-model.md",
+    "/server.json",
     "/schemas",
     "/pyproject.toml",
 ]

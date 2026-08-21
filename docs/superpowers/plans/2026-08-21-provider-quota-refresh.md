@@ -2,7 +2,7 @@
 
 > Execute test-first in `phase0a-contract-hardening`. This is a billing-safety feature: ambiguous provider evidence must fail closed.
 
-**Goal:** Add explicit, event-backed quota refresh without clocks, scraping, API credentials, or usage-credit consent.
+**Goal:** Add explicit quota refresh without clocks, scraping, API credentials, usage-credit consent, or a model invocation from the UI.
 
 **Architecture:** Add an optional provider-neutral quota-probe adapter protocol, expose it through `runtime_check(refresh_quota=True)`, and connect the UI button to a CSRF-protected POST callback. Reuse existing canary/circuit recovery and pre-spawn guards.
 
@@ -12,16 +12,16 @@
 
 ## Task 1: Adapter pre-output quota probe
 
-1. Add failing fake-SDK tests for safe and unsafe `RateLimitEvent` sequences.
-2. Add `QuotaProbeAdapter` and implement Claude `quota_probe(CanaryRequest)` with existing bound-pair/model/effort checks.
-3. Interrupt immediately after safe rate evidence; fail if assistant/result arrives first; confirm disconnect cleanup.
+1. Add failing fake-SDK tests for safe, unsafe, missing, and model-output-before-evidence sequences.
+2. Add `QuotaProbeAdapter` and implement Claude `quota_probe(CanaryRequest)` as a bounded connect-only check with existing bound-pair/model/effort checks.
+3. Send no query. Accept only structured evidence emitted before model output; otherwise report unknown or quota paused and confirm disconnect cleanup.
 4. Run focused adapter tests to green.
 
 ## Task 2: Runtime check and circuit recovery
 
 1. Add failing service/server tests for `runtime_check(refresh_quota=True)` and the default no-provider path.
 2. For ready circuits, run the light quota probe and pause on unsafe evidence.
-3. For `needs_canary` or `auto_paused`, run one fresh existing canary with a unique request ID; do not use a reset clock.
+3. For `needs_canary` or `auto_paused`, do not run a live canary from Refresh; preserve the circuit unless fresh connect-only evidence is available.
 4. Return only sanitized quota state and no-overage attestation.
 5. Keep spawn/send's existing fresh rate guard unchanged.
 
@@ -36,6 +36,5 @@
 
 1. Run focused adapter/service/server/UI tests and JavaScript syntax check.
 2. Run the full safe suite excluding real Git worktree mutation.
-3. Live-check credits remain off, then perform one user-approved Refresh in Chrome and inspect only compact status fields.
+3. Confirm Refresh creates no provider query, then inspect only compact status fields in Chrome.
 4. Security-scan diff/artifact and commit with the user's Git identity.
-

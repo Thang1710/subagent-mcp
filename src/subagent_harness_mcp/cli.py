@@ -54,6 +54,28 @@ def _lifecycle_parser(command: str) -> argparse.ArgumentParser:
     return parser
 
 
+def _ui_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("PORT must be 0 through 65535") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("PORT must be 0 through 65535")
+    return port
+
+
+def _ui_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=f"{PROGRAM_NAME} ui")
+    parser.add_argument(
+        "--port",
+        type=_ui_port,
+        default=8765,
+        metavar="PORT",
+        help="Loopback port (default: 8765; use 0 for an ephemeral port)",
+    )
+    return parser
+
+
 def _print_lifecycle_result(result: object) -> None:
     from .install import LifecycleResult
 
@@ -122,7 +144,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     arguments = parser.parse_args(argv)
     if arguments.command is None:
         return _command_error(parser, "a command is required")
-    if arguments.command in {"serve", "ui"} and arguments.command_args:
+    if arguments.command == "serve" and arguments.command_args:
         return _command_error(
             parser,
             f"command {arguments.command!r} does not accept arguments",
@@ -139,15 +161,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             return 1
     if arguments.command == "ui":
+        ui_arguments = _ui_parser().parse_args(arguments.command_args)
         try:
-            from .ui import run_ui
+            from .ui import UiError, run_ui
 
-            return run_ui()
-        except Exception:
+            return run_ui(port=ui_arguments.port)
+        except UiError as exc:
             print(
-                f"{PROGRAM_NAME}: error: localhost UI could not start",
+                f"{PROGRAM_NAME}: error: {exc.code}: {exc}",
                 file=sys.stderr,
             )
+            return 1
+        except Exception:
+            print(f"{PROGRAM_NAME}: error: localhost UI could not start", file=sys.stderr)
             return 1
     if arguments.command in {"install", "update", "rollback", "register", "uninstall"}:
         return _run_lifecycle(arguments.command, arguments.command_args)

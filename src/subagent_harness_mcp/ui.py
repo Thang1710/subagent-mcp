@@ -326,12 +326,15 @@ class LoopbackUiServer:
         *,
         provider_refresher: ProviderRefresher | None = None,
         host: str = "127.0.0.1",
+        port: int = 0,
     ) -> None:
         if host not in {"127.0.0.1", "::1"}:
             raise UiError(
                 "LOOPBACK_REQUIRED",
                 "the settings UI binds only to literal loopback addresses",
             )
+        if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+            raise UiError("UI_PORT_INVALID", "the settings UI port must be 0 through 65535")
         if not callable(snapshot_provider) or not callable(config_patcher):
             raise UiError("UI_BACKEND_INVALID", "UI callbacks must be callable")
         if provider_refresher is not None and not callable(provider_refresher):
@@ -342,7 +345,7 @@ class LoopbackUiServer:
         )
         try:
             self._httpd = server_type(
-                (host, 0),
+                (host, port),
                 _handler_type(self._state),
                 bind_and_activate=True,
             )
@@ -432,7 +435,7 @@ def create_local_backend() -> LocalUiBackend:
     return LocalUiBackend(config=config, service=service, store=store)
 
 
-def run_ui(*, browser_opener: BrowserOpener = webbrowser.open) -> int:
+def run_ui(*, port: int = 8765, browser_opener: BrowserOpener = webbrowser.open) -> int:
     """Bind first, open the fragment URL, and run until interrupted."""
 
     backend = create_local_backend()
@@ -440,6 +443,7 @@ def run_ui(*, browser_opener: BrowserOpener = webbrowser.open) -> int:
         backend.snapshot,
         backend.patch_config,
         provider_refresher=backend.refresh_provider,
+        port=port,
     )
     try:
         if not server.open_browser(browser_opener):

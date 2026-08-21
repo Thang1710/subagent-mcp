@@ -76,7 +76,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a11",
+            "adapter_version": "0.1.0a12",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -120,7 +120,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a11",
+            adapter_version="0.1.0a12",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -753,17 +753,28 @@ class ClaudeCodeAdapter:
         from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, SystemMessage
 
         session_id: str | None = None
-        while session_id is None:
+        rate_seen = False
+        while session_id is None or not rate_seen:
             message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
             if isinstance(message, (AssistantMessage, ResultMessage)):
-                await _interrupt_or_recovery(
-                    client,
+                failure = (
                     AdapterFailure(
+                        "USAGE_CREDITS_FORBIDDEN",
+                        "quota",
+                        False,
+                        "Claude produced model output before safe rate evidence",
+                    )
+                    if session_id is not None
+                    else AdapterFailure(
                         "CONTEXT_DRIFT",
                         "adapter",
                         False,
                         "Claude produced model output before init identity",
-                    ),
+                    )
+                )
+                await _interrupt_or_recovery(
+                    client,
+                    failure,
                     self._canary_timeout,
                 )
             if isinstance(message, SystemMessage) and message.subtype == "init":
@@ -794,6 +805,7 @@ class ClaudeCodeAdapter:
                     await _interrupt_or_recovery(
                         client, unsafe, self._canary_timeout
                     )
+                rate_seen = True
         return session_id
 
     async def _receive_terminal_result(
@@ -896,7 +908,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a11",
+            "adapter_version": "0.1.0a12",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],

@@ -5,13 +5,26 @@ import hashlib
 import json
 from pathlib import Path
 
-from claude_agent_sdk import RateLimitEvent, RateLimitInfo, SystemMessage
+import pytest
+from claude_agent_sdk import (
+    AssistantMessage,
+    RateLimitEvent,
+    RateLimitInfo,
+    ResultMessage,
+    SystemMessage,
+    TextBlock,
+)
 
-from subagent_harness_mcp.adapters import AdapterContextRequest, CanaryRequest
+from subagent_harness_mcp.adapters import (
+    AdapterContextRequest,
+    AdapterSpawnRequest,
+    CanaryRequest,
+)
 from subagent_harness_mcp.adapters.claude_code import (
     ClaudeCodeAdapter,
     CommandResult,
 )
+from subagent_harness_mcp.contracts import ServiceError, TaskPacket
 
 
 class _Runner:
@@ -196,6 +209,100 @@ class _StartupUnsafeClient(_UnsafeClient):
             uuid="quota-rate-unsafe",
             session_id="quota-session-unsafe",
         )
+
+
+class _ModelBeforeRateClient(_UnsafeClient):
+    async def receive_messages(self):
+        while not self.query_calls:
+            await asyncio.sleep(0)
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "session_id": "session-before-rate",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        yield AssistantMessage(
+            content=[TextBlock("must not be accepted")],
+            model="vendor/future-model",
+            session_id="session-before-rate",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="session-before-rate",
+            result="must not be accepted",
+            terminal_reason="completed",
+            uuid="turn-before-rate",
+        )
+
+
+def test_lifecycle_interrupts_model_output_before_safe_rate_evidence(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ModelBeforeRateClient] = []
+
+    def factory(options):
+        client = _ModelBeforeRateClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+    asyncio.run(adapter.probe())
+    context = asyncio.run(
+        adapter.resolve_context(
+            AdapterContextRequest(
+                runtime_id="claude-code",
+                variant_id="future-deep",
+                model="vendor/future-model",
+                reasoning={"effort": "xhigh"},
+                workspace_path=str(workspace.resolve()),
+                workspace_key="workspace-1",
+                transport="managed-sdk",
+                permissions=("repo_read",),
+                context_policy_id="context-1",
+                permission_policy_id="permission-1",
+            )
+        )
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        asyncio.run(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    conversation_id="conversation-1",
+                    execution_id="execution-1",
+                    task=TaskPacket(
+                        "Review",
+                        "Review only.",
+                        ("Return one result.",),
+                        "sub-agent",
+                    ),
+                    context=context,
+                )
+            )
+        )
+
+    assert caught.value.code == "USAGE_CREDITS_FORBIDDEN"
+    assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
 
 
 def test_quota_probe_accepts_safe_warning_before_model_output(tmp_path: Path) -> None:

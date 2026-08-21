@@ -70,3 +70,7 @@ The deterministic acceptance target is:
 - full mode remains available and contract-complete.
 
 The empirical token result is evidence, not a hard portable guarantee, because Codex model, context length, caching, task result size, and host behavior affect usage.
+
+## Session measurement
+
+The original monitored Claude task interval consumed 11,972 controller tokens and included repeated commentary, browser state, refresh, and result inspection. After compact-default lifecycle responses, one local wait, a narrow diff prompt, and one concise Claude result, the comparable successful interval consumed 5,654 controller tokens: 6,318 fewer, or about 52.8% lower. A stricter later safety probe consumed 4,810 controller tokens but was interrupted before returning a review result, so it is not used as the successful-task comparison.

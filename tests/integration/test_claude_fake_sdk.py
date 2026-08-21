@@ -84,17 +84,16 @@ class _PassingClient:
                 "cwd": None if self.options.cwd is None else str(self.options.cwd),
             },
         )
-        if self.options.tools == []:
-            yield RateLimitEvent(
-                rate_limit_info=RateLimitInfo(
-                    status="allowed",
-                    overage_status="rejected",
-                    overage_disabled_reason="out_of_credits",
-                    raw={"isUsingOverage": False},
-                ),
-                uuid="rate-1",
-                session_id=self.session_id,
-            )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                overage_status="rejected",
+                overage_disabled_reason="out_of_credits",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="rate-1",
+            session_id=self.session_id,
+        )
         yield AssistantMessage(
             content=[
                 ThinkingBlock("must never persist", "signature"),

@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a12 - 2026-08-21
+
+- Interrupt Claude lifecycle work before accepting any model output unless a
+  fresh rate event explicitly proves that overage is blocked.
+- Open the localhost UI on stable port `8765` by default, with an explicit
+  `--port` override and no dependency on an active MCP process.
+- Add searchable PyPI project links and keywords for Codex, native harnesses,
+  MCP, multi-agent orchestration, and Claude Code.
+
 ## 0.1.0a11 - 2026-08-21
 
 - Restrict release manifests and checksums to the wheel and source archive so

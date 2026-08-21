@@ -152,7 +152,7 @@ The stdio MCP registers the exact public tool names from the design. Unsupported
 - Modify: `src/subagent_harness_mcp/cli.py`
 - Create: `tests/unit/test_ui_security.py`, `tests/integration/test_ui_service.py`
 
-- [ ] `subagent-harness-mcp ui` binds only `127.0.0.1`/`::1` on an OS-assigned port, serves package assets, and opens the browser only after successful bind.
+- [ ] `subagent-harness-mcp ui` binds only `127.0.0.1`/`::1` on stable default port `8765` (or an explicit `--port`, with `0` requesting an OS-assigned port), serves package assets without an active MCP process, and opens the browser only after successful bind.
 - [ ] Use a per-process bootstrap token in the URL fragment, one-time header exchange, HttpOnly/SameSite=Strict cookie, CSRF token, strict Host/Origin checks, restrictive CSP, no CORS, no token logs, and no non-loopback fallback.
 - [ ] Show editable runtime/model/reasoning/context/trust settings plus health/circuit/update state and a read-only recent activity list. Do not expose prompts, transcripts, raw events, arbitrary files, chat, or lifecycle controls.
 - [ ] Test valid browser flow and reject non-loopback peer, hostile Host/Origin, replayed bootstrap, missing CSRF, and path traversal.

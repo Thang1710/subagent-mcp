@@ -23,7 +23,7 @@ def _server(
 
     def snapshot():
         return {
-            "version": "0.1.0a11",
+            "version": "0.1.0a12",
             "revision": 7,
             "health": {"state": "ready", "messages": []},
             "runtimes": [],
@@ -128,9 +128,60 @@ def test_peer_validation_accepts_only_ip_loopback() -> None:
 def test_cli_routes_ui_without_importing_a_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(ui, "run_ui", lambda: 23)
+    ports: list[int] = []
+
+    def run_ui(*, port: int) -> int:
+        ports.append(port)
+        return 23
+
+    monkeypatch.setattr(ui, "run_ui", run_ui)
 
     assert cli.main(["ui"]) == 23
+    assert ports == [8765]
+
+
+def test_cli_accepts_an_explicit_ui_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    ports: list[int] = []
+
+    def run_ui(*, port: int) -> int:
+        ports.append(port)
+        return 0
+
+    monkeypatch.setattr(ui, "run_ui", run_ui)
+
+    assert cli.main(["ui", "--port", "9123"]) == 0
+    assert ports == [9123]
+
+
+def test_cli_rejects_an_invalid_ui_port_without_a_value_dump(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit):
+        cli.main(["ui", "--port", "70000"])
+
+    error = capsys.readouterr().err
+    assert "PORT must be 0 through 65535" in error
+    assert len(error) < 500
+
+
+def test_loopback_ui_server_binds_an_explicit_port() -> None:
+    ephemeral = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        port=0,
+    )
+    port = ephemeral.bound_port
+    ephemeral.close()
+
+    fixed = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        port=port,
+    )
+    try:
+        assert fixed.bound_port == port
+    finally:
+        fixed.close()
 
 
 def test_static_assets_have_restrictive_headers_and_no_cors() -> None:

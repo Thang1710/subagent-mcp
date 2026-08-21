@@ -490,7 +490,7 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
         result="Bearer abcdefghijklmnopqrstuvwxyz user@example.com finished",
     )
     service, store = _service(tmp_path, harness)
-    prompt = "private transcript sk-ant-abcdefghijklmnopqrstuvwxyz hidden-thinking"
+    prompt = "private transcript credential-marker hidden-thinking"
 
     status = asyncio.run(
         service.agent_spawn(_spawn_request(workspace, prompt=prompt))
@@ -511,7 +511,7 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
                 "events": database.execute("SELECT payload_json FROM events").fetchall(),
             }
         )
-    assert "sk-ant-" not in durable
+    assert "credential-marker" not in durable
     assert "user@example.com" not in durable
     assert "hidden-thinking" not in durable
     assert "private transcript" not in durable
