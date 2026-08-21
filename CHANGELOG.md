@@ -2,8 +2,10 @@
 
 All notable changes to Subagent MCP are documented here.
 
-## 0.1.0a2 - Unreleased
+## 0.1.0a3 - Unreleased
 
+- Keep release metadata parsing compatible with Python 3.10. The `0.1.0a2` tag
+  stopped before artifact publication.
 - Fix Windows private-root creation when the runner's default object owner is
   different from its current user SID.
 - Make GitHub Release publication explicitly target this repository after the

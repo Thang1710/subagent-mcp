@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed-off tag, for example v0.1.0a2
+        description: Existing signed-off tag, for example v0.1.0a3
         required: true
         type: string
 
@@ -31,7 +31,9 @@ jobs:
       - name: Require the exact version tag
         shell: pwsh
         run: |
-          $version = python -c "import pathlib,tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])"
+          $versionMatches = @(Select-String -Path pyproject.toml -Pattern '^version = "([^"]+)"$')
+          if ($versionMatches.Count -ne 1) { throw "project version is missing or ambiguous" }
+          $version = $versionMatches[0].Matches[0].Groups[1].Value
           if ("v$version" -ne "${{ inputs.tag }}") { throw "tag does not match project version" }
           $tags = @(git tag --points-at HEAD)
           if ($tags -notcontains "${{ inputs.tag }}") { throw "checkout is not the requested tag" }
@@ -49,11 +51,15 @@ jobs:
           import hashlib
           import json
           import pathlib
-          import tomllib
+          import re
 
           root = pathlib.Path("dist")
           packages = sorted((root / "packages").iterdir(), key=lambda item: item.name)
-          version = tomllib.loads(pathlib.Path("pyproject.toml").read_text(encoding="utf-8"))["project"]["version"]
+          project_text = pathlib.Path("pyproject.toml").read_text(encoding="utf-8")
+          version_matches = re.findall(r'^version = "([^"]+)"$', project_text, re.MULTILINE)
+          if len(version_matches) != 1:
+              raise RuntimeError("project version is missing or ambiguous")
+          version = version_matches[0]
           records = [
               {"file": item.name, "sha256": hashlib.sha256(item.read_bytes()).hexdigest(), "size": item.stat().st_size}
               for item in packages

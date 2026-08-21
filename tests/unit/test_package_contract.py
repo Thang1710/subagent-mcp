@@ -22,7 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a2"
+VERSION = "0.1.0a3"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -203,6 +203,8 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "id-token: write" in release
     assert "pypa/gh-action-pypi-publish@release/v1" in release
     assert "GH_REPO: ${{ github.repository }}" in release
+    assert "tomllib" not in release
+    assert "Select-String -Path pyproject.toml" in release
     assert "password:" not in release
     assert "api-token:" not in release
     assert "release-manifest.json" in release
