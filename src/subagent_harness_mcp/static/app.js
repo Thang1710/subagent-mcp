@@ -4,7 +4,8 @@
  *   - The bootstrap token arrives only in location.hash and is erased with
  *     history.replaceState before anything else runs.
  *   - POST /api/v1/session exchanges it for a CSRF token kept in memory only.
- *   - GET /api/v1/snapshot renders everything; PATCH /api/v1/config saves.
+ *   - GET /api/v1/snapshot renders local state; POST /api/v1/refresh checks providers.
+ *   - PATCH /api/v1/config saves.
  *
  * Deliberately absent: storage, cookies, innerHTML, external requests,
  * telemetry, hardcoded model identifiers, lifecycle controls, and any prompt,
@@ -15,6 +16,7 @@
 
   const API_SESSION = '/api/v1/session';
   const API_SNAPSHOT = '/api/v1/snapshot';
+  const API_REFRESH = '/api/v1/refresh';
   const API_CONFIG = '/api/v1/config';
   const TOKEN_HEADER = 'X-Subagent-MCP-Token';
   const CSRF_HEADER = 'X-CSRF-Token';
@@ -51,13 +53,14 @@
     healthBody: byId('health-body'),
     healthContent: byId('health-content'),
     healthMessages: byId('health-messages'),
+    circuitsSection: byId('circuits-section'),
     circuits: byId('circuits'),
     quota: byId('quota-state'),
+    updateRow: byId('update-row'),
     update: byId('update-state'),
     version: byId('version-state'),
     statusNote: byId('status-note'),
     runtimesPanel: byId('runtimes-panel'),
-    configRevision: byId('config-revision'),
     runtimes: byId('runtimes'),
     runtimesEmpty: byId('runtimes-empty'),
     trustList: byId('trust-list'),
@@ -480,9 +483,8 @@
 
     clear(dom.circuits);
     const circuits = asArray(pick(health, 'circuits') || pick(data, 'circuits'));
-    if (!circuits.length) {
-      dom.circuits.appendChild(make('li', null, 'No circuits are registered.'));
-    } else {
+    setHidden(dom.circuitsSection, circuits.length === 0);
+    if (circuits.length) {
       circuits.forEach((raw) => {
         const item = make('li');
         item.dataset.tone = toneOf(raw, 'unknown');
@@ -520,7 +522,7 @@
     item.appendChild(make('span', null, message));
     dom.healthMessages.appendChild(item);
     clear(dom.circuits);
-    dom.circuits.appendChild(make('li', null, 'Circuit state is unknown while the snapshot is unavailable.'));
+    setHidden(dom.circuitsSection, true);
     setHidden(dom.healthBody, true);
     setHidden(dom.healthContent, false);
   }
@@ -562,6 +564,8 @@
     if (checkedAt) updateParts.push('checked ' + formatClock(checkedAt));
     setText(dom.update, updateParts.length ? updateParts.join(' · ') : '—');
     dom.update.dataset.tone = toneOf(update, 'unknown');
+    const updateState = str(pick(update, 'state', 'status')).toLowerCase();
+    setHidden(dom.updateRow, !update || updateState === 'not_checked');
 
     const version = str(pick(data, 'version')) ||
       str(pick(pick(data, 'distribution', 'dist', 'build'), 'version')) ||
@@ -611,6 +615,7 @@
     if (['boolean', 'bool', 'toggle', 'checkbox', 'switch'].indexOf(raw) !== -1) return 'boolean';
     if (['number', 'integer', 'int', 'float', 'range'].indexOf(raw) !== -1) return 'number';
     if (['select', 'choice', 'enum', 'options', 'variant'].indexOf(raw) !== -1) return 'select';
+    if (['model', 'suggested-text'].indexOf(raw) !== -1) return 'model';
     if (['text', 'string'].indexOf(raw) !== -1) return 'text';
     if (options.length) return 'select';
     const value = pick(def, 'value', 'current', 'default');
@@ -677,7 +682,7 @@
     return {
       id,
       name: str(pick(raw, 'name', 'label', 'title')) || humanize(id),
-      transport: str(pick(raw, 'transport', 'transportLabel', 'channel', 'mode')),
+      subtitle: str(pick(raw, 'subtitle', 'description', 'transportLabel')),
       statusTone: toneOf(statusObject, 'unknown'),
       statusText: str(pick(statusObject, 'label', 'summary')) ||
         humanize(pick(statusObject, 'state', 'status')) || 'Unknown',
@@ -686,6 +691,7 @@
       needsCanary,
       enabled: pick(raw, 'enabled', 'active') === true,
       enabledLabel: str(pick(raw, 'enabledLabel')) || 'Enabled',
+      enabledHelp: str(pick(raw, 'enabledHelp')),
       canEnable: pick(raw, 'canEnable', 'canToggle') !== false,
       locked: raw.locked === true || raw.readOnly === true,
       capabilities: asArray(pick(raw, 'capabilities', 'caps', 'features')).map(normalizeCapability),
@@ -812,24 +818,73 @@
     const help = wrap.querySelector('[data-help]');
     const controlId = 'f-' + entry.index + '-' + groupIndex + '-' + fieldIndex;
     const control = buildControl(field, controlId);
+    let picker = null;
     if (field.required) control.required = true;
 
     if (field.kind === 'boolean') {
       label.classList.add('inline');
       label.appendChild(control);
       label.appendChild(document.createTextNode(field.label));
+    } else if (field.kind === 'model') {
+      label.textContent = field.label;
+      picker = document.createElement('select');
+      picker.id = controlId + '-picker';
+      picker.dataset.modelPicker = 'true';
+      const placeholder = make('option', null, 'Choose a model');
+      placeholder.value = '';
+      placeholder.disabled = true;
+      picker.appendChild(placeholder);
+      field.options.filter((option) => option.available).forEach((option) => {
+        const choice = make('option', null, option.label);
+        choice.value = option.value;
+        picker.appendChild(choice);
+      });
+      const custom = make('option', null, 'Custom exact model ID…');
+      custom.value = '__custom__';
+      picker.appendChild(custom);
+      label.appendChild(picker);
+      control.classList.add('model-custom');
+      label.appendChild(control);
     } else {
       label.textContent = field.label;
       label.appendChild(control);
     }
 
-    const item = { field, wrap, control, help, kind: field.kind, emptyOptions: false, gated: [] };
+    const item = { field, wrap, control, picker, help, kind: field.kind, emptyOptions: false, gated: [] };
+
+    if (picker) {
+      item.syncModelPicker = () => {
+        const known = field.options.some((option) => option.available && option.value === control.value);
+        if (known) {
+          picker.value = control.value;
+          setHidden(control, true);
+        } else if (control.value) {
+          picker.value = '__custom__';
+          setHidden(control, false);
+        } else {
+          picker.value = '';
+          setHidden(control, true);
+        }
+      };
+      picker.addEventListener('change', () => {
+        if (picker.value === '__custom__') {
+          control.value = '';
+          setHidden(control, false);
+          control.focus();
+        } else {
+          control.value = picker.value;
+          setHidden(control, true);
+        }
+      });
+      item.syncModelPicker();
+    }
 
     if (field.help) {
       help.id = controlId + '-help';
       setText(help, field.help);
       setHidden(help, false);
       control.setAttribute('aria-describedby', help.id);
+      if (picker) picker.setAttribute('aria-describedby', help.id);
     } else {
       setHidden(help, true);
     }
@@ -875,6 +930,7 @@
       const blocked = !visible || missing.length > 0 || item.field.readOnly ||
         item.field.disabled || entry.runtime.locked || entry.saving || item.emptyOptions;
       item.control.disabled = blocked;
+      if (item.picker) item.picker.disabled = blocked;
 
       if (missing.length && item.help) {
         item.help.id = item.help.id || item.control.id + '-help';
@@ -913,9 +969,9 @@
     setText(heading, runtime.name);
     card.setAttribute('aria-labelledby', headingId);
 
-    const transport = card.querySelector('[data-transport]');
-    setText(transport, runtime.transport);
-    setHidden(transport, !runtime.transport);
+    const subtitle = card.querySelector('[data-subtitle]');
+    setText(subtitle, runtime.subtitle);
+    setHidden(subtitle, !runtime.subtitle);
 
     const pill = card.querySelector('[data-status]');
     setPill(pill, card.querySelector('[data-status-text]'), runtime.statusTone, runtime.statusText);
@@ -926,27 +982,32 @@
     setText(detail, detailText);
     setHidden(detail, !detailText);
 
-    const caps = card.querySelector('[data-caps]');
+    const supports = card.querySelector('[data-supports]');
+    const caps = supports.querySelector('[data-caps]');
     clear(caps);
     runtime.capabilities.forEach((cap) => {
-      const item = make('li', null, cap.label);
+      const item = make('li');
       item.dataset.available = cap.available ? 'true' : 'false';
-      if (cap.detail) item.title = cap.detail;
+      item.appendChild(make('b', null, cap.label));
+      if (cap.detail) item.appendChild(make('span', null, cap.detail));
       if (!cap.available) {
         const note = make('span', 'sr-only', ' (unavailable)');
         item.appendChild(note);
       }
       caps.appendChild(item);
     });
-    setHidden(caps, runtime.capabilities.length === 0);
+    setHidden(supports, runtime.capabilities.length === 0);
 
     const form = card.querySelector('[data-form]');
     const enabledInput = card.querySelector('[data-enabled]');
     const enabledLabel = card.querySelector('[data-enabled-label]');
+    const enabledHelp = card.querySelector('[data-enabled-help]');
     enabledInput.id = 'rt-' + index + '-enabled';
     enabledInput.checked = runtime.enabled;
     enabledInput.disabled = !runtime.canEnable || runtime.locked;
     setText(enabledLabel, runtime.enabledLabel);
+    setText(enabledHelp, runtime.enabledHelp);
+    setHidden(enabledHelp, !runtime.enabledHelp);
 
     const groupsHost = card.querySelector('[data-groups]');
     const error = card.querySelector('[data-error]');
@@ -1047,6 +1108,7 @@
       else if (value === null || value === undefined) item.control.value = '';
       else item.control.value = String(value);
       if (item.kind === 'select') item.control.dataset.selected = item.control.value;
+      if (item.syncModelPicker) item.syncModelPicker();
     });
     applyDependencies(entry);
     updateDirty(entry);
@@ -1329,8 +1391,6 @@
     const config = pick(data, 'config', 'configuration');
     const nextRevision = pick(data, 'revision', 'configRevision') ?? pick(config, 'revision');
     if (nextRevision !== undefined) revision = nextRevision;
-    setText(dom.configRevision, revision === null || revision === undefined ? '' : 'rev ' + revision);
-
     renderIdentity(data);
     renderHealth(data);
     renderStatus(data);
@@ -1344,7 +1404,6 @@
     renderHealthUnavailable(message);
     clear(dom.runtimes);
     setHidden(dom.runtimesEmpty, false);
-    setText(dom.configRevision, '');
     clear(dom.trustList);
     setHidden(dom.trustEmpty, false);
     dom.trustSave.disabled = true;
@@ -1357,10 +1416,13 @@
     if (dead || refreshing) return;
     refreshing = true;
     setBusy(true);
-    if (!opts.silent) say(ready ? 'Refreshing…' : 'Loading…');
+    if (!opts.silent) say(opts.provider ? 'Checking provider…' : ready ? 'Refreshing…' : 'Loading…');
 
     try {
-      const data = await request('GET', API_SNAPSHOT);
+      const data = await request(
+        opts.provider ? 'POST' : 'GET',
+        opts.provider ? API_REFRESH : API_SNAPSHOT,
+      );
       render(data);
       ready = true;
       setDocState('ready');
@@ -1383,7 +1445,7 @@
 
   /* ---------- boot ---------- */
 
-  dom.refresh.addEventListener('click', () => refresh());
+  dom.refresh.addEventListener('click', () => refresh({ provider: true }));
   dom.trustSave.addEventListener('click', () => saveTrust());
 
   (async function boot() {

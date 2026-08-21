@@ -568,3 +568,50 @@ def test_ready_circuit_pauses_with_cas_and_only_fresh_canary_can_probe(
     assert replay.created is False
     assert recovery.created is True
     assert recovery.state == "probing"
+
+
+def test_ready_circuit_requires_verified_cleanup_after_ambiguous_probe(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="future-deep",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    claimed = store.claim_canary_request(
+        request_id="canary-initial",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="future-deep",
+        pair_key="a" * 64,
+    )
+    ready = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="future-deep",
+        pair_key="a" * 64,
+        expected_revision=claimed.revision,
+        state="ready",
+        details={"cleanup_confirmed": True},
+    )
+
+    recovery = store.require_ready_circuit_recovery(
+        runtime_id="claude-code",
+        variant_id="future-deep",
+        pair_key=ready.pair_key,
+        expected_revision=ready.revision,
+        error_code="RECOVERY_REQUIRED",
+    )
+    blocked = store.claim_canary_request(
+        request_id="unsafe-retry",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="future-deep",
+        pair_key="a" * 64,
+    )
+
+    assert recovery.state == "recovery_required"
+    assert recovery.details["error_code"] == "RECOVERY_REQUIRED"
+    assert blocked.created is False
+    assert blocked.state == "recovery_required"

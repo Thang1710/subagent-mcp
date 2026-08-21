@@ -75,7 +75,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a3",
+            "adapter_version": "0.1.0a4",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -119,7 +119,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a3",
+            adapter_version="0.1.0a4",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -129,6 +129,18 @@ class ClaudeCodeAdapter:
                 "required": ["effort"],
                 "additionalProperties": False,
                 "properties": {"effort": {"enum": list(CLAUDE_EFFORTS)}},
+            },
+            model_schema={
+                "anyOf": [
+                    {"const": "claude-opus-5", "title": "Opus 5"},
+                    {"const": "claude-sonnet-5", "title": "Sonnet 5"},
+                    {"const": "claude-fable-5", "title": "Fable 5"},
+                    {
+                        "type": "string",
+                        "minLength": 1,
+                        "title": "Custom exact model ID",
+                    },
+                ]
             },
         )
 
@@ -234,6 +246,166 @@ class ClaudeCodeAdapter:
         safe = dict(result.details)
         safe["cleanup_confirmed"] = True
         return CanaryResult(True, request.pair_key, safe)
+
+    async def quota_probe(self, request: CanaryRequest) -> CanaryResult:
+        state, bound, details = self._bind_no_model()
+        if state != "needs_canary" or bound is None:
+            return _failure(request.pair_key, _probe_error(state), details)
+        if bound.pair_key != request.base_pair_key or _variant_pair_key(
+            request.base_pair_key,
+            request.model,
+            request.reasoning,
+            request.transport,
+        ) != request.pair_key:
+            return _failure(
+                request.pair_key,
+                AdapterFailure(
+                    "CONTEXT_DRIFT",
+                    "adapter",
+                    False,
+                    "Claude quota probe identity changed",
+                ),
+                {},
+            )
+        try:
+            options, effort, _ = _build_canary_options(request, bound)
+        except (ValueError, PermissionError, RuntimeError) as exc:
+            return _failure(
+                request.pair_key,
+                AdapterFailure("CAPABILITY_MISSING", "adapter", False, str(exc)),
+                {},
+            )
+        client = self._client_factory(options)
+        try:
+            result = await self._run_quota_probe(
+                client,
+                request=request,
+                effort=effort,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            result = _failure(
+                request.pair_key,
+                AdapterFailure("CAPABILITY_MISSING", "adapter", False, "Claude quota probe timed out"),
+                {},
+            )
+        except BaseException as exc:
+            result = _failure(
+                request.pair_key,
+                AdapterFailure(
+                    "CAPABILITY_MISSING",
+                    "adapter",
+                    False,
+                    f"Claude quota probe failed ({type(exc).__name__})",
+                ),
+                {},
+            )
+        try:
+            await asyncio.wait_for(client.disconnect(), timeout=self._canary_timeout)
+        except BaseException:
+            return _failure(
+                request.pair_key,
+                AdapterFailure(
+                    "RECOVERY_REQUIRED",
+                    "adapter",
+                    False,
+                    "Claude quota probe cleanup was not confirmed",
+                ),
+                {},
+            )
+        if not result.passed:
+            return result
+        safe = dict(result.details)
+        safe["cleanup_confirmed"] = True
+        return CanaryResult(True, request.pair_key, safe)
+
+    async def _run_quota_probe(
+        self,
+        client: Any,
+        *,
+        request: CanaryRequest,
+        effort: str,
+    ) -> CanaryResult:
+        from claude_agent_sdk import (
+            AssistantMessage,
+            RateLimitEvent,
+            ResultMessage,
+            SystemMessage,
+        )
+
+        await asyncio.wait_for(client.connect(None), timeout=self._canary_timeout)
+        messages = client.receive_messages().__aiter__()
+        await asyncio.wait_for(
+            client.query("Return a short readiness acknowledgement."),
+            timeout=self._canary_timeout,
+        )
+        init_seen = False
+        rate_seen = False
+        while not (init_seen and rate_seen):
+            message = await asyncio.wait_for(
+                messages.__anext__(), timeout=self._canary_timeout
+            )
+            if isinstance(message, (AssistantMessage, ResultMessage)):
+                return await self._interrupt_for_guard_failure(
+                    client,
+                    request.pair_key,
+                    AdapterFailure(
+                        "USAGE_CREDITS_FORBIDDEN",
+                        "quota",
+                        False,
+                        "Claude produced model output before quota evidence",
+                    ),
+                )
+            if isinstance(message, SystemMessage) and message.subtype == "init":
+                data = message.data
+                if (
+                    data.get("model") != request.model
+                    or data.get("mcp_servers") != []
+                    or not isinstance(data.get("session_id"), str)
+                    or not data["session_id"]
+                ):
+                    return await self._interrupt_for_guard_failure(
+                        client,
+                        request.pair_key,
+                        AdapterFailure(
+                            "CONTEXT_DRIFT",
+                            "adapter",
+                            False,
+                            "Claude quota probe init identity did not match",
+                        ),
+                    )
+                init_seen = True
+            elif isinstance(message, RateLimitEvent):
+                unsafe = _unsafe_rate(message.rate_limit_info)
+                if unsafe is not None:
+                    return await self._interrupt_for_guard_failure(
+                        client,
+                        request.pair_key,
+                        unsafe,
+                    )
+                rate_seen = True
+        try:
+            await asyncio.wait_for(client.interrupt(), timeout=self._canary_timeout)
+        except BaseException:
+            return _failure(
+                request.pair_key,
+                AdapterFailure(
+                    "RECOVERY_REQUIRED",
+                    "adapter",
+                    False,
+                    "Claude quota probe interrupt was not confirmed",
+                ),
+                {},
+            )
+        return CanaryResult(
+            True,
+            request.pair_key,
+            {
+                "model": request.model,
+                "effort": effort,
+                "is_using_overage": False,
+                "overage_blocked": True,
+            },
+        )
 
     async def _run_guarded_canary(
         self,
@@ -747,7 +919,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a3",
+            "adapter_version": "0.1.0a4",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],

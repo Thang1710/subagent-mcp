@@ -27,7 +27,7 @@
       <span id="health-pill-text">Checking…</span>
     </p>
     <button type="button" id="refresh" class="btn btn-quiet">
-      <span aria-hidden="true">↻</span> Refresh
+      <span aria-hidden="true">↻</span> Refresh status
     </button>
   </div>
 </header>
@@ -49,16 +49,18 @@
     <div id="health-body" class="skeleton-block" aria-hidden="true"></div>
     <div id="health-content" hidden>
       <ul class="checklist" id="health-messages"></ul>
-      <h3 class="subhead">Circuits</h3>
-      <ul class="circuits" id="circuits"></ul>
+      <div id="circuits-section" hidden>
+        <h3 class="subhead">Automatic safety stops</h3>
+        <ul class="circuits" id="circuits"></ul>
+      </div>
     </div>
   </section>
 
   <section class="panel" aria-labelledby="status-title">
-    <div class="panel-head"><h2 id="status-title">Quota &amp; updates</h2></div>
+    <div class="panel-head"><h2 id="status-title">Provider status</h2></div>
     <dl class="kv" id="status-kv">
       <div class="kv-row"><dt>Quota</dt><dd id="quota-state">—</dd></div>
-      <div class="kv-row"><dt>Update</dt><dd id="update-state">—</dd></div>
+      <div class="kv-row" id="update-row" hidden><dt>Update</dt><dd id="update-state">—</dd></div>
       <div class="kv-row"><dt>Version</dt><dd id="version-state">—</dd></div>
     </dl>
     <p class="note" id="status-note" hidden></p>
@@ -67,9 +69,8 @@
   <section class="panel panel-wide" aria-labelledby="runtimes-title" id="runtimes-panel" aria-busy="true">
     <div class="panel-head">
       <h2 id="runtimes-title">Runtimes &amp; settings</h2>
-      <span class="stamp" id="config-revision"></span>
     </div>
-    <p class="hint">Model, reasoning, and context options are published by each adapter. Saving writes the shared configuration used by the MCP server and CLI.</p>
+    <p class="hint">Choose which external runtime Codex may use. Each native harness publishes its own model and reasoning choices.</p>
     <div id="runtimes" class="runtimes"></div>
     <p class="empty" id="runtimes-empty" hidden>No runtimes are registered.</p>
   </section>
@@ -114,15 +115,19 @@
     <header class="card-head">
       <div class="card-id">
         <h3 data-name></h3>
-        <p class="mono" data-transport></p>
+        <p class="runtime-subtitle" data-subtitle></p>
       </div>
       <p class="pill" data-status><span class="dot" aria-hidden="true"></span><span data-status-text></span></p>
     </header>
     <p class="detail" data-status-detail hidden></p>
-    <ul class="caps" data-caps></ul>
+    <details class="supports" data-supports>
+      <summary>What this runtime supports</summary>
+      <ul class="support-list" data-caps></ul>
+    </details>
     <form data-form novalidate>
       <div class="switch-row">
-        <label class="switch"><input type="checkbox" data-enabled><span data-enabled-label>Enabled</span></label>
+        <label class="switch"><input type="checkbox" data-enabled><span data-enabled-label>Available to Codex</span></label>
+        <p class="help" data-enabled-help>When enabled, Codex may delegate work after required safety checks pass.</p>
       </div>
       <div data-groups class="groups"></div>
       <div class="row-end">

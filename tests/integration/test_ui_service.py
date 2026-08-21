@@ -13,6 +13,7 @@ from subagent_harness_mcp.adapters import claude_code as claude_code_module
 from subagent_harness_mcp.adapters.fake import FakeAdapter
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigError, ConfigStore
+from subagent_harness_mcp.contracts import ServiceError
 from subagent_harness_mcp.paths import resolve_paths
 from subagent_harness_mcp.service import SubagentMcpService
 from subagent_harness_mcp.store import StateStore
@@ -108,6 +109,92 @@ def _configured_backend(home: Path) -> tuple[LocalUiBackend, ConfigStore]:
     return LocalUiBackend(config=config, service=service), config
 
 
+def test_ui_provider_refresh_is_explicit_and_uses_sanitized_quota_state(
+    tmp_path: Path,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+
+    class RecordingService:
+        def __init__(self) -> None:
+            self.quota_calls: list[tuple[str, bool]] = []
+
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "available",
+                    "enabled": True,
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [],
+                },
+            )
+
+        async def runtime_check(self, runtime_id: str, refresh_quota: bool = False):
+            self.quota_calls.append((runtime_id, refresh_quota))
+            return {
+                "runtime_id": runtime_id,
+                "state": "ready",
+                "quota": {
+                    "state": "available",
+                    "overage_blocked": True,
+                    "raw": {"account": "must-not-escape"},
+                },
+            }
+
+    service = RecordingService()
+    backend = LocalUiBackend(config=config, service=service)
+
+    local = backend.snapshot()
+    refreshed = backend.refresh_provider()
+
+    assert service.quota_calls == [("fake", True)]
+    assert local["quota"]["state"] == "check_required"
+    assert refreshed["quota"] == {
+        "state": "available",
+        "label": "Available · overage blocked",
+        "detail": "Current provider evidence passed; usage credits stay blocked.",
+        "overage_blocked": True,
+    }
+    assert "must-not-escape" not in json.dumps(refreshed)
+
+
+def test_ui_provider_refresh_reports_unknown_without_backend_details(
+    tmp_path: Path,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+
+    class FailingService:
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "available",
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [],
+                },
+            )
+
+        async def runtime_check(self, _runtime_id: str, refresh_quota: bool = False):
+            assert refresh_quota is True
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "private provider session must-not-escape",
+            )
+
+    refreshed = LocalUiBackend(config=config, service=FailingService()).refresh_provider()
+
+    assert refreshed["quota"] == {
+        "state": "unknown",
+        "label": "Unknown",
+        "detail": "The provider did not return safe quota evidence.",
+    }
+    assert "must-not-escape" not in json.dumps(refreshed)
+
+
 def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) -> None:
     home = tmp_path / "home"
     backend, config = _configured_backend(home)
@@ -198,7 +285,7 @@ def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) ->
     assert os.environ.get("SUBAGENT_MCP_HOME") != str(home.resolve())
 
 
-def test_fresh_ui_lists_builtins_and_creates_claude_policy_by_cas(
+def test_fresh_ui_lists_only_real_runtime_and_creates_claude_policy_by_cas(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -223,13 +310,12 @@ def test_fresh_ui_lists_builtins_and_creates_claude_policy_by_cas(
     by_id = {runtime["id"]: runtime for runtime in fresh["runtimes"]}
 
     assert fresh["revision"] == 0
-    assert set(by_id) == {"claude-code", "fake"}
+    assert set(by_id) == {"claude-code"}
     assert fresh["health"]["state"] == "setup_required"
     assert {
         item["label"]: item["state"] for item in fresh["health"]["messages"]
     } == {
         "Claude sub-agent": "not_configured",
-        "Fake sub-agent": "not_configured",
     }
     claude = by_id["claude-code"]
     assert claude["manifest"]["runtime_id"] == "claude-code"
@@ -237,15 +323,42 @@ def test_fresh_ui_lists_builtins_and_creates_claude_policy_by_cas(
     assert claude["status"]["state"] == "not_configured"
     assert claude["enabled"] is False
     assert claude["locked"] is False
+    assert claude["subtitle"] == "Anthropic model · Claude Code native harness"
+    assert claude["enabledLabel"] == "Available to Codex"
+    assert "delegate" in claude["enabledHelp"].lower()
 
     fields = {
         field["id"]: field
         for group in claude["groups"]
         for field in group["fields"]
     }
-    assert fields["transport"]["value"] == "managed-sdk"
-    assert fields["variant.0.model"]["value"] == ""
-    assert fields["variant.0.reasoning"]["value"] == "{}"
+    assert set(fields) == {
+        "variant.0.model",
+        "variant.0.reasoning.effort",
+    }
+    model_field = fields["variant.0.model"]
+    assert model_field["label"] == "Model"
+    assert model_field["kind"] == "model"
+    assert [option["value"] for option in model_field["options"]] == [
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-fable-5",
+    ]
+    assert [option["label"] for option in model_field["options"]] == [
+        "Opus 5",
+        "Sonnet 5",
+        "Fable 5",
+    ]
+    effort_field = fields["variant.0.reasoning.effort"]
+    assert effort_field["label"] == "Reasoning effort"
+    assert effort_field["kind"] == "select"
+    assert [option["value"] for option in effort_field["options"]] == [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+    ]
 
     model = "future/provider-model@2026.08"
     reasoning = {"effort": "xhigh"}
@@ -254,10 +367,8 @@ def test_fresh_ui_lists_builtins_and_creates_claude_policy_by_cas(
             "claude-code": {
                 "enabled": True,
                 "options": {
-                    "selection_mode": "fixed",
-                    "transport": "managed-sdk",
                     "variant.0.model": model,
-                    "variant.0.reasoning": json.dumps(reasoning),
+                    "variant.0.reasoning.effort": reasoning["effort"],
                 },
             }
         }
@@ -280,9 +391,8 @@ def test_fresh_ui_lists_builtins_and_creates_claude_policy_by_cas(
     }
     assert updated["revision"] == 1
     assert updated_claude["enabled"] is True
-    assert updated_fields["transport"]["value"] == "managed-sdk"
     assert updated_fields["variant.0.model"]["value"] == model
-    assert json.loads(updated_fields["variant.0.reasoning"]["value"]) == reasoning
+    assert updated_fields["variant.0.reasoning.effort"]["value"] == "xhigh"
 
     persisted = ConfigStore(
         resolve_paths(

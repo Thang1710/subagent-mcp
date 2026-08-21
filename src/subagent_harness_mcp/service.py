@@ -21,6 +21,8 @@ from .adapters.base import (
     AdapterSpawnRequest,
     CanaryAdapter,
     CanaryRequest,
+    ProbeResult,
+    QuotaProbeAdapter,
     ResolvedContext,
 )
 from .adapters.registry import AdapterRegistry, RegistryError
@@ -117,17 +119,22 @@ class SubagentMcpService:
             )
         return tuple(result)
 
-    async def runtime_check(self, runtime_id: str) -> dict[str, Any]:
+    async def runtime_check(
+        self,
+        runtime_id: str,
+        refresh_quota: bool = False,
+    ) -> dict[str, Any]:
         try:
             adapter = self._registry.get(runtime_id)
             probe = await adapter.probe()
             state = probe.state
             details = dict(_redact(probe.details))
+            policy = self._config.load()["runtimes"].get(runtime_id, {})
+            configured = policy.get("variants", ()) if isinstance(policy, Mapping) else ()
+            variants = [item for item in configured if isinstance(item, Mapping)]
+            circuits: list[CircuitRecord] = []
             if isinstance(adapter, CanaryAdapter) and probe.state == "needs_canary":
                 base_pair_key = _pair_key(probe.details)
-                policy = self._config.load()["runtimes"].get(runtime_id, {})
-                variants = policy.get("variants", ()) if isinstance(policy, Mapping) else ()
-                circuits = []
                 for variant in variants:
                     if not isinstance(variant, Mapping) or not isinstance(variant.get("id"), str):
                         continue
@@ -161,16 +168,174 @@ class SubagentMcpService:
                         }
                         for item in circuits
                     ]
+            quota: dict[str, Any] = {
+                "state": "check_required" if variants else "configure_first"
+            }
+            if refresh_quota:
+                quota = await self._refresh_runtime_quota(
+                    adapter=adapter,
+                    runtime_id=runtime_id,
+                    probe=probe,
+                    variants=variants,
+                    circuits=circuits,
+                )
+                circuits = list(self._store.list_circuits(runtime_id))
+                if circuits:
+                    state = circuits[0].state
+                    details["circuits"] = [
+                        {
+                            "variant_id": item.variant_id,
+                            "state": item.state,
+                            "revision": item.revision,
+                        }
+                        for item in circuits
+                    ]
             return {
                 "runtime_id": runtime_id,
                 "state": state,
                 "details": details,
                 "manifest": adapter.manifest.to_dict(),
+                "quota": quota,
             }
         except ServiceError:
             raise
         except (RegistryError, StateError, ConfigError) as exc:
             raise _public_error(exc) from exc
+
+    async def _refresh_runtime_quota(
+        self,
+        *,
+        adapter: Adapter,
+        runtime_id: str,
+        probe: ProbeResult,
+        variants: list[Mapping[str, Any]],
+        circuits: list[CircuitRecord],
+    ) -> dict[str, Any]:
+        if not variants:
+            return {"state": "configure_first"}
+        if not isinstance(adapter, CanaryAdapter):
+            return {"state": "unknown"}
+        base_pair_key = _pair_key(probe.details)
+        by_variant = {item.variant_id: item for item in circuits}
+        results: list[dict[str, Any]] = []
+        for variant in variants:
+            variant_id = variant.get("id")
+            model = variant.get("model")
+            reasoning = variant.get("reasoning")
+            if (
+                not isinstance(variant_id, str)
+                or not isinstance(model, str)
+                or not isinstance(reasoning, Mapping)
+            ):
+                continue
+            circuit = by_variant.get(variant_id)
+            if circuit is None:
+                results.append({"variant_id": variant_id, "state": "unknown"})
+                continue
+            transport = adapter.manifest.supported_transports[0]
+            evidence: Mapping[str, Any] | None = None
+            if circuit.state in {"needs_canary", "auto_paused"}:
+                try:
+                    response = await self.runtime_canary(
+                        {
+                            "request_id": self._id_factory("quota-refresh"),
+                            "runtime_id": runtime_id,
+                            "variant_id": variant_id,
+                            "transport": transport,
+                        }
+                    )
+                    candidate = response.get("attestation")
+                    if isinstance(candidate, Mapping):
+                        evidence = candidate
+                except ServiceError as exc:
+                    results.append(
+                        {
+                            "variant_id": variant_id,
+                            "state": (
+                                "quota_paused"
+                                if exc.code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
+                                else "unknown"
+                            ),
+                        }
+                    )
+                    continue
+            elif circuit.state == "ready" and isinstance(adapter, QuotaProbeAdapter):
+                result = await adapter.quota_probe(
+                    CanaryRequest(
+                        runtime_id=runtime_id,
+                        variant_id=variant_id,
+                        model=model,
+                        reasoning=dict(reasoning),
+                        transport=transport,
+                        base_pair_key=base_pair_key,
+                        pair_key=circuit.pair_key,
+                    )
+                )
+                if result.pair_key != circuit.pair_key:
+                    raise ServiceError("CONTEXT_DRIFT", "runtime quota pair changed")
+                if result.passed:
+                    evidence = result.details
+                else:
+                    code = result.error.code if result.error is not None else "QUOTA_PAUSED"
+                    if code == "RECOVERY_REQUIRED":
+                        self._store.require_ready_circuit_recovery(
+                            runtime_id=runtime_id,
+                            variant_id=variant_id,
+                            pair_key=circuit.pair_key,
+                            expected_revision=circuit.revision,
+                            error_code=code,
+                        )
+                        results.append({"variant_id": variant_id, "state": "unknown"})
+                        continue
+                    self._store.pause_ready_circuit(
+                        runtime_id=runtime_id,
+                        variant_id=variant_id,
+                        pair_key=circuit.pair_key,
+                        expected_revision=circuit.revision,
+                        error_code=(
+                            code
+                            if code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
+                            else "QUOTA_PAUSED"
+                        ),
+                    )
+                    results.append({"variant_id": variant_id, "state": "quota_paused"})
+                    continue
+            else:
+                results.append({"variant_id": variant_id, "state": "unknown"})
+                continue
+            if _safe_quota_evidence(evidence):
+                results.append(
+                    {
+                        "variant_id": variant_id,
+                        "state": "available",
+                        "overage_blocked": True,
+                    }
+                )
+            else:
+                current = self._store.load_circuit(runtime_id, variant_id)
+                if current.state == "ready":
+                    self._store.pause_ready_circuit(
+                        runtime_id=runtime_id,
+                        variant_id=variant_id,
+                        pair_key=current.pair_key,
+                        expected_revision=current.revision,
+                        error_code="QUOTA_PAUSED",
+                    )
+                results.append({"variant_id": variant_id, "state": "quota_paused"})
+        states = {item["state"] for item in results}
+        if results and states == {"available"}:
+            return {
+                "state": "available",
+                "overage_blocked": True,
+                "variants": results,
+            }
+        if "quota_paused" in states:
+            return {
+                "state": "quota_paused",
+                "overage_blocked": True,
+                "variants": results,
+            }
+        return {"state": "unknown", "variants": results}
 
     async def agent_spawn(self, request: SpawnRequest) -> AgentStatus:
         conversation_id = self._id_factory("conversation")
@@ -421,10 +586,9 @@ class SubagentMcpService:
                 )
             statuses = tuple(collected)
             if any(
-                status.state_revision > target.after_revision
-                or status.execution_state in TERMINAL_EXECUTION_STATES
+                status.execution_state in TERMINAL_EXECUTION_STATES
                 or status.execution_state == "needs_input"
-                for status, target in zip(statuses, request.targets)
+                for status in statuses
             ):
                 return statuses
             remaining = deadline - time.monotonic()
@@ -1082,6 +1246,15 @@ def _snapshot_result(snapshot: AdapterSnapshot) -> Mapping[str, Any] | None:
             }
         }
     return None
+
+
+def _safe_quota_evidence(details: Mapping[str, Any] | None) -> bool:
+    return bool(
+        isinstance(details, Mapping)
+        and details.get("is_using_overage") is False
+        and details.get("overage_blocked") is True
+        and details.get("cleanup_confirmed") is True
+    )
 
 
 def _context_from_record(record: ExecutionRecord) -> ResolvedContext:

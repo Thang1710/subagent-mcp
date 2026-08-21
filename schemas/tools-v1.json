@@ -16,7 +16,8 @@
     "runtime_check": {
       "approval": "automatic",
       "request_id_required": false,
-      "purpose": "Run no-model compatibility and authentication checks"
+      "refresh_quota_default": false,
+      "purpose": "Run local compatibility checks or explicitly refresh provider quota"
     },
     "runtime_configure": {
       "approval": "prompt",
@@ -41,31 +42,38 @@
     "agent_spawn": {
       "approval": "automatic",
       "request_id_required": true,
+      "response_mode_default": "compact",
       "purpose": "Create one conversation and its first execution"
     },
     "agent_status": {
       "approval": "automatic",
       "request_id_required": false,
+      "response_mode_default": "compact",
       "purpose": "Read normalized conversation status and events"
     },
     "agent_send": {
       "approval": "automatic",
       "request_id_required": true,
+      "response_mode_default": "compact",
       "purpose": "Continue one native session with a new execution"
     },
     "agent_wait": {
       "approval": "automatic",
       "request_id_required": false,
+      "response_mode_default": "compact",
+      "timeout_seconds_default": 300,
       "purpose": "Wait boundedly for one to eight targets"
     },
     "agent_interrupt": {
       "approval": "automatic",
       "request_id_required": true,
+      "response_mode_default": "compact",
       "purpose": "Interrupt the current native-harness execution"
     },
     "agent_close": {
       "approval": "automatic",
       "request_id_required": true,
+      "response_mode_default": "compact",
       "purpose": "Close the logical conversation without deleting native state"
     },
     "workspace_release": {

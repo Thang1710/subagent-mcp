@@ -13,12 +13,17 @@ from subagent_harness_mcp import ui
 from subagent_harness_mcp.ui import LoopbackUiServer, UiError
 
 
-def _server(*, patch_calls: list[tuple[dict[str, object], int]] | None = None):
+def _server(
+    *,
+    patch_calls: list[tuple[dict[str, object], int]] | None = None,
+    refresh_calls: list[None] | None = None,
+):
     calls = [] if patch_calls is None else patch_calls
+    refreshes = [] if refresh_calls is None else refresh_calls
 
     def snapshot():
         return {
-            "version": "0.1.0a3",
+            "version": "0.1.0a4",
             "revision": 7,
             "health": {"state": "ready", "messages": []},
             "runtimes": [],
@@ -38,7 +43,21 @@ def _server(*, patch_calls: list[tuple[dict[str, object], int]] | None = None):
         calls.append((patch, revision))
         return {"revision": revision + 1}
 
-    return LoopbackUiServer(snapshot, patch_config)
+    def refresh_provider():
+        refreshes.append(None)
+        value = snapshot()
+        value["quota"] = {
+            "state": "available",
+            "overage_blocked": True,
+            "raw": {"account": "must never leave the backend"},
+        }
+        return value
+
+    return LoopbackUiServer(
+        snapshot,
+        patch_config,
+        provider_refresher=refresh_provider,
+    )
 
 
 def _request(
@@ -156,6 +175,32 @@ def test_static_css_preserves_the_hidden_attribute() -> None:
     assert "[hidden] { display: none !important; }" in source
 
 
+def test_static_ui_exposes_only_plain_runtime_controls() -> None:
+    package = resources.files("subagent_harness_mcp").joinpath("static")
+    html = package.joinpath("index.html").read_text(encoding="utf-8")
+    javascript = package.joinpath("app.js").read_text(encoding="utf-8")
+
+    assert "Refresh status" in html
+    assert "Available to Codex" in html
+    assert "What this runtime supports" in html
+    assert "Automatic safety stops" in html
+    assert 'id="circuits-section" hidden' in html
+    assert 'id="update-row" hidden' in html
+    assert 'id="config-revision"' not in html
+    assert "picker.dataset.modelPicker = 'true'" in javascript
+    assert "Custom exact model ID…" in javascript
+    assert "createElement('datalist')" not in javascript
+    assert "setHidden(dom.circuitsSection, circuits.length === 0)" in javascript
+    assert "setHidden(dom.updateRow" in javascript
+    assert "'rev ' + revision" not in javascript
+    assert "managed-sdk" not in html
+    assert "managed-sdk" not in javascript
+    assert "const API_REFRESH = '/api/v1/refresh';" in javascript
+    assert "opts.provider ? API_REFRESH : API_SNAPSHOT" in javascript
+    assert "dom.refresh.addEventListener('click', () => refresh({ provider: true }))" in javascript
+    assert "await refresh();" in javascript
+
+
 def test_host_origin_and_path_traversal_are_rejected() -> None:
     server = _server()
     server.start()
@@ -252,6 +297,63 @@ def test_bootstrap_is_single_use_and_api_requires_cookie_and_csrf() -> None:
     assert patched == 200
     assert json.loads(patched_body) == {"revision": 8}
     assert patch_calls == [({"runtimes": {"fake": {"enabled": False}}}, 7)]
+
+
+def test_provider_refresh_requires_csrf_and_an_empty_body() -> None:
+    refresh_calls: list[None] = []
+    server = _server(refresh_calls=refresh_calls)
+    server.start()
+    try:
+        cookie, csrf = _open_session(server)
+        missing_csrf, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/refresh",
+            headers={"Cookie": cookie, "Origin": server.origin},
+        )
+        nonempty, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/refresh",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "X-CSRF-Token": csrf,
+            },
+            body=b"{}",
+        )
+    finally:
+        server.close()
+
+    assert missing_csrf == 403
+    assert nonempty == 400
+    assert refresh_calls == []
+
+
+def test_provider_refresh_returns_one_sanitized_snapshot() -> None:
+    refresh_calls: list[None] = []
+    server = _server(refresh_calls=refresh_calls)
+    server.start()
+    try:
+        cookie, csrf = _open_session(server)
+        status, _, body = _request(
+            server,
+            "POST",
+            "/api/v1/refresh",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "X-CSRF-Token": csrf,
+            },
+        )
+    finally:
+        server.close()
+
+    payload = json.loads(body)
+    assert status == 200
+    assert refresh_calls == [None]
+    assert payload["quota"] == {"state": "available", "overage_blocked": True}
+    assert b"must never leave the backend" not in body
 
 
 def test_oversized_or_unexpected_config_payload_is_rejected_before_callback() -> None:

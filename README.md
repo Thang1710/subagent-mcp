@@ -21,7 +21,7 @@ The project and repository are named **Subagent MCP**. The Python distribution
 and command are **`subagent-harness-mcp`** because the shorter package name was
 already taken.
 
-> **Preview:** `0.1.0a3` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a4` targets Windows. The local MCP, deterministic adapter,
 > package, and localhost UI are usable. Live Claude Code work remains gated
 > until the exact native-harness and no-overage canary passes.
 
@@ -37,7 +37,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a3
+uv tool install subagent-harness-mcp==0.1.0a4
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -49,7 +49,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a3` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a4` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .

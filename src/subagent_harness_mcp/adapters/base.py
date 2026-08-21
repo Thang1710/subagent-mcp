@@ -151,3 +151,11 @@ class CanaryAdapter(Adapter, Protocol):
 
     async def runtime_canary(self, request: CanaryRequest) -> CanaryResult:
         ...
+
+
+@runtime_checkable
+class QuotaProbeAdapter(Adapter, Protocol):
+    """Optional pre-output quota evidence published by a native harness."""
+
+    async def quota_probe(self, request: CanaryRequest) -> CanaryResult:
+        ...

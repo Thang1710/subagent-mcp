@@ -8,7 +8,14 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 
 from subagent_harness_mcp import __version__
-from subagent_harness_mcp.contracts import ServiceError
+from subagent_harness_mcp.contracts import (
+    ADAPTER_API_VERSION,
+    AdapterManifest,
+    AgentDescriptor,
+    AgentEvent,
+    AgentStatus,
+    ServiceError,
+)
 from subagent_harness_mcp.server import create_server
 
 
@@ -56,6 +63,42 @@ def _metadata(result: CallToolResult) -> dict[str, Any]:
     return json.loads(encoded[:-4])
 
 
+def _terminal_status() -> AgentStatus:
+    manifest = AdapterManifest(
+        adapter_api_version=ADAPTER_API_VERSION,
+        runtime_id="future-runtime",
+        provider_id="future-provider",
+        harness_id="future-harness",
+        display_name="Future sub-agent",
+        adapter_version="1.0.0",
+        supported_platforms=("win32",),
+        supported_transports=("managed-sdk",),
+        capabilities=frozenset({"session"}),
+        semantic_permissions=frozenset({"repo_read"}),
+        reasoning_schema={"type": "object"},
+    )
+    descriptor = AgentDescriptor.from_manifest(
+        manifest,
+        model="vendor/model",
+        transport="managed-sdk",
+    )
+    result = {"text": "one provider result", "model": "vendor/model"}
+    return AgentStatus(
+        conversation_id="conversation-1",
+        execution_id="execution-1",
+        external_session_id="native-session-1",
+        workspace_path=r"C:\private\workspace",
+        conversation_state="idle",
+        execution_state="succeeded",
+        state_revision=3,
+        descriptor=descriptor,
+        result=result,
+        needs_input=(),
+        events=(AgentEvent(5, "completed", {"result": result}),),
+        next_event_cursor=5,
+    )
+
+
 class _RecordingService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
@@ -64,8 +107,8 @@ class _RecordingService:
         self.calls.append(("runtime_list", None))
         return ({"runtime_id": "future-runtime", "state": "ready"},)
 
-    async def runtime_check(self, runtime_id: str):
-        self.calls.append(("runtime_check", runtime_id))
+    async def runtime_check(self, runtime_id: str, refresh_quota: bool = False):
+        self.calls.append(("runtime_check", (runtime_id, refresh_quota)))
         if runtime_id == "explode":
             raise RuntimeError(
                 r"secret-token at C:\Users\private\state.db should not escape"
@@ -145,6 +188,39 @@ def test_server_identity_discovery_and_public_schema_match() -> None:
     for name in SIDE_EFFECTING_TOOL_NAMES:
         assert "request_id" in schemas[name]["required"]
         assert public_schema["tools"][name]["request_id_required"] is True
+
+
+def test_runtime_check_refresh_quota_is_explicit_and_defaults_local() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+    schemas = {tool.name: tool.input_schema for tool in _run(server.list_tools())}
+    public_schema = json.loads(
+        (ROOT / "schemas" / "tools-v1.json").read_text(encoding="utf-8")
+    )
+
+    default = _metadata(
+        _run(server.call_tool("runtime_check", {"runtime_id": "future-runtime"}))
+    )
+    refreshed = _metadata(
+        _run(
+            server.call_tool(
+                "runtime_check",
+                {"runtime_id": "future-runtime", "refresh_quota": True},
+            )
+        )
+    )
+
+    assert schemas["runtime_check"]["properties"]["refresh_quota"] == {
+        "default": False,
+        "title": "Refresh Quota",
+        "type": "boolean",
+    }
+    assert public_schema["tools"]["runtime_check"]["refresh_quota_default"] is False
+    assert default["result"]["state"] == refreshed["result"]["state"] == "ready"
+    assert service.calls == [
+        ("runtime_check", ("future-runtime", False)),
+        ("runtime_check", ("future-runtime", True)),
+    ]
 
 
 def test_success_and_service_error_are_text_only_with_final_metadata() -> None:
@@ -313,3 +389,82 @@ def test_non_json_service_result_is_sanitized_instead_of_breaking_protocol() -> 
 
     assert result.is_error is True
     assert _metadata(result)["error"]["code"] == "INTERNAL_ERROR"
+
+
+def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> None:
+    server = create_server(_RecordingService())
+    schemas = {tool.name: tool.input_schema for tool in _run(server.list_tools())}
+
+    for name in {
+        "agent_spawn",
+        "agent_status",
+        "agent_send",
+        "agent_wait",
+        "agent_interrupt",
+        "agent_close",
+    }:
+        response_mode = schemas[name]["properties"]["response_mode"]
+        assert response_mode["default"] == "compact"
+    assert schemas["agent_wait"]["properties"]["timeout_seconds"]["default"] == 300.0
+
+
+def test_status_is_compact_by_default_and_full_only_when_requested() -> None:
+    class _StatusService(_RecordingService):
+        async def agent_status(self, request):
+            self.calls.append(("agent_status", request))
+            return _terminal_status()
+
+    service = _StatusService()
+    server = create_server(service)
+
+    compact = _metadata(
+        _run(server.call_tool("agent_status", {"conversation_id": "conversation-1"}))
+    )["result"]
+    full = _metadata(
+        _run(
+            server.call_tool(
+                "agent_status",
+                {"conversation_id": "conversation-1", "response_mode": "full"},
+            )
+        )
+    )["result"]
+
+    assert compact == _terminal_status().to_compact_dict()
+    assert "descriptor" not in compact
+    assert "workspace_path" not in compact
+    assert "events" not in compact
+    assert compact["conversation_state"] == "idle"
+    assert json.dumps(compact).count("one provider result") == 1
+    assert full == _terminal_status().to_dict()
+
+
+def test_unknown_response_mode_fails_before_service_call() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+
+    result = _run(
+        server.call_tool(
+            "agent_status",
+            {"conversation_id": "conversation-1", "response_mode": "verbose"},
+        )
+    )
+
+    assert _metadata(result)["error"]["code"] == "REQUEST_INVALID"
+    assert service.calls == []
+
+
+def test_wait_uses_five_minute_default_without_model_polling() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+
+    result = _run(
+        server.call_tool(
+            "agent_wait",
+            {"targets": [{"conversation_id": "conversation-1"}]},
+        )
+    )
+
+    assert result.is_error is False
+    name, request = service.calls[-1]
+    assert name == "agent_wait"
+    assert request.timeout_seconds == 300.0

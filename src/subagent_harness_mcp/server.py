@@ -57,13 +57,19 @@ def create_server(service: object) -> MCPServer:
     @server.tool(name="runtime_check", structured_output=False)
     async def runtime_check(
         runtime_id: str,
+        refresh_quota: bool = False,
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Run a no-model compatibility and authentication check."""
+        """Check locally by default; explicitly probe provider quota when requested."""
 
         return await _invoke(
             "runtime_check",
-            lambda: _call_runtime_check(service, api_version, runtime_id),
+            lambda: _call_runtime_check(
+                service,
+                api_version,
+                runtime_id,
+                refresh_quota,
+            ),
         )
 
     @server.tool(name="runtime_configure", structured_output=False)
@@ -174,9 +180,10 @@ def create_server(service: object) -> MCPServer:
         context_policy_id: str = "declared-native",
         permission_policy_id: str = "default",
         workspace: str | dict[str, Any] = _CURRENT_WORKSPACE,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Create one conversation and its first idempotent execution."""
+        """Create one conversation; return compact status unless full is requested."""
 
         return await _invoke(
             "agent_spawn",
@@ -198,6 +205,7 @@ def create_server(service: object) -> MCPServer:
                     workspace=workspace,
                 ),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="agent_status", structured_output=False)
@@ -205,9 +213,10 @@ def create_server(service: object) -> MCPServer:
         conversation_id: str,
         after_cursor: int = 0,
         refresh: bool = True,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Read normalized status and events for one conversation."""
+        """Read compact status, or the full envelope when explicitly requested."""
 
         return await _invoke(
             "agent_status",
@@ -216,6 +225,7 @@ def create_server(service: object) -> MCPServer:
                 "agent_status",
                 _status_request(api_version, conversation_id, after_cursor, refresh),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="agent_send", structured_output=False)
@@ -225,9 +235,10 @@ def create_server(service: object) -> MCPServer:
         prompt: str,
         reply_to: str | None = None,
         answers: dict[str, Any] | None = None,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Continue an existing native session with one idempotent execution."""
+        """Continue a native session and return compact status by default."""
 
         return await _invoke(
             "agent_send",
@@ -243,15 +254,17 @@ def create_server(service: object) -> MCPServer:
                     answers,
                 ),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="agent_wait", structured_output=False)
     async def agent_wait(
         targets: list[dict[str, Any]],
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 300.0,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Wait boundedly for one to eight normalized conversation targets."""
+        """Wait locally for up to five minutes and return compact status by default."""
 
         return await _invoke(
             "agent_wait",
@@ -260,15 +273,17 @@ def create_server(service: object) -> MCPServer:
                 "agent_wait",
                 _wait_request(api_version, targets, timeout_seconds),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="agent_interrupt", structured_output=False)
     async def agent_interrupt(
         request_id: str,
         conversation_id: str,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Interrupt the current execution through its native harness."""
+        """Interrupt the current execution and return compact status by default."""
 
         return await _invoke(
             "agent_interrupt",
@@ -277,15 +292,17 @@ def create_server(service: object) -> MCPServer:
                 "agent_interrupt",
                 _action_request(api_version, request_id, conversation_id),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="agent_close", structured_output=False)
     async def agent_close(
         request_id: str,
         conversation_id: str,
+        response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Close a logical conversation without deleting transcript or workspace."""
+        """Close a logical conversation and return compact status by default."""
 
         return await _invoke(
             "agent_close",
@@ -294,6 +311,7 @@ def create_server(service: object) -> MCPServer:
                 "agent_close",
                 _action_request(api_version, request_id, conversation_id),
             ),
+            response_mode=response_mode,
         )
 
     @server.tool(name="workspace_release", structured_output=False)
@@ -356,10 +374,13 @@ def run_stdio() -> int:
 async def _invoke(
     tool: str,
     operation: Callable[[], Awaitable[object]],
+    *,
+    response_mode: str = "full",
 ) -> CallToolResult:
     try:
+        checked_response_mode = _response_mode(response_mode)
         result = await operation()
-        return _success_result(tool, result)
+        return _success_result(tool, result, response_mode=checked_response_mode)
     except ServiceError as error:
         return _error_result(tool, error)
     except ContractError as error:
@@ -402,10 +423,16 @@ async def _call_runtime_check(
     service: object,
     api_version: int,
     runtime_id: str,
+    refresh_quota: bool,
 ) -> object:
     _api_version(api_version)
     checked_runtime = validate_identifier(runtime_id, "runtime_id")
-    return await getattr(service, "runtime_check")(checked_runtime)
+    if type(refresh_quota) is not bool:
+        raise ContractError("REQUEST_INVALID", "refresh_quota must be a boolean")
+    return await getattr(service, "runtime_check")(
+        checked_runtime,
+        refresh_quota=refresh_quota,
+    )
 
 
 async def _call_payload(
@@ -435,6 +462,15 @@ def _api_version(value: int) -> int:
 
 def _request_id(value: str) -> str:
     return validate_identifier(value, "request_id", 256)
+
+
+def _response_mode(value: str) -> str:
+    if value not in {"compact", "full"}:
+        raise ContractError(
+            "REQUEST_INVALID",
+            "response_mode must be compact or full",
+        )
+    return value
 
 
 def _spawn_request(
@@ -596,8 +632,13 @@ def _nonnegative_integer(value: object, label: str) -> int:
     return value
 
 
-def _success_result(tool: str, result: object) -> CallToolResult:
-    public_result = _json_value(result)
+def _success_result(
+    tool: str,
+    result: object,
+    *,
+    response_mode: str,
+) -> CallToolResult:
+    public_result = _json_value(result, compact=response_mode == "compact")
     metadata = {"ok": True, "result": public_result, "tool": tool}
     summary = _success_summary(tool, public_result)
     return _text_result(summary, metadata, is_error=False)
@@ -649,14 +690,18 @@ def _success_summary(tool: str, result: object) -> str:
     return f"**{tool}** completed."
 
 
-def _json_value(value: object) -> Any:
+def _json_value(value: object, *, compact: bool = False) -> Any:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
+    if compact:
+        to_compact_dict = getattr(value, "to_compact_dict", None)
+        if callable(to_compact_dict):
+            return _json_value(to_compact_dict())
     to_dict = getattr(value, "to_dict", None)
     if callable(to_dict):
         return _json_value(to_dict())
     if isinstance(value, Mapping):
-        return {str(key): _json_value(item) for key, item in value.items()}
+        return {str(key): _json_value(item, compact=compact) for key, item in value.items()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_json_value(item) for item in value]
+        return [_json_value(item, compact=compact) for item in value]
     raise TypeError("service result is not JSON-compatible")

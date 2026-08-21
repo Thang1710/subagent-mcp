@@ -197,6 +197,7 @@ class AdapterManifest:
     capabilities: frozenset[str]
     semantic_permissions: frozenset[str]
     reasoning_schema: Mapping[str, Any]
+    model_schema: Mapping[str, Any] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.adapter_api_version != ADAPTER_API_VERSION:
@@ -215,6 +216,7 @@ class AdapterManifest:
             allow_empty=True,
         )
         validate_json_object(self.reasoning_schema, "reasoning_schema")
+        validate_json_object(self.model_schema, "model_schema")
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,6 +231,7 @@ class AdapterManifest:
             "capabilities": sorted(self.capabilities),
             "semantic_permissions": sorted(self.semantic_permissions),
             "reasoning_schema": dict(self.reasoning_schema),
+            "model_schema": dict(self.model_schema),
         }
 
 
@@ -406,7 +409,7 @@ class WaitTarget:
 @dataclass(frozen=True, slots=True)
 class WaitRequest:
     targets: tuple[WaitTarget, ...]
-    timeout_seconds: float = 30.0
+    timeout_seconds: float = 300.0
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.targets) <= 8:
@@ -455,6 +458,23 @@ class AgentStatus:
     events: tuple[AgentEvent, ...]
     next_event_cursor: int
     recovery_required: bool = False
+
+    def to_compact_dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "conversation_id": self.conversation_id,
+            "conversation_state": self.conversation_state,
+            "execution_state": self.execution_state,
+            "status": self.execution_state,
+            "state_revision": self.state_revision,
+            "next_event_cursor": self.next_event_cursor,
+        }
+        if self.result is not None and self.execution_state in TERMINAL_EXECUTION_STATES:
+            payload["result"] = dict(self.result)
+        if self.needs_input:
+            payload["needs_input"] = [dict(item) for item in self.needs_input]
+        if self.recovery_required:
+            payload["recovery_required"] = True
+        return payload
 
     def to_dict(self) -> dict[str, Any]:
         return {

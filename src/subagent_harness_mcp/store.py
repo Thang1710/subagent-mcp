@@ -746,6 +746,61 @@ class StateStore:
                 raise StateError("CIRCUIT_CONFLICT", "runtime quota pause is stale")
         return self.load_circuit(runtime_id, variant_id)
 
+    def require_ready_circuit_recovery(
+        self,
+        *,
+        runtime_id: str,
+        variant_id: str,
+        pair_key: str,
+        expected_revision: int,
+        error_code: str,
+    ) -> CircuitRecord:
+        _require_id(runtime_id, "runtime_id", 128)
+        _require_id(variant_id, "variant_id", 128)
+        _require_id(pair_key, "pair_key", 128)
+        if error_code != "RECOVERY_REQUIRED":
+            raise StateError("REQUEST_INVALID", "circuit recovery error is invalid")
+        with self.transaction(write=True) as database:
+            row = database.execute(
+                """
+                SELECT state, revision, details_json FROM circuits
+                WHERE runtime_id = ? AND variant_id = ?
+                """,
+                (runtime_id, variant_id),
+            ).fetchone()
+            if row is None:
+                raise StateError("CIRCUIT_NOT_FOUND", "runtime circuit does not exist")
+            details = _decode_object(row[2], "circuit details")
+            if details.get("pair_key") != pair_key:
+                raise StateError("IDENTITY_CONFLICT", "runtime adapter pair changed")
+            if row[0] == "recovery_required":
+                return _circuit_record(
+                    (runtime_id, variant_id, row[0], row[1], row[2])
+                )
+            if row[0] != "ready" or int(row[1]) != expected_revision:
+                raise StateError("CIRCUIT_CONFLICT", "runtime recovery claim is stale")
+            safe_details = dict(details)
+            safe_details["error_code"] = error_code
+            database.execute(
+                """
+                UPDATE circuits SET state = 'recovery_required', category = 'cleanup',
+                    retry_after_utc = NULL, revision = revision + 1,
+                    details_json = ?, updated_at_utc = ?
+                WHERE runtime_id = ? AND variant_id = ?
+                  AND state = 'ready' AND revision = ?
+                """,
+                (
+                    _canonical_json_text(safe_details),
+                    _utc_now(),
+                    runtime_id,
+                    variant_id,
+                    expected_revision,
+                ),
+            )
+            if database.execute("SELECT changes()").fetchone()[0] != 1:
+                raise StateError("CIRCUIT_CONFLICT", "runtime recovery claim is stale")
+        return self.load_circuit(runtime_id, variant_id)
+
     def recover_canary_after_cleanup(
         self,
         *,

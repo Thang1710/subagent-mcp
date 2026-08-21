@@ -2,7 +2,21 @@
 
 All notable changes to Subagent MCP are documented here.
 
-## 0.1.0a3 - Unreleased
+## 0.1.0a4 - 2026-08-21
+
+- Keep external-agent waits inside the MCP service until completion or a real
+  attention boundary, avoiding model-mediated polling while work is running.
+- Clarify the localhost settings UI, expose provider-native model and effort
+  selection, and hide test-only adapters from normal product views.
+- Add an explicit on-demand provider quota refresh that proves subscription
+  identity and no-overage status, pauses unavailable runtimes, and never retries
+  automatically after a quota signal.
+- Fail closed into recovery when provider cleanup cannot be confirmed, blocking
+  new work until the exact runtime pair is safe again.
+- Reframe the public README around Codex as orchestrator and generic external
+  model-plus-native-harness runtimes.
+
+## 0.1.0a3 - 2026-08-21
 
 - Keep release metadata parsing compatible with Python 3.10. The `0.1.0a2` tag
   stopped before artifact publication.

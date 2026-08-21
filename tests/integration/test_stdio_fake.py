@@ -100,6 +100,7 @@ def _spawn_arguments(workspace: Path, request_id: str) -> dict[str, Any]:
         "transport": "managed-sdk",
         "required_capabilities": ["repo_read"],
         "workspace": "current",
+        "response_mode": "full",
     }
 
 
@@ -120,7 +121,8 @@ async def _exercise_protocol(
     spawn_meta = _meta(spawned)
     conversation_id = spawn_meta["result"]["conversation_id"]
     status = await client.call_tool(
-        "agent_status", {"conversation_id": conversation_id}
+        "agent_status",
+        {"conversation_id": conversation_id, "response_mode": "full"},
     )
     sent = await client.call_tool(
         "agent_send",
@@ -128,6 +130,7 @@ async def _exercise_protocol(
             "request_id": "send-stdio-1",
             "conversation_id": conversation_id,
             "prompt": "Continue the same bounded session.",
+            "response_mode": "full",
         },
     )
     waited = await client.call_tool(
@@ -141,15 +144,24 @@ async def _exercise_protocol(
                 }
             ],
             "timeout_seconds": 0,
+            "response_mode": "full",
         },
     )
     interrupted = await client.call_tool(
         "agent_interrupt",
-        {"request_id": "interrupt-stdio-1", "conversation_id": conversation_id},
+        {
+            "request_id": "interrupt-stdio-1",
+            "conversation_id": conversation_id,
+            "response_mode": "full",
+        },
     )
     closed = await client.call_tool(
         "agent_close",
-        {"request_id": "close-stdio-1", "conversation_id": conversation_id},
+        {
+            "request_id": "close-stdio-1",
+            "conversation_id": conversation_id,
+            "response_mode": "full",
+        },
     )
 
     for result in (

@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a3"
+VERSION = "0.1.0a4"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -247,6 +247,7 @@ create_server(service).run('stdio')
                 "transport": "managed-sdk",
                 "required_capabilities": ["repo_read"],
                 "workspace": "current",
+                "response_mode": "full",
             },
         )
         spawn = _meta(spawned)["result"]
@@ -256,6 +257,7 @@ create_server(service).run('stdio')
                 "request_id": "release-send-1",
                 "conversation_id": spawn["conversation_id"],
                 "prompt": "Continue the same native session.",
+                "response_mode": "full",
             },
         )
         follow_up = _meta(sent)["result"]
@@ -269,6 +271,7 @@ create_server(service).run('stdio')
             {
                 "request_id": "release-close-1",
                 "conversation_id": spawn["conversation_id"],
+                "response_mode": "full",
             },
         )
         assert _meta(closed)["result"]["conversation_state"] == "closed"

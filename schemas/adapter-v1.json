@@ -37,7 +37,8 @@
     },
     "capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
     "semantic_permissions": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
-    "reasoning_schema": {"type": "object"}
+    "reasoning_schema": {"type": "object"},
+    "model_schema": {"type": "object"}
   },
   "additionalProperties": true
 }

@@ -21,6 +21,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from . import __version__
 from .config import ConfigError, ConfigStore
+from .contracts import ServiceError
 
 
 _ASSETS = {
@@ -119,6 +120,7 @@ _CSP = (
 
 SnapshotProvider = Callable[[], Mapping[str, Any]]
 ConfigPatcher = Callable[[dict[str, Any], int], Mapping[str, Any]]
+ProviderRefresher = Callable[[], Mapping[str, Any]]
 BrowserOpener = Callable[[str], object]
 
 
@@ -141,9 +143,11 @@ class LocalUiBackend:
         self._config = config
         self._service = service
         self._store = store
+        self._provider_quota: dict[str, Any] | None = None
 
     def snapshot(self) -> Mapping[str, Any]:
         document = self._config.load()
+        configured_runtime_ids = _configured_runtime_ids(document)
         records = _runtime_records(self._service)
         runtimes = _runtime_cards(document, records)
         circuits, activity = _read_ui_state(self._store)
@@ -179,11 +183,10 @@ class LocalUiBackend:
                 "circuits": circuits,
             },
             "circuits": circuits,
-            "quota": {
-                "state": "unknown",
-                "label": "Provider-reported only",
-                "detail": "Subagent MCP never enables usage credits or estimates a balance.",
-            },
+            "quota": self._provider_quota
+            or _quota_presentation(
+                "check_required" if configured_runtime_ids else "configure_first"
+            ),
             "update": {
                 "state": "not_checked",
                 "label": "Not checked",
@@ -210,7 +213,46 @@ class LocalUiBackend:
         )
         _apply_trust_patch(candidate, patch.get("trust"))
         saved = self._config.save(candidate, expected_revision=expected_revision)
+        self._provider_quota = None
         return {"revision": saved["revision"]}
+
+    def refresh_provider(self) -> Mapping[str, Any]:
+        runtime_ids = _configured_runtime_ids(self._config.load())
+        states: list[str] = []
+        overage_blocked = True
+        for runtime_id in runtime_ids:
+            try:
+                checked = _run_service_method(
+                    self._service,
+                    "runtime_check",
+                    runtime_id,
+                    True,
+                )
+            except ServiceError:
+                states.append("unknown")
+                overage_blocked = False
+                continue
+            quota = checked.get("quota") if isinstance(checked, Mapping) else None
+            state = quota.get("state") if isinstance(quota, Mapping) else "unknown"
+            states.append(state if isinstance(state, str) else "unknown")
+            overage_blocked = bool(
+                overage_blocked
+                and isinstance(quota, Mapping)
+                and quota.get("overage_blocked") is True
+            )
+        if not states:
+            state = "configure_first"
+        elif all(item == "available" for item in states):
+            state = "available"
+        elif "quota_paused" in states:
+            state = "quota_paused"
+        else:
+            state = "unknown"
+        self._provider_quota = _quota_presentation(
+            state,
+            overage_blocked=overage_blocked,
+        )
+        return self.snapshot()
 
 
 class _UiState:
@@ -218,9 +260,11 @@ class _UiState:
         self,
         snapshot_provider: SnapshotProvider,
         config_patcher: ConfigPatcher,
+        provider_refresher: ProviderRefresher | None,
     ) -> None:
         self.snapshot_provider = snapshot_provider
         self.config_patcher = config_patcher
+        self.provider_refresher = provider_refresher
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.sessions: dict[str, str] = {}
         self.lock = threading.Lock()
@@ -266,6 +310,7 @@ class LoopbackUiServer:
         snapshot_provider: SnapshotProvider,
         config_patcher: ConfigPatcher,
         *,
+        provider_refresher: ProviderRefresher | None = None,
         host: str = "127.0.0.1",
     ) -> None:
         if host not in {"127.0.0.1", "::1"}:
@@ -275,7 +320,9 @@ class LoopbackUiServer:
             )
         if not callable(snapshot_provider) or not callable(config_patcher):
             raise UiError("UI_BACKEND_INVALID", "UI callbacks must be callable")
-        self._state = _UiState(snapshot_provider, config_patcher)
+        if provider_refresher is not None and not callable(provider_refresher):
+            raise UiError("UI_BACKEND_INVALID", "provider refresh callback must be callable")
+        self._state = _UiState(snapshot_provider, config_patcher, provider_refresher)
         server_type = (
             _Ipv6ThreadingHttpServer if host == "::1" else _Ipv4ThreadingHttpServer
         )
@@ -357,7 +404,6 @@ def create_local_backend() -> LocalUiBackend:
     """Create the same config/state/service stack used by the stdio surface."""
 
     from .adapters.claude_code import ClaudeCodeAdapter
-    from .adapters.fake import FakeAdapter
     from .adapters.registry import AdapterRegistry
     from .paths import resolve_paths
     from .service import SubagentMcpService
@@ -366,7 +412,7 @@ def create_local_backend() -> LocalUiBackend:
     paths = resolve_paths()
     config = ConfigStore(paths)
     store = StateStore.open(paths)
-    registry = AdapterRegistry(builtin_factories=(FakeAdapter, ClaudeCodeAdapter))
+    registry = AdapterRegistry(builtin_factories=(ClaudeCodeAdapter,))
     registry.discover()
     service = SubagentMcpService(config=config, store=store, registry=registry)
     return LocalUiBackend(config=config, service=service, store=store)
@@ -376,7 +422,11 @@ def run_ui(*, browser_opener: BrowserOpener = webbrowser.open) -> int:
     """Bind first, open the fragment URL, and run until interrupted."""
 
     backend = create_local_backend()
-    server = LoopbackUiServer(backend.snapshot, backend.patch_config)
+    server = LoopbackUiServer(
+        backend.snapshot,
+        backend.patch_config,
+        provider_refresher=backend.refresh_provider,
+    )
     try:
         if not server.open_browser(browser_opener):
             raise UiError("BROWSER_OPEN_FAILED", "the browser declined the local URL")
@@ -454,6 +504,25 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
         def do_POST(self) -> None:
             path = self._request_path(require_origin=True)
             if path is None:
+                return
+            if path == "/api/v1/refresh":
+                if self._session(require_csrf=True) is None:
+                    self._discard_bounded_body()
+                    return
+                if not self._require_empty_body():
+                    return
+                if state.provider_refresher is None:
+                    self._json_error(HTTPStatus.SERVICE_UNAVAILABLE, "REFRESH_UNAVAILABLE")
+                    return
+                try:
+                    snapshot = _public_snapshot(state.provider_refresher())
+                except (ConfigError, UiError) as exc:
+                    self._backend_error(exc)
+                    return
+                except Exception:
+                    self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "UI_BACKEND_FAILED")
+                    return
+                self._send_json(HTTPStatus.OK, snapshot)
                 return
             if path != "/api/v1/session":
                 self._json_error(HTTPStatus.NOT_FOUND, "NOT_FOUND")
@@ -588,6 +657,7 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                 self._json_error(HTTPStatus.BAD_REQUEST, "BODY_INVALID")
                 return False
             if length != 0:
+                self._discard_bounded_body()
                 self._json_error(HTTPStatus.BAD_REQUEST, "BODY_NOT_ALLOWED")
                 return False
             return True
@@ -857,6 +927,57 @@ def _config_response(value: object) -> dict[str, Any]:
     return {"revision": revision}
 
 
+def _configured_runtime_ids(document: Mapping[str, Any]) -> list[str]:
+    runtimes = document.get("runtimes", {})
+    if not isinstance(runtimes, Mapping):
+        return []
+    result: list[str] = []
+    for runtime_id, policy in runtimes.items():
+        if not isinstance(runtime_id, str) or not isinstance(policy, Mapping):
+            continue
+        variants = policy.get("variants", ())
+        if policy.get("enabled") is not True or not isinstance(variants, Sequence):
+            continue
+        if any(
+            isinstance(item, Mapping)
+            and isinstance(item.get("model"), str)
+            and bool(item["model"])
+            for item in variants
+        ):
+            result.append(runtime_id)
+    return result
+
+
+def _quota_presentation(
+    state: str,
+    *,
+    overage_blocked: bool = False,
+) -> dict[str, Any]:
+    labels = {
+        "available": "Available · overage blocked",
+        "quota_paused": "Unavailable · quota paused",
+        "check_required": "Check required",
+        "configure_first": "Configure a runtime first",
+        "unknown": "Unknown",
+    }
+    details = {
+        "available": "Current provider evidence passed; usage credits stay blocked.",
+        "quota_paused": "Included provider allowance is unavailable. Refresh after your plan or quota changes.",
+        "check_required": "Refresh to ask the native harness for current provider evidence.",
+        "configure_first": "Choose and enable a model before checking quota.",
+        "unknown": "The provider did not return safe quota evidence.",
+    }
+    checked = state if state in labels else "unknown"
+    result: dict[str, Any] = {
+        "state": checked,
+        "label": labels[checked],
+        "detail": details[checked],
+    }
+    if overage_blocked and checked in {"available", "quota_paused"}:
+        result["overage_blocked"] = True
+    return result
+
+
 def _runtime_records(service: object) -> list[Mapping[str, Any]]:
     value = _run_service_method(service, "runtime_list")
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
@@ -885,6 +1006,111 @@ def _manifest_strings(manifest: Mapping[str, Any], key: str) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return ()
     return tuple(item for item in value if isinstance(item, str) and item)
+
+
+def _schema_options(schema: object) -> list[dict[str, Any]]:
+    if not isinstance(schema, Mapping):
+        return []
+    choices = schema.get("anyOf", ())
+    if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes, bytearray)):
+        return []
+    options: list[dict[str, Any]] = []
+    for choice in choices:
+        if not isinstance(choice, Mapping) or not isinstance(choice.get("const"), str):
+            continue
+        value = choice["const"]
+        title = choice.get("title")
+        options.append(
+            {
+                "value": value,
+                "label": title if isinstance(title, str) and title else value,
+                "available": True,
+            }
+        )
+    return options
+
+
+def _runtime_subtitle(manifest: Mapping[str, Any]) -> str:
+    proper_names = {"claude-code": "Claude Code"}
+    provider_id = str(manifest.get("provider_id", ""))
+    harness_id = str(manifest.get("harness_id", ""))
+    provider = proper_names.get(provider_id, _human_state(provider_id))
+    harness = proper_names.get(harness_id, _human_state(harness_id))
+    if provider and harness:
+        return f"{provider} model · {harness} native harness"
+    return harness or provider
+
+
+_CAPABILITY_UI = {
+    "canary": (
+        "Safety check",
+        "Checks this runtime before Codex delegates managed work.",
+    ),
+    "session": (
+        "Native session",
+        "Keeps delegated work in the provider's native session.",
+    ),
+    "resume": (
+        "Resume",
+        "Continues the same native session in a later turn.",
+    ),
+    "workspace": (
+        "Workspace",
+        "Runs with the exact workspace selected by Codex.",
+    ),
+}
+
+
+def _capability_card(capability: str) -> dict[str, Any]:
+    label, detail = _CAPABILITY_UI.get(
+        capability,
+        (_human_state(capability), "Published by this runtime adapter."),
+    )
+    return {
+        "id": capability,
+        "label": label,
+        "detail": detail,
+        "available": True,
+    }
+
+
+def _simple_reasoning_fields(
+    variant: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    index: int,
+) -> list[dict[str, Any]] | None:
+    schema = manifest.get("reasoning_schema")
+    if not isinstance(schema, Mapping):
+        return None
+    properties = schema.get("properties")
+    if not isinstance(properties, Mapping) or len(properties) != 1:
+        return None
+    key, definition = next(iter(properties.items()))
+    if not isinstance(key, str) or not isinstance(definition, Mapping):
+        return None
+    choices = definition.get("enum")
+    if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes, bytearray)):
+        return None
+    values = [item for item in choices if isinstance(item, str) and item]
+    if not values:
+        return None
+    reasoning = variant.get("reasoning", {})
+    current = reasoning.get(key, "") if isinstance(reasoning, Mapping) else ""
+    required = schema.get("required", ())
+    return [
+        {
+            "id": f"variant.{index}.reasoning.{key}",
+            "label": "Reasoning effort" if key == "effort" else _human_state(key),
+            "kind": "select",
+            "value": current,
+            "options": [
+                {"value": value, "label": value, "available": True}
+                for value in values
+            ],
+            "required": isinstance(required, Sequence) and key in required,
+            "help": "Higher effort can improve difficult work but uses more provider quota.",
+        }
+    ]
 
 
 def _new_runtime_policy(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -937,7 +1163,7 @@ def _runtime_cards(
             status_state = record_state
         reason = record.get("reason")
         if reason is None and status_state == "not_configured":
-            reason = "Configure an exact model, provider reasoning, and transport."
+            reason = "Choose a model and reasoning effort, then save changes."
         configurable = configured or (
             record_state == "available" and bool(supported_transports)
         )
@@ -946,7 +1172,7 @@ def _runtime_cards(
                 "id": runtime_id,
                 "name": str(manifest.get("display_name", runtime_id)),
                 "manifest": dict(manifest),
-                "transport": ", ".join(supported_transports),
+                "subtitle": _runtime_subtitle(manifest),
                 "status": {
                     "state": status_state,
                     "label": _human_state(status_state),
@@ -954,13 +1180,14 @@ def _runtime_cards(
                 },
                 "needs_canary": status_state == "needs_canary",
                 "enabled": enabled,
+                "enabledLabel": "Available to Codex",
+                "enabledHelp": (
+                    "When enabled, Codex may delegate work after required safety checks pass."
+                ),
                 "configured": configured,
                 "canEnable": configurable,
                 "locked": not configurable,
-                "capabilities": [
-                    {"id": str(item), "label": _human_state(str(item)), "available": True}
-                    for item in capabilities
-                ],
+                "capabilities": [_capability_card(str(item)) for item in capabilities],
                 "groups": _runtime_groups(policy, manifest),
             }
         )
@@ -979,12 +1206,11 @@ def _runtime_groups(
     selected_transport = rendered_policy.get("transport", "")
     if selected_transport not in transports:
         selected_transport = transports[0] if len(transports) == 1 else ""
-    groups: list[dict[str, Any]] = [
-        {
-            "id": "policy",
-            "label": "Policy",
-            "fields": [
-                {
+    groups: list[dict[str, Any]] = []
+    policy_fields: list[dict[str, Any]] = []
+    if len(variants) > 1:
+        policy_fields.append(
+            {
                     "id": "selection_mode",
                     "label": "Selection mode",
                     "kind": "select",
@@ -1002,8 +1228,11 @@ def _runtime_groups(
                         },
                     ],
                     "required": True,
-                },
-                {
+            }
+        )
+    if len(transports) > 1:
+        policy_fields.append(
+            {
                     "id": "transport",
                     "label": "Transport",
                     "kind": "select",
@@ -1018,43 +1247,49 @@ def _runtime_groups(
                     ],
                     "required": True,
                     "help": "Exact transport published by the selected adapter.",
-                },
-            ],
-        }
-    ]
+            }
+        )
+    if policy_fields:
+        groups.append({"id": "policy", "label": "Policy", "fields": policy_fields})
     for index, variant in enumerate(variants):
         if not isinstance(variant, Mapping):
             continue
         variant_id = str(variant.get("id", index))
+        reasoning_fields = _simple_reasoning_fields(variant, manifest, index)
+        if reasoning_fields is None:
+            reasoning_fields = [
+                {
+                    "id": f"variant.{index}.reasoning",
+                    "label": "Provider reasoning JSON",
+                    "kind": "text",
+                    "value": json.dumps(
+                        variant.get("reasoning", {}),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        allow_nan=False,
+                    ),
+                    "required": True,
+                    "format": "json-object",
+                    "help": "Validated by the selected adapter's provider-native schema.",
+                }
+            ]
         groups.append(
             {
                 "id": f"variant-{index}",
-                "label": f"Variant {variant_id}",
+                "label": "Model & reasoning" if len(variants) == 1 else f"Variant {variant_id}",
                 "fields": [
                     {
                         "id": f"variant.{index}.model",
-                        "label": "Provider model",
-                        "kind": "text",
+                        "label": "Model",
+                        "kind": "model",
                         "value": variant.get("model", ""),
+                        "options": _schema_options(manifest.get("model_schema")),
                         "required": True,
-                        "placeholder": "Enter an exact provider-native model ID",
-                        "help": "Opaque provider-native model ID; no fallback is applied.",
+                        "placeholder": "Choose a model or enter an exact model ID",
+                        "help": "Choose a suggested model or enter another exact provider model ID.",
                     },
-                    {
-                        "id": f"variant.{index}.reasoning",
-                        "label": "Provider reasoning JSON",
-                        "kind": "text",
-                        "value": json.dumps(
-                            variant.get("reasoning", {}),
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                            allow_nan=False,
-                        ),
-                        "required": True,
-                        "format": "json-object",
-                        "help": "Validated by the selected adapter's provider-native schema.",
-                    },
+                    *reasoning_fields,
                 ],
             }
         )
@@ -1115,14 +1350,24 @@ def _apply_runtime_patch(
         options = change.get("options", {})
         if not isinstance(options, Mapping):
             raise UiError("UI_PATCH_INVALID", "runtime options must be an object")
-        if creating and not {
-            "transport",
-            "variant.0.model",
-            "variant.0.reasoning",
-        }.issubset(options):
+        required_reasoning = manifests[runtime_id].get("reasoning_schema", {}).get(
+            "required", ()
+        ) if creating else ()
+        has_required_reasoning = all(
+            f"variant.0.reasoning.{key}" in options
+            or "variant.0.reasoning" in options
+            for key in required_reasoning
+        )
+        transports = _manifest_strings(manifests.get(runtime_id, {}), "supported_transports")
+        has_transport = len(transports) == 1 or "transport" in options
+        if creating and (
+            "variant.0.model" not in options
+            or not has_required_reasoning
+            or not has_transport
+        ):
             raise UiError(
                 "UI_PATCH_INVALID",
-                "new runtime policy needs transport, model, and reasoning",
+                "new runtime policy needs model, reasoning, and a supported transport",
             )
         for field_id, value in options.items():
             _apply_runtime_option(
@@ -1153,6 +1398,32 @@ def _apply_runtime_option(
         policy["transport"] = value
         return
     parts = field_id.split(".")
+    if (
+        len(parts) == 4
+        and parts[0] == "variant"
+        and parts[1].isdigit()
+        and parts[2] == "reasoning"
+    ):
+        variants = policy.get("variants")
+        index = int(parts[1])
+        if (
+            not isinstance(variants, list)
+            or index >= len(variants)
+            or not isinstance(variants[index], dict)
+        ):
+            raise UiError("UI_PATCH_INVALID", "variant option is not recognized")
+        schema = manifest.get("reasoning_schema", {})
+        properties = schema.get("properties", {}) if isinstance(schema, Mapping) else {}
+        definition = properties.get(parts[3]) if isinstance(properties, Mapping) else None
+        choices = definition.get("enum", ()) if isinstance(definition, Mapping) else ()
+        if value not in choices:
+            raise UiError("UI_PATCH_INVALID", "reasoning value is not supported")
+        reasoning = variants[index].get("reasoning")
+        if not isinstance(reasoning, dict):
+            reasoning = {}
+            variants[index]["reasoning"] = reasoning
+        reasoning[parts[3]] = value
+        return
     if len(parts) == 3 and parts[0] == "variant" and parts[1].isdigit():
         variants = policy.get("variants")
         index = int(parts[1])
@@ -1287,11 +1558,16 @@ def _read_ui_state(store: object | None) -> tuple[list[dict[str, Any]], list[dic
     return circuits, activity
 
 
-def _run_service_method(service: object, name: str) -> object:
+def _run_service_method(
+    service: object,
+    name: str,
+    *args: object,
+    **kwargs: object,
+) -> object:
     method = getattr(service, name, None)
     if not callable(method):
         raise UiError("UI_BACKEND_INVALID", f"service method {name} is unavailable")
-    result = method()
+    result = method(*args, **kwargs)
     if not hasattr(result, "__await__"):
         return result
     return asyncio.run(result)
