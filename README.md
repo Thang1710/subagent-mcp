@@ -115,7 +115,7 @@ for details.
 | 13-tool normalized lifecycle over stdio | Works |
 | Deterministic adapter for integration testing | Works without provider quota |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Passed release-candidate lifecycle gates; fresh `0.1.0a6` public install follows publication |
+| Windows install, update, rollback, registration, and conservative uninstall | Passed fresh public-user acceptance for `0.1.0a6` |
 | Claude Code native adapter | Implemented but remains `needs_canary` until its live no-overage gate passes |
 | Provider model selection | Opaque native model IDs; no hard-coded model allowlist or silent fallback |
 | Project-local Claude context and hooks | Disabled until canonical path and content-hash trust are enforced |
