@@ -15,6 +15,7 @@ from subagent_harness_mcp.adapters.deepseek_harness import (
     DeepSeekHarnessAdapter,
     DshBinding,
     DshLaunch,
+    _StdioAcpClient,
     render_dsh_config,
     _node_path,
     _dsh_env,
@@ -244,6 +245,88 @@ def test_background_lifecycle_reuses_native_session_and_interrupts(tmp_path: Pat
     asyncio.run(scenario())
 
 
+def test_acp_wire_error_preserves_terminal_quota_detail_for_classification(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            tmp_path / "persistence",
+            tmp_path / "config.yml",
+        )
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        future = asyncio.get_running_loop().create_future()
+        client._pending[7] = future
+
+        client._handle_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 7,
+                "error": {
+                    "code": -32603,
+                    "message": "turn failed: insufficient_quota; account credits exhausted",
+                },
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="credits exhausted"):
+            await future
+
+    asyncio.run(scenario())
+
+
+def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
+    tmp_path: Path,
+) -> None:
+    class QuotaAcpClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            raise RuntimeError(
+                "turn failed: insufficient_quota; account credits exhausted"
+            )
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=QuotaAcpClient,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        task = TaskPacket(
+            title="Review quota handling",
+            prompt="Return a result.",
+            acceptance_criteria=("Report terminal quota",),
+            role="reviewer",
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest("conversation-1", "execution-1", task, context)
+        )
+        for _ in range(20):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "QUOTA_PAUSED"
+        assert "credit" in snapshot.error.message.lower()
+
+    asyncio.run(scenario())
+
+
 def test_generated_config_uses_native_plugins_without_nested_agents(tmp_path: Path) -> None:
     binding = _binding(tmp_path)
     workspace = tmp_path / "workspace"
@@ -290,6 +373,23 @@ def test_node_locator_falls_back_to_standard_windows_install(
     node.write_bytes(b"node")
     monkeypatch.delenv("SUBAGENT_MCP_DSH_NODE", raising=False)
     monkeypatch.setenv("ProgramFiles", str(program_files))
+    monkeypatch.setattr("shutil.which", lambda _name: None)
+
+    assert _node_path() == node.resolve()
+
+
+def test_node_locator_uses_system_drive_when_mcp_client_sanitizes_program_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    system_drive = tmp_path / "system-drive"
+    node = system_drive / "Program Files" / "nodejs" / "node.exe"
+    node.parent.mkdir(parents=True)
+    node.write_bytes(b"node")
+    monkeypatch.delenv("SUBAGENT_MCP_DSH_NODE", raising=False)
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.setenv("SystemDrive", str(system_drive))
     monkeypatch.setattr("shutil.which", lambda _name: None)
 
     assert _node_path() == node.resolve()

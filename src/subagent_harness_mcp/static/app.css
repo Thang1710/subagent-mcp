@@ -266,7 +266,7 @@ main:focus { outline: none; }
 .field label { font-size: 0.85rem; color: var(--text-dim); display: grid; gap: 0.3rem; }
 .field .help { color: var(--text-faint); font-size: 0.78rem; }
 
-select, input[type="text"], input[type="number"] {
+select, textarea, input[type="text"], input[type="number"] {
   width: 100%;
   min-height: 38px;
   padding: 0.4rem 0.55rem;
@@ -277,7 +277,8 @@ select, input[type="text"], input[type="number"] {
   font: inherit;
   font-size: 0.9rem;
 }
-select:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }
+textarea { resize: vertical; }
+select:disabled, textarea:disabled, input:disabled { opacity: 0.55; cursor: not-allowed; }
 .model-custom { margin-top: 0.35rem; }
 
 .field label.inline { display: flex; align-items: center; gap: 0.5rem; min-height: var(--tap); }

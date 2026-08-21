@@ -105,6 +105,7 @@ class SubagentMcpService:
                     "state": record.state,
                     "enabled": policy.get("enabled", False),
                     "delegation_priority": policy.get("delegation_priority", 0),
+                    "model_policy": _public_model_policy(policy),
                     "manifest": None if record.manifest is None else record.manifest.to_dict(),
                     "reason": record.reason,
                     "circuits": [
@@ -1093,6 +1094,30 @@ class SubagentMcpService:
 
 def _new_id(prefix: str) -> str:
     return f"{prefix}-{uuid.uuid4().hex}"
+
+
+def _public_model_policy(policy: object) -> dict[str, Any]:
+    if not isinstance(policy, Mapping):
+        return {
+            "selection_mode": "fixed",
+            "ordered_variants": [],
+            "fallback_on": [],
+        }
+    raw_variants = policy.get("variants", ())
+    variants = raw_variants if isinstance(raw_variants, list) else []
+    ordered = [
+        {"variant_id": item["id"], "model": item["model"]}
+        for item in variants
+        if isinstance(item, Mapping)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("model"), str)
+    ]
+    selection_mode = str(policy.get("selection_mode", "fixed"))
+    return {
+        "selection_mode": selection_mode,
+        "ordered_variants": ordered,
+        "fallback_on": ["QUOTA_PAUSED"] if len(ordered) > 1 else [],
+    }
 
 
 def _workspace(raw: str) -> tuple[str, str]:

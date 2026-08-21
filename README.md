@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a14` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a15` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -24,11 +24,13 @@ silently opts into usage credits or paid overage.
   OAuth identity plus live no-overage evidence before accepting its output.
   Current provider availability is shown separately in the localhost UI.
 - **DeepSeek Harness — In development.** The current source includes a first
-  native ACP vertical slice. It discovers a standard Windows Node install and
+  native ACP vertical slice. It discovers a standard Windows Node install even
+  when an MCP client filters `ProgramFiles`, and
   the source checkout linked by the native `~/.dsh` profile without depending
-  on a separate web launcher. Provider-backed and release-install proof remain
-  in progress. Billing may use credits or unlimited offers the user already
-  authorizes; auto-top-up and overage are never enabled.
+  on a separate web launcher. Initial provider-backed review proof has passed;
+  broader provider and lifecycle coverage remains in progress. Billing may use
+  credits or unlimited offers the user already authorizes; auto-top-up and
+  overage are never enabled.
 
 ## Install
 
@@ -42,7 +44,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a14
+uv tool install subagent-harness-mcp==0.1.0a15
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -54,7 +56,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a14` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a15` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -97,6 +99,13 @@ and enable **DeepSeek Harness**. Enter the exact native model as
 `provider-name::model-id`; Subagent MCP does not maintain a provider or model
 allowlist. The adapter uses DeepSeek Harness's native ACP transport, not its web
 UI.
+
+The primary model is followed by an optional **Fallback models (in order)**
+list. Enter one exact model ID per line. Codex moves to the next configured
+variant only after the current provider explicitly reports exhausted quota or
+credit (`QUOTA_PAUSED`); ambiguous failures, timeouts, and crashes are reported
+without an automatic retry. No model, including Ox Alpha, is selected by
+default for public users.
 
 Enabling this runtime authorizes the selected route to consume quota from an
 existing subscription or unlimited offer, or an already funded provider
@@ -155,9 +164,9 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a14` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance passes for `0.1.0a15` |
 | Claude Code native adapter | Ready in the Windows preview |
-| Provider model selection | Opaque native model IDs; no hard-coded model allowlist or silent fallback |
+| Provider model selection | Opaque native model IDs; user-ordered fallback only after explicit quota exhaustion |
 
 Live provider availability still depends on the user's installed native
 harness, authentication, selected model, and current provider limits.
@@ -188,8 +197,9 @@ tools. Public schemas live in [`schemas/`](schemas/).
   account-level usage-credit toggle; subscription-only users must keep usage
   credits disabled in Claude. Subagent MCP never turns them on.
 - Missing local model, workspace, or session configuration blocks launch. Live
-  identity or rate mismatches interrupt before output is accepted, and the
-  adapter never silently chooses a fallback.
+  identity or rate mismatches interrupt before output is accepted. A configured
+  fallback is selected only after an explicit `QUOTA_PAUSED` result; ambiguous
+  failures never trigger another paid request.
 - Provider Refresh is a no-model preflight. It never launches a canary or task;
   when a native harness cannot expose pre-turn quota evidence, the UI reports
   `Unknown` instead of spending provider quota to manufacture an answer.

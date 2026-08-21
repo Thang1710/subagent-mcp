@@ -1279,28 +1279,24 @@ def _runtime_groups(
             ),
         }
     )
-    if len(variants) > 1:
-        policy_fields.append(
-            {
-                    "id": "selection_mode",
-                    "label": "Selection mode",
-                    "kind": "select",
-                    "value": rendered_policy.get("selection_mode", "fixed"),
-                    "options": [
-                        {
-                            "value": "fixed",
-                            "label": "Fixed",
-                            "available": len(variants) == 1,
-                        },
-                        {
-                            "value": "lead-selects",
-                            "label": "Lead selects",
-                            "available": True,
-                        },
-                    ],
-                    "required": True,
-            }
-        )
+    policy_fields.append(
+        {
+            "id": "fallback_models",
+            "label": "Fallback models (in order)",
+            "kind": "textarea",
+            "value": "\n".join(
+                str(item.get("model", ""))
+                for item in variants[1:]
+                if isinstance(item, Mapping) and item.get("model")
+            ),
+            "placeholder": "One exact model ID per line",
+            "required": False,
+            "help": (
+                "Codex uses this order only after the current model explicitly reports "
+                "exhausted quota or credit. Ambiguous failures are never retried."
+            ),
+        }
+    )
     if len(transports) > 1:
         policy_fields.append(
             {
@@ -1454,13 +1450,21 @@ def _apply_runtime_patch(
                 "UI_PATCH_INVALID",
                 "new runtime policy needs model, reasoning, and a supported transport",
             )
-        for field_id, value in options.items():
+        ordered_options = [
+            (field_id, value)
+            for field_id, value in options.items()
+            if str(field_id) != "fallback_models"
+        ]
+        if "fallback_models" in options:
+            ordered_options.append(("fallback_models", options["fallback_models"]))
+        for field_id, value in ordered_options:
             _apply_runtime_option(
                 policy,
                 str(field_id),
                 value,
                 manifest=manifests.get(runtime_id, {}),
             )
+        _validate_runtime_model_order(policy)
 
 
 def _apply_runtime_option(
@@ -1486,6 +1490,35 @@ def _apply_runtime_option(
         ):
             raise UiError("UI_PATCH_INVALID", "transport is not supported")
         policy["transport"] = value
+        return
+    if field_id == "fallback_models":
+        if not isinstance(value, str):
+            raise UiError("UI_PATCH_INVALID", "fallback models must be text")
+        models = [line.strip() for line in value.splitlines() if line.strip()]
+        if len(models) > 7:
+            raise UiError("UI_PATCH_INVALID", "at most seven fallback models are supported")
+        variants = policy.get("variants")
+        if not isinstance(variants, list) or not variants or not isinstance(variants[0], dict):
+            raise UiError("UI_PATCH_INVALID", "primary model is not configured")
+        primary = variants[0]
+        existing = {
+            str(item.get("model")): item
+            for item in variants[1:]
+            if isinstance(item, dict) and isinstance(item.get("model"), str)
+        }
+        reasoning = primary.get("reasoning", {})
+        policy["variants"] = [primary]
+        for index, model in enumerate(models, 1):
+            variant = copy.deepcopy(existing.get(model, {}))
+            variant.update(
+                {
+                    "id": f"fallback-{index}",
+                    "model": model,
+                    "reasoning": copy.deepcopy(variant.get("reasoning", reasoning)),
+                }
+            )
+            policy["variants"].append(variant)
+        policy["selection_mode"] = "lead-selects" if models else "fixed"
         return
     parts = field_id.split(".")
     if (
@@ -1548,6 +1581,21 @@ def _apply_runtime_option(
         context[key] = _coerce_editable_value(context[key], value)
         return
     raise UiError("UI_PATCH_INVALID", "runtime option is not recognized")
+
+
+def _validate_runtime_model_order(policy: Mapping[str, Any]) -> None:
+    variants = policy.get("variants", ())
+    if not isinstance(variants, Sequence) or isinstance(variants, (str, bytes, bytearray)):
+        raise UiError("UI_PATCH_INVALID", "model order is invalid")
+    models = [
+        item.get("model")
+        for item in variants
+        if isinstance(item, Mapping)
+    ]
+    if any(not isinstance(model, str) or not model.strip() for model in models):
+        raise UiError("UI_PATCH_INVALID", "model order contains an empty model")
+    if len(models) != len(set(models)):
+        raise UiError("UI_PATCH_INVALID", "model order contains a duplicate model")
 
 
 def _apply_trust_patch(document: dict[str, Any], raw: object) -> None:

@@ -2,6 +2,17 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a15 - 2026-08-21
+
+- Discover standard Windows Node installs from `SystemDrive` when an MCP client
+  intentionally filters the `ProgramFiles` environment variable.
+- Add a user-ordered fallback-model list without hard-coding a public default;
+  Codex selects the next variant only after an explicit `QUOTA_PAUSED` result.
+- Preserve bounded ACP error detail long enough to distinguish terminal
+  provider credit/quota exhaustion from ambiguous provider failures, while
+  returning only a generic public billing notice and never buying or reloading
+  credits.
+
 ## 0.1.0a14 - 2026-08-21
 
 - Reject documented credential routes above subscription OAuth and verify the

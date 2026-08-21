@@ -762,6 +762,14 @@
       select.id = controlId;
       return select;
     }
+    if (field.kind === 'textarea') {
+      const textarea = document.createElement('textarea');
+      textarea.id = controlId;
+      textarea.rows = 3;
+      if (field.placeholder) textarea.placeholder = field.placeholder;
+      textarea.value = field.value === undefined || field.value === null ? '' : String(field.value);
+      return textarea;
+    }
     const input = document.createElement('input');
     input.type = 'text';
     input.id = controlId;

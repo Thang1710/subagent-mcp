@@ -182,6 +182,40 @@ def test_runtime_list_publishes_external_delegation_priority(tmp_path: Path) -> 
     assert runtimes[0]["delegation_priority"] == 73
 
 
+def test_runtime_list_publishes_ordered_model_fallback_policy(tmp_path: Path) -> None:
+    service, _ = _service(tmp_path, FakeHarness())
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(tmp_path / "home")},
+        os_name="nt",
+    )
+    config = ConfigStore(paths)
+    document = config.load()
+    policy = document["runtimes"]["fake"]
+    policy["selection_mode"] = "lead-selects"
+    policy["variants"].append(
+        {
+            "id": "fallback-1",
+            "model": "vendor/fallback-model",
+            "reasoning": {"provider_depth": "deep"},
+        }
+    )
+    config.save(document, expected_revision=1)
+
+    runtime = asyncio.run(service.runtime_list())[0]
+
+    assert runtime["model_policy"] == {
+        "selection_mode": "lead-selects",
+        "ordered_variants": [
+            {
+                "variant_id": "future-deep",
+                "model": "vendor/future-model:preview-01",
+            },
+            {"variant_id": "fallback-1", "model": "vendor/fallback-model"},
+        ],
+        "fallback_on": ["QUOTA_PAUSED"],
+    }
+
+
 def test_runtime_check_refreshes_ready_quota_only_when_explicit(tmp_path: Path) -> None:
     harness = FakeHarness()
     adapter = _QuotaFakeAdapter(harness)

@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass, field
@@ -31,6 +32,14 @@ DEFAULT_TIMEOUT_SECONDS = 300.0
 CONTROLLER_RESULT_MAX_CHARS = 4_096
 MAX_WIRE_LINE_BYTES = 1024 * 1024
 _TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
+_QUOTA_EXHAUSTED = re.compile(
+    r"\binsufficient[\s_-]+(?:quota|balance|credits?)\b"
+    r"|\b(?:quota|usage[\s_-]+limit)[\s_-]+(?:exceeded|exhausted|reached)\b"
+    r"|\bexceed(?:ed|s)?[\s_-]+(?:(?:your|the)[\s_-]+)?(?:current[\s_-]+)?quota\b"
+    r"|\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b"
+    r"|\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b",
+    re.IGNORECASE,
+)
 _PACKAGES = {
     "settings-file": "@deepseek-ai/dsh-settings-file",
     "credentials-local": "@deepseek-ai/dsh-credentials-local",
@@ -133,7 +142,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a14",
+            adapter_version="0.1.0a15",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -460,9 +469,18 @@ class DeepSeekHarnessAdapter:
                 )
                 return
             if failure is not None:
-                code = "RECOVERY_REQUIRED" if isinstance(
-                    failure, (TimeoutError, asyncio.TimeoutError)
-                ) else "PROVIDER_ERROR"
+                if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
+                    code = "RECOVERY_REQUIRED"
+                    category = "adapter"
+                    message = "DeepSeek ACP turn did not complete"
+                elif _QUOTA_EXHAUSTED.search(str(failure)):
+                    code = "QUOTA_PAUSED"
+                    category = "quota"
+                    message = "DeepSeek provider usage credit or quota is exhausted"
+                else:
+                    code = "PROVIDER_ERROR"
+                    category = "provider"
+                    message = "DeepSeek ACP turn did not complete"
                 session.snapshot = _snapshot(
                     session.context,
                     session_id=session.snapshot.external_session_id,
@@ -470,9 +488,9 @@ class DeepSeekHarnessAdapter:
                     execution_state="failed",
                     error=AdapterFailure(
                         code,
-                        "adapter" if code == "RECOVERY_REQUIRED" else "provider",
+                        category,
                         False,
-                        "DeepSeek ACP turn did not complete",
+                        message,
                     ),
                 )
                 return
@@ -549,7 +567,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a14"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a15"},
                 },
             ),
             timeout=self._timeout,
@@ -677,7 +695,7 @@ class _StdioAcpClient:
         if future is None or future.done():
             return
         if "error" in message:
-            future.set_exception(RuntimeError("ACP request was rejected"))
+            future.set_exception(RuntimeError(_acp_error_message(message.get("error"))))
         else:
             future.set_result(message.get("result"))
 
@@ -976,6 +994,25 @@ def _reject_permission(params: Mapping[str, Any]) -> Mapping[str, Any]:
     return {"outcome": {"outcome": "cancelled"}}
 
 
+def _acp_error_message(error: object) -> str:
+    details: list[str] = []
+    if isinstance(error, Mapping):
+        for key in ("message", "detail"):
+            value = error.get(key)
+            if isinstance(value, str) and value:
+                details.append(value)
+        data = error.get("data")
+        if isinstance(data, Mapping):
+            for key in ("message", "detail", "error"):
+                value = data.get(key)
+                if isinstance(value, str) and value:
+                    details.append(value)
+        elif isinstance(data, str) and data:
+            details.append(data)
+    detail = ": ".join(details)
+    return detail[:2_048] if detail else "ACP request was rejected"
+
+
 def _node_path() -> Path | None:
     override = os.environ.get("SUBAGENT_MCP_DSH_NODE")
     candidates: list[Path] = []
@@ -984,9 +1021,14 @@ def _node_path() -> Path | None:
     discovered = shutil.which("node")
     if discovered:
         candidates.append(Path(discovered))
-    program_files = os.environ.get("ProgramFiles")
-    if program_files:
-        candidates.append(Path(program_files) / "nodejs" / "node.exe")
+    for variable in ("ProgramFiles", "ProgramW6432"):
+        program_files = os.environ.get(variable)
+        if program_files:
+            candidates.append(Path(program_files) / "nodejs" / "node.exe")
+    system_drive = os.environ.get("SystemDrive")
+    if system_drive:
+        drive_root = Path(f"{system_drive}\\" if system_drive.endswith(":") else system_drive)
+        candidates.append(drive_root / "Program Files" / "nodejs" / "node.exe")
     for candidate in candidates:
         try:
             resolved = candidate.resolve(strict=True)

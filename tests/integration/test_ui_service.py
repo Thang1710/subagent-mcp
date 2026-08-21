@@ -425,8 +425,14 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         for group in deepseek["groups"]
         for field in group["fields"]
     }
-    assert set(deepseek_fields) == {"delegation_priority", "variant.0.model"}
+    assert set(deepseek_fields) == {
+        "delegation_priority",
+        "fallback_models",
+        "variant.0.model",
+    }
     assert deepseek_fields["delegation_priority"]["value"] == 0
+    assert deepseek_fields["fallback_models"]["kind"] == "textarea"
+    assert deepseek_fields["fallback_models"]["value"] == ""
     assert deepseek_fields["variant.0.model"]["kind"] == "model"
     assert deepseek_fields["variant.0.model"]["placeholder"] == (
         "provider-name::model-id"
@@ -440,6 +446,7 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     }
     assert set(fields) == {
         "delegation_priority",
+        "fallback_models",
         "variant.0.model",
         "variant.0.reasoning.effort",
     }
@@ -477,6 +484,10 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
                     "variant.0.model": model,
                     "variant.0.reasoning.effort": reasoning["effort"],
                     "delegation_priority": 50,
+                    "fallback_models": (
+                        "future/provider-fallback-1@2026.08\n"
+                        "future/provider-fallback-2@2026.08"
+                    ),
                 },
             }
         }
@@ -502,6 +513,10 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     assert updated_fields["delegation_priority"]["value"] == 50
     assert updated_fields["variant.0.model"]["value"] == model
     assert updated_fields["variant.0.reasoning.effort"]["value"] == "xhigh"
+    assert updated_fields["fallback_models"]["value"] == (
+        "future/provider-fallback-1@2026.08\n"
+        "future/provider-fallback-2@2026.08"
+    )
 
     persisted = ConfigStore(
         resolve_paths(
@@ -513,14 +528,24 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         "enabled": True,
         "delegation_priority": 50,
         "fallback": False,
-        "selection_mode": "fixed",
+        "selection_mode": "lead-selects",
         "transport": "managed-sdk",
         "variants": [
             {
                 "id": "default",
                 "model": model,
                 "reasoning": reasoning,
-            }
+            },
+            {
+                "id": "fallback-1",
+                "model": "future/provider-fallback-1@2026.08",
+                "reasoning": reasoning,
+            },
+            {
+                "id": "fallback-2",
+                "model": "future/provider-fallback-2@2026.08",
+                "reasoning": reasoning,
+            },
         ],
     }
 
