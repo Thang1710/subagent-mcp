@@ -1,9 +1,21 @@
 # Subagent MCP
 
-Subagent MCP gives Codex and other stdio MCP clients one local lifecycle for
-delegating work to external coding-agent harnesses. Each adapter uses the
-provider's native harness while Subagent MCP keeps status, sessions, input, and
-results consistent for the client.
+Most agent setups ask one model inside one harness to plan, implement, and
+review the same work. That can leave the same assumptions in every role —
+closer to grading your own homework than getting an independent review.
+
+Subagent MCP lets Codex remain the main agent and orchestrator while delegating
+work to external agent runtimes. An external agent runtime is a model paired
+with its native harness. Claude with Claude Code, a Cursor-supported model with
+Cursor's harness, and Qwen with its native harness are examples, not hard-coded
+branches: adapters connect each runtime through the same normalized lifecycle.
+
+These runtimes supplement Codex's native subagent pool. Where a native harness
+supports subscription-backed use, work can draw on that provider's existing
+quota; actual concurrency and capabilities still depend on installed adapters
+and provider limits. Subagent MCP does not enable usage credits or overage, and
+managed provider work fails closed when no-overage evidence or required
+identity, model, workspace, or session data is missing.
 
 The project and repository are named **Subagent MCP**. The Python distribution
 and command are **`subagent-harness-mcp`** because the shorter package name was
@@ -53,23 +65,48 @@ This opens a temporary browser session on localhost for settings, health, and
 read-only activity. It is not an agent chat window, and the server stops when
 the command exits.
 
+## Use it from Codex
+
+After registering the server and configuring a runtime, start a new Codex task
+and delegate in natural language. For example:
+
+> Use Subagent MCP to ask an external agent to review this change, then
+> evaluate its findings independently.
+
+Codex decides what to delegate, observes the result, and keeps the final
+judgment. Underneath, each adapter maps the same lifecycle to its native
+harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
+
 ## How it fits together
 
 ```mermaid
 flowchart LR
-    C["Codex or another MCP client"] -->|"stdio MCP"| S["Subagent MCP"]
-    U["Browser UI<br/>localhost only"] --> S
-    S --> D[("Local config and activity")]
-    S --> L["Normalized subagent lifecycle"]
-    L --> F["Deterministic adapter"]
-    L --> N["Native harness adapters"]
-    N --> H["Claude Code"]
-    N -.-> X["Future harnesses"]
+    C["Codex<br/>Main agent & orchestrator"]
+    M["Subagent MCP<br/>Gateway"]
+    UI["Localhost UI<br/>Settings & activity"]
+
+    C -->|"stdio MCP<br/>delegate · steer · observe"| M
+    UI --> M
+
+    subgraph E["External agent runtimes — adapter-driven"]
+        R1["Model<br/>+<br/>native harness"]
+        R2["Model<br/>+<br/>native harness"]
+        RN["More runtimes<br/>via future adapters"]
+    end
+
+    M -->|"normalized lifecycle"| R1
+    M -->|"normalized lifecycle"| R2
+    M -->|"normalized lifecycle"| RN
 ```
 
-The service owns lifecycle state, idempotency, redaction, leases, and circuits.
-Adapters translate that contract to a native harness and do not write shared
-state directly. See [the architecture](docs/architecture.md) for details.
+A runtime may be Claude with Claude Code, a Cursor-supported model with
+Cursor's harness, Qwen with its native harness, or another adapter. These are
+examples of the adapter shape, not special cases in the architecture.
+
+Subagent MCP owns the normalized lifecycle, status, redaction, leases, and
+circuits. Each adapter translates that contract to its native harness without
+writing shared state directly. See [the architecture](docs/architecture.md)
+for details.
 
 ## What works in this preview
 
