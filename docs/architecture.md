@@ -46,14 +46,17 @@ The deterministic fake adapter proves the local contract without provider
 quota. The Claude managed adapter cannot run normal work until its exact
 standalone CLI/SDK/model/reasoning/transport pair passes the dedicated live
 no-overage canary. Visible-background, promotion, and native Codex-panel
-integration are explicit preview gaps. Ordinary `0.1.0a8` Claude turns select
+integration are explicit preview gaps. Ordinary `0.1.0a9` Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
 
 The native SDK emits its rate-limit attestation only after a turn starts, not
-during `connect(None)`. Canary and ordinary turns therefore start with 1M
-context, fast mode, and the usage-credits command disabled per process, and no
+during `connect(None)`. The provider Refresh path therefore performs only a
+connection-level probe and reports `Unknown` when no pre-turn rate evidence is
+available; it never launches a canary or provider task. Canary and ordinary
+turns start with 1M context, fast mode, and the usage-credits command disabled
+per process, and no
 canary output is accepted before an exact safe rate event. Ordinary turns
 require the resulting exact ready attestation because the CLI does not promise
 a fresh rate event before every assistant message; any later unsafe rate/error

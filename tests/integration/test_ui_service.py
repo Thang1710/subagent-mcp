@@ -232,7 +232,7 @@ def test_ui_provider_refresh_reports_unknown_without_backend_details(
     assert "must-not-escape" not in json.dumps(refreshed)
 
 
-def test_ui_provider_refresh_explains_guarded_canary_timeout(tmp_path: Path) -> None:
+def test_ui_provider_refresh_explains_no_model_preflight_gap(tmp_path: Path) -> None:
     _, config = _configured_backend(tmp_path / "home")
     manifest = FakeAdapter().manifest.to_dict()
 
@@ -271,8 +271,8 @@ def test_ui_provider_refresh_explains_guarded_canary_timeout(tmp_path: Path) -> 
         "state": "unknown",
         "label": "Unknown",
         "detail": (
-            "The native harness did not complete the guarded quota check. "
-            "No quota evidence was accepted."
+            "The native harness did not expose quota evidence without starting "
+            "a model. Refresh started no provider task."
         ),
         "reason_code": "CAPABILITY_MISSING",
     }

@@ -23,7 +23,7 @@ def _server(
 
     def snapshot():
         return {
-            "version": "0.1.0a8",
+            "version": "0.1.0a9",
             "revision": 7,
             "health": {"state": "ready", "messages": []},
             "runtimes": [],

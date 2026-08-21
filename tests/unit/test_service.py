@@ -238,7 +238,44 @@ def test_runtime_check_pauses_ready_circuit_on_unsafe_quota(tmp_path: Path) -> N
     assert adapter.quota_calls == 1
 
 
-def test_runtime_check_uses_fresh_canary_for_required_and_paused_quota(
+def test_runtime_check_pauses_ready_circuit_when_quota_evidence_is_missing(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def run():
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+        adapter.quota_error_code = "CAPABILITY_MISSING"
+        return await service.runtime_check("fake", refresh_quota=True)
+
+    refreshed = asyncio.run(run())
+
+    assert refreshed["quota"] == {
+        "state": "quota_paused",
+        "variants": [
+            {
+                "variant_id": "future-deep",
+                "state": "quota_paused",
+                "error_code": "CAPABILITY_MISSING",
+            }
+        ],
+    }
+    assert refreshed["state"] == "auto_paused"
+    assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+    assert adapter.canary_calls == adapter.quota_calls == 1
+
+
+def test_runtime_check_uses_no_model_probe_for_required_and_paused_quota(
     tmp_path: Path,
 ) -> None:
     harness = FakeHarness()
@@ -256,14 +293,14 @@ def test_runtime_check_uses_fresh_canary_for_required_and_paused_quota(
     required, paused, recovered = asyncio.run(run())
 
     assert required["quota"]["state"] == "available"
-    assert required["state"] == "ready"
+    assert required["state"] == "needs_canary"
     assert paused["quota"]["state"] == "quota_paused"
-    assert paused["state"] == "auto_paused"
+    assert paused["state"] == "needs_canary"
     assert recovered["quota"]["state"] == "available"
-    assert recovered["state"] == "ready"
-    assert store.load_circuit("fake", "future-deep").state == "ready"
-    assert adapter.canary_calls == 2
-    assert adapter.quota_calls == 1
+    assert recovered["state"] == "needs_canary"
+    assert store.load_circuit("fake", "future-deep").state == "needs_canary"
+    assert adapter.canary_calls == 0
+    assert adapter.quota_calls == 3
 
 
 def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) -> None:
@@ -272,7 +309,15 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
     service, store = _service(tmp_path, harness, adapter=adapter)
 
     async def run():
-        await service.runtime_check("fake", refresh_quota=True)
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
         adapter.quota_cleanup_confirmed = False
         return await service.runtime_check("fake", refresh_quota=True)
 
@@ -282,10 +327,10 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
     assert store.load_circuit("fake", "future-deep").state == "auto_paused"
 
 
-def test_runtime_check_explains_unknown_guarded_canary_failure(tmp_path: Path) -> None:
+def test_runtime_check_explains_unknown_no_model_quota_failure(tmp_path: Path) -> None:
     harness = FakeHarness()
     adapter = _QuotaFakeAdapter(harness)
-    adapter.canary_error_code = "CAPABILITY_MISSING"
+    adapter.quota_error_code = "CAPABILITY_MISSING"
     service, _ = _service(tmp_path, harness, adapter=adapter)
 
     refreshed = asyncio.run(service.runtime_check("fake", refresh_quota=True))
@@ -312,7 +357,15 @@ def test_runtime_check_requires_cleanup_after_ambiguous_quota_probe(
     service, store = _service(tmp_path, harness, adapter=adapter)
 
     async def run():
-        await service.runtime_check("fake", refresh_quota=True)
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
         adapter.quota_error_code = "RECOVERY_REQUIRED"
         return await service.runtime_check("fake", refresh_quota=True)
 

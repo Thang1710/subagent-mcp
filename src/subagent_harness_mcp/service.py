@@ -234,51 +234,28 @@ class SubagentMcpService:
                 continue
             transport = adapter.manifest.supported_transports[0]
             evidence: Mapping[str, Any] | None = None
-            if circuit.state in {"needs_canary", "auto_paused"}:
-                try:
-                    response = await self.runtime_canary(
-                        {
-                            "request_id": self._id_factory("quota-refresh"),
-                            "runtime_id": runtime_id,
-                            "variant_id": variant_id,
-                            "transport": transport,
-                        }
-                    )
-                    candidate = response.get("attestation")
-                    if isinstance(candidate, Mapping):
-                        evidence = candidate
-                except ServiceError as exc:
-                    results.append(
-                        {
-                            "variant_id": variant_id,
-                            "state": (
-                                "quota_paused"
-                                if exc.code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
-                                else "unknown"
-                            ),
-                            "error_code": exc.code,
-                        }
-                    )
-                    continue
-            elif circuit.state == "ready" and isinstance(adapter, QuotaProbeAdapter):
-                result = await adapter.quota_probe(
-                    CanaryRequest(
-                        runtime_id=runtime_id,
-                        variant_id=variant_id,
-                        model=model,
-                        reasoning=dict(reasoning),
-                        transport=transport,
-                        base_pair_key=base_pair_key,
-                        pair_key=circuit.pair_key,
-                    )
+            if not isinstance(adapter, QuotaProbeAdapter):
+                results.append({"variant_id": variant_id, "state": "unknown"})
+                continue
+            result = await adapter.quota_probe(
+                CanaryRequest(
+                    runtime_id=runtime_id,
+                    variant_id=variant_id,
+                    model=model,
+                    reasoning=dict(reasoning),
+                    transport=transport,
+                    base_pair_key=base_pair_key,
+                    pair_key=circuit.pair_key,
                 )
-                if result.pair_key != circuit.pair_key:
-                    raise ServiceError("CONTEXT_DRIFT", "runtime quota pair changed")
-                if result.passed:
-                    evidence = result.details
-                else:
-                    code = result.error.code if result.error is not None else "QUOTA_PAUSED"
-                    if code == "RECOVERY_REQUIRED":
+            )
+            if result.pair_key != circuit.pair_key:
+                raise ServiceError("CONTEXT_DRIFT", "runtime quota pair changed")
+            if result.passed:
+                evidence = result.details
+            else:
+                code = result.error.code if result.error is not None else "QUOTA_PAUSED"
+                if code == "RECOVERY_REQUIRED":
+                    if circuit.state == "ready":
                         self._store.require_ready_circuit_recovery(
                             runtime_id=runtime_id,
                             variant_id=variant_id,
@@ -286,8 +263,10 @@ class SubagentMcpService:
                             expected_revision=circuit.revision,
                             error_code=code,
                         )
-                        results.append({"variant_id": variant_id, "state": "unknown"})
-                        continue
+                    results.append({"variant_id": variant_id, "state": "unknown"})
+                    continue
+                ready_was_paused = circuit.state == "ready"
+                if ready_was_paused:
                     self._store.pause_ready_circuit(
                         runtime_id=runtime_id,
                         variant_id=variant_id,
@@ -299,10 +278,16 @@ class SubagentMcpService:
                             else "QUOTA_PAUSED"
                         ),
                     )
-                    results.append({"variant_id": variant_id, "state": "quota_paused"})
-                    continue
-            else:
-                results.append({"variant_id": variant_id, "state": "unknown"})
+                state = (
+                    "quota_paused"
+                    if ready_was_paused
+                    or code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
+                    else "unknown"
+                )
+                item = {"variant_id": variant_id, "state": state}
+                if code not in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}:
+                    item["error_code"] = code
+                results.append(item)
                 continue
             if _safe_quota_evidence(evidence):
                 results.append(
@@ -333,7 +318,6 @@ class SubagentMcpService:
         if "quota_paused" in states:
             return {
                 "state": "quota_paused",
-                "overage_blocked": True,
                 "variants": results,
             }
         return {"state": "unknown", "variants": results}

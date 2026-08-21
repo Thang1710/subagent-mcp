@@ -156,8 +156,6 @@ class _PostQueryUnsafeClient(_UnsafeClient):
 
 class _SafeQuotaClient(_UnsafeClient):
     async def receive_messages(self):
-        while not self.query_calls:
-            await asyncio.sleep(0)
         yield SystemMessage(
             subtype="init",
             data={
@@ -175,6 +173,28 @@ class _SafeQuotaClient(_UnsafeClient):
             ),
             uuid="quota-rate-1",
             session_id="quota-session-1",
+        )
+
+
+class _StartupUnsafeClient(_UnsafeClient):
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "session_id": "quota-session-unsafe",
+            },
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed_warning",
+                overage_status=None,
+                raw={"isUsingOverage": False},
+            ),
+            uuid="quota-rate-unsafe",
+            session_id="quota-session-unsafe",
         )
 
 
@@ -221,18 +241,62 @@ def test_quota_probe_accepts_safe_warning_before_model_output(tmp_path: Path) ->
         "overage_blocked": True,
         "cleanup_confirmed": True,
     }
-    assert clients[0].query_calls == 1
-    assert clients[0].interrupt_calls == 1
+    assert clients[0].query_calls == 0
+    assert clients[0].interrupt_calls == 0
     assert clients[0].disconnected is True
 
 
-def test_quota_probe_fails_closed_on_warning_rate(tmp_path: Path) -> None:
+def test_quota_probe_never_queries_when_startup_has_no_rate_evidence(
+    tmp_path: Path,
+) -> None:
     cli = tmp_path / "claude.exe"
     cli.write_bytes(b"standalone-cli")
     clients: list[_UnsafeClient] = []
 
     def factory(options):
         client = _UnsafeClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=0.01,
+    )
+    probe = asyncio.run(adapter.probe())
+    base_pair_key = str(probe.details["pair_key"])
+
+    result = asyncio.run(
+        adapter.quota_probe(
+            CanaryRequest(
+                runtime_id="claude-code",
+                variant_id="future-deep",
+                model="vendor/future-model",
+                reasoning={"effort": "xhigh"},
+                transport="managed-sdk",
+                base_pair_key=base_pair_key,
+                pair_key=_pair(base_pair_key),
+            )
+        )
+    )
+
+    assert result.passed is False
+    assert result.error is not None and result.error.code == "CAPABILITY_MISSING"
+    assert clients[0].query_calls == 0
+    assert clients[0].interrupt_calls == 0
+    assert clients[0].disconnected is True
+
+
+def test_quota_probe_fails_closed_on_warning_rate(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    clients: list[_StartupUnsafeClient] = []
+
+    def factory(options):
+        client = _StartupUnsafeClient(options)
         clients.append(client)
         return client
 
@@ -263,7 +327,8 @@ def test_quota_probe_fails_closed_on_warning_rate(tmp_path: Path) -> None:
 
     assert result.passed is False
     assert result.error is not None and result.error.code == "QUOTA_PAUSED"
-    assert clients[0].interrupt_calls == 1
+    assert clients[0].query_calls == 0
+    assert clients[0].interrupt_calls == 0
     assert clients[0].disconnected is True
 
 

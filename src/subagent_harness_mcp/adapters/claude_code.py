@@ -49,6 +49,7 @@ PROVIDER_SAFETY_ENV = {
     "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
     "DISABLE_EXTRA_USAGE_COMMAND": "1",
 }
+QUOTA_EVIDENCE_GRACE_SECONDS = 0.5
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,7 +76,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a8",
+            "adapter_version": "0.1.0a9",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -119,7 +120,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a8",
+            adapter_version="0.1.0a9",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -334,15 +335,10 @@ class ClaudeCodeAdapter:
 
         await asyncio.wait_for(client.connect(None), timeout=self._canary_timeout)
         messages = client.receive_messages().__aiter__()
-        await asyncio.wait_for(
-            client.query("Return a short readiness acknowledgement."),
-            timeout=self._canary_timeout,
-        )
-        init_seen = False
-        rate_seen = False
-        while not (init_seen and rate_seen):
+        while True:
             message = await asyncio.wait_for(
-                messages.__anext__(), timeout=self._canary_timeout
+                messages.__anext__(),
+                timeout=min(self._canary_timeout, QUOTA_EVIDENCE_GRACE_SECONDS),
             )
             if isinstance(message, (AssistantMessage, ResultMessage)):
                 return await self._interrupt_for_guard_failure(
@@ -363,8 +359,7 @@ class ClaudeCodeAdapter:
                     or not isinstance(data.get("session_id"), str)
                     or not data["session_id"]
                 ):
-                    return await self._interrupt_for_guard_failure(
-                        client,
+                    return _failure(
                         request.pair_key,
                         AdapterFailure(
                             "CONTEXT_DRIFT",
@@ -372,40 +367,22 @@ class ClaudeCodeAdapter:
                             False,
                             "Claude quota probe init identity did not match",
                         ),
+                        {},
                     )
-                init_seen = True
             elif isinstance(message, RateLimitEvent):
                 unsafe = _unsafe_rate(message.rate_limit_info)
                 if unsafe is not None:
-                    return await self._interrupt_for_guard_failure(
-                        client,
-                        request.pair_key,
-                        unsafe,
-                    )
-                rate_seen = True
-        try:
-            await asyncio.wait_for(client.interrupt(), timeout=self._canary_timeout)
-        except BaseException:
-            return _failure(
-                request.pair_key,
-                AdapterFailure(
-                    "RECOVERY_REQUIRED",
-                    "adapter",
-                    False,
-                    "Claude quota probe interrupt was not confirmed",
-                ),
-                {},
-            )
-        return CanaryResult(
-            True,
-            request.pair_key,
-            {
-                "model": request.model,
-                "effort": effort,
-                "is_using_overage": False,
-                "overage_blocked": True,
-            },
-        )
+                    return _failure(request.pair_key, unsafe, {})
+                return CanaryResult(
+                    True,
+                    request.pair_key,
+                    {
+                        "model": request.model,
+                        "effort": effort,
+                        "is_using_overage": False,
+                        "overage_blocked": True,
+                    },
+                )
 
     async def _run_guarded_canary(
         self,
@@ -919,7 +896,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a8",
+            "adapter_version": "0.1.0a9",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],

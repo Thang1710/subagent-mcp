@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a9 - 2026-08-21
+
+- Make provider Refresh a strict no-model preflight: it never launches a live
+  canary or task, and reports unknown when the native harness exposes no
+  pre-turn quota evidence.
+- Keep ready runtimes fail-closed when quota evidence disappears without
+  falsely claiming that overage was confirmed blocked.
+
 ## 0.1.0a8 - 2026-08-21
 
 - Treat Claude's `allowed_warning` rate state as remaining subscription quota

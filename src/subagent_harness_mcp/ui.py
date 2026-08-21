@@ -990,8 +990,8 @@ def _quota_presentation(
     }
     if checked == "unknown" and error_code == "CAPABILITY_MISSING":
         result["detail"] = (
-            "The native harness did not complete the guarded quota check. "
-            "No quota evidence was accepted."
+            "The native harness did not expose quota evidence without starting "
+            "a model. Refresh started no provider task."
         )
         result["reason_code"] = error_code
     if overage_blocked and checked in {"available", "quota_paused"}:
