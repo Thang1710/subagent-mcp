@@ -212,7 +212,10 @@ def _rollback_or_record(
         cleanup = run_argv(
             "git-worktree-rollback",
             ["git", "-C", str(repo), "worktree", "remove", str(target)],
-            timeout_seconds=_remaining(rollback_deadline, "rollback"),
+            timeout_seconds=min(
+                _ROLLBACK_TIMEOUT_SECONDS,
+                _remaining(rollback_deadline, "rollback"),
+            ),
         )
     except BaseException:
         _record_recovery(
@@ -240,7 +243,10 @@ def _rollback_or_record(
         registration_state = _registration_state(
             repo,
             target,
-            _remaining(rollback_deadline, "rollback verification"),
+            min(
+                _ROLLBACK_TIMEOUT_SECONDS,
+                _remaining(rollback_deadline, "rollback verification"),
+            ),
         )
     except BaseException:
         registration_state = _UNKNOWN

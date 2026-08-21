@@ -36,7 +36,7 @@ command. Refresh never starts a turn and reports unknown when the native
 harness emits no pre-turn evidence. Canary output is rejected until an exact
 safe rate event; ordinary turns require that persisted ready attestation and
 any later unsafe rate/error event causes bounded interrupt plus circuit pause.
-In `0.1.0a9`, project/local `CLAUDE.md`, `.claude` hooks, agents, skills, and
+In `0.1.0a10`, project/local `CLAUDE.md`, `.claude` hooks, agents, skills, and
 declared project MCP are unavailable; only the native user setting source is
 selected until `project_scan`/`project_trust` can enforce that gate.
 Report vulnerabilities privately as described in `SECURITY.md`; never attach

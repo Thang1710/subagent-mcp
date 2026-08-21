@@ -233,6 +233,7 @@ def test_uncertain_add_reconciles_partial_target(tmp_path: Path, monkeypatch):
     common.mkdir()
     cleanup_calls: list[list[str]] = []
     cleanup_timeouts: list[float] = []
+    ticks = iter((0.0, 0.0, 0.0, 0.0, 0.0, 2.00001, 2.00001, 2.00001, 2.1))
 
     def uncertain_git(_argv, name, *_args):
         if name == "git-worktree-add":
@@ -248,6 +249,12 @@ def test_uncertain_add_reconciles_partial_target(tmp_path: Path, monkeypatch):
 
     monkeypatch.setattr(worktree_hook, "_git", uncertain_git)
     monkeypatch.setattr(worktree_hook, "_common_dir", lambda _path, *_args: common)
+    monkeypatch.setattr(
+        worktree_hook,
+        "time",
+        SimpleNamespace(monotonic=lambda: next(ticks)),
+        raising=False,
+    )
     states = iter(("ABSENT", "PRESENT", "ABSENT"))
     monkeypatch.setattr(
         worktree_hook,

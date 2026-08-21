@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a10 - 2026-08-21
+
+- Clamp rollback command and verification budgets to the documented 30-second
+  maximum so floating-point rounding cannot fail the Windows release gate.
+
 ## 0.1.0a9 - 2026-08-21
 
 - Make provider Refresh a strict no-model preflight: it never launches a live
