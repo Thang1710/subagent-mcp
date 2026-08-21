@@ -867,6 +867,30 @@ def test_prepare_approval_storage_creates_only_fixed_private_roots(
     live_common._verify_private_path(approval_root, directory=True)
 
 
+def test_prepare_approval_storage_private_creator_owns_every_new_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    created: list[Path] = []
+    original_create = live_common._create_private_directory
+
+    def record_private_create(path: Path) -> None:
+        created.append(path)
+        original_create(path)
+
+    monkeypatch.setattr(live_common, "_create_private_directory", record_private_create)
+
+    live_common.prepare_approval_storage(".phase0a/live")
+
+    phase_root = tmp_path / ".phase0a"
+    assert created == [
+        phase_root,
+        phase_root / "live",
+        phase_root / "live" / "approvals",
+    ]
+
+
 @pytest.mark.parametrize("root", ["alternate", ".phase0a/other"])
 def test_prepare_approval_storage_rejects_arbitrary_roots(
     tmp_path: Path,

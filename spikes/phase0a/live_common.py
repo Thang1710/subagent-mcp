@@ -530,8 +530,7 @@ def prepare_approval_storage(
         else:
             _require_direct_current_owner_directory(phase_root)
     else:
-        phase_root.mkdir(mode=0o700)
-        _require_direct_current_owner_directory(phase_root)
+        _create_private_directory(phase_root)
 
     approval_exists = _path_exists_or_is_indirect(approval_root)
     live_private = False
