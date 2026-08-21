@@ -35,6 +35,12 @@ can prefer one external runtime over another without hard-coded provider roles.
 Selection remains explicit: the MCP does not silently reroute a request or
 control the Codex host's native-subagent fallback.
 
+Restart handling follows the adapter's advertised capability, never a simulated
+resume. A terminal session may be closed logically without reopening the native
+harness only when persisted evidence says its lifetime belonged to the old
+connection, `resume_after_restart` is an explicit gap, and the current adapter
+does not advertise resume. Active executions never use this path.
+
 ## State and ownership
 
 `SUBAGENT_MCP_HOME` creates `config/`, `state/`, and `data/` children for tests

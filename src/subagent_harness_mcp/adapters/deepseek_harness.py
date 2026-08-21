@@ -110,6 +110,7 @@ class _Session:
     client: _AcpClient
     snapshot: AdapterSnapshot
     turn: _Turn | None = None
+    native_closed: bool = False
     closed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
@@ -149,7 +150,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a16",
+            adapter_version="0.1.0a17",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -320,6 +321,12 @@ class DeepSeekHarnessAdapter:
         session = self._session(request.external_session_id)
         if session.closed:
             raise ServiceError("SESSION_CLOSED", "DeepSeek ACP session is closed")
+        if session.native_closed:
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "DeepSeek ACP process is closed and cannot accept another turn",
+                category="adapter",
+            )
         if session.context.context_hash != request.context.context_hash:
             raise ServiceError("CONTEXT_DRIFT", "DeepSeek ACP resumed context changed")
         async with session.lock:
@@ -370,14 +377,16 @@ class DeepSeekHarnessAdapter:
         turn = session.turn
         if turn is not None and not turn.task.done():
             await self.interrupt(request)
-        try:
-            await asyncio.wait_for(session.client.close(), timeout=self._timeout)
-        except BaseException as exc:
-            raise ServiceError(
-                "RECOVERY_REQUIRED",
-                "DeepSeek ACP process cleanup was not confirmed",
-                category="adapter",
-            ) from exc
+        if not session.native_closed:
+            try:
+                await asyncio.wait_for(session.client.close(), timeout=self._timeout)
+            except BaseException as exc:
+                raise ServiceError(
+                    "RECOVERY_REQUIRED",
+                    "DeepSeek ACP process cleanup was not confirmed",
+                    category="adapter",
+                ) from exc
+            session.native_closed = True
         session.closed = True
         current = session.snapshot
         session.snapshot = AdapterSnapshot(
@@ -469,6 +478,24 @@ class DeepSeekHarnessAdapter:
             turn = session.turn
             if turn is None or turn.execution_id != execution_id:
                 return
+            if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
+                session.snapshot = _snapshot(
+                    session.context,
+                    session_id=session.snapshot.external_session_id,
+                    execution_id=execution_id,
+                    execution_state="failed",
+                    error=AdapterFailure(
+                        "RECOVERY_REQUIRED",
+                        "adapter",
+                        False,
+                        (
+                            "DeepSeek ACP turn timed out and process cleanup was confirmed"
+                            if timeout_cleanup_confirmed
+                            else "DeepSeek ACP turn timed out and process cleanup was not confirmed"
+                        ),
+                    ),
+                )
+                return
             if turn.interrupted:
                 session.snapshot = _snapshot(
                     session.context,
@@ -481,15 +508,7 @@ class DeepSeekHarnessAdapter:
                 )
                 return
             if failure is not None:
-                if isinstance(failure, (TimeoutError, asyncio.TimeoutError)):
-                    code = "RECOVERY_REQUIRED"
-                    category = "adapter"
-                    message = (
-                        "DeepSeek ACP turn timed out and process cleanup was confirmed"
-                        if timeout_cleanup_confirmed
-                        else "DeepSeek ACP turn timed out and process cleanup was not confirmed"
-                    )
-                elif _QUOTA_EXHAUSTED.search(str(failure)):
+                if _QUOTA_EXHAUSTED.search(str(failure)):
                     code = "QUOTA_PAUSED"
                     category = "quota"
                     message = "DeepSeek provider usage credit or quota is exhausted"
@@ -557,6 +576,7 @@ class DeepSeekHarnessAdapter:
             await asyncio.wait_for(session.client.close(), timeout=self._timeout)
         except BaseException:
             return False
+        session.native_closed = True
         return True
 
 
@@ -604,7 +624,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a16"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a17"},
                 },
             ),
             timeout=self._timeout,

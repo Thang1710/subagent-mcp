@@ -431,6 +431,85 @@ def test_adapter_closes_provider_process_after_turn_timeout(
     asyncio.run(scenario())
 
 
+def test_turn_timeout_wins_interrupt_race_and_blocks_reuse_of_closed_client(
+    tmp_path: Path,
+) -> None:
+    class RaceAcpClient(_FakeAcpClient):
+        def __init__(self, launch: DshLaunch) -> None:
+            super().__init__(launch)
+            self.close_started = asyncio.Event()
+            self.allow_close = asyncio.Event()
+
+        async def close(self) -> None:
+            self.close_started.set()
+            await self.allow_close.wait()
+            self.closed = True
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[RaceAcpClient] = []
+
+        def factory(launch: DshLaunch) -> RaceAcpClient:
+            client = RaceAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=0.2,
+            turn_timeout_seconds=0.01,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        task = TaskPacket(
+            title="Timeout race",
+            prompt="Keep working until interrupted.",
+            acceptance_criteria=("Stop safely",),
+            role="sub-agent",
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest("conversation-1", "execution-1", task, context)
+        )
+        await asyncio.wait_for(clients[0].close_started.wait(), timeout=1)
+
+        interrupted_task = asyncio.create_task(
+            adapter.interrupt(
+                AdapterSessionRequest(
+                    "conversation-1", "execution-1", "dsh-session-1", "execution-1"
+                )
+            )
+        )
+        for _ in range(50):
+            if len(clients[0].cancelled) >= 2:
+                break
+            await asyncio.sleep(0)
+        assert clients[0].cancelled == ["dsh-session-1", "dsh-session-1"]
+        clients[0].allow_close.set()
+
+        interrupted = await asyncio.wait_for(interrupted_task, timeout=1)
+        assert interrupted.execution_state == "failed"
+        assert interrupted.error is not None
+        assert interrupted.error.code == "RECOVERY_REQUIRED"
+        with pytest.raises(ServiceError) as captured:
+            await adapter.send(
+                AdapterSendRequest(
+                    "conversation-1",
+                    "execution-2",
+                    "dsh-session-1",
+                    "Do not reuse the dead client.",
+                    None,
+                    {},
+                    context,
+                )
+            )
+        assert captured.value.code == "RECOVERY_REQUIRED"
+
+    asyncio.run(scenario())
+
+
 def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
     tmp_path: Path,
 ) -> None:

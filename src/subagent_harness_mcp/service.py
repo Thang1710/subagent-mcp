@@ -834,10 +834,24 @@ class SubagentMcpService:
                 if record.execution_state not in TERMINAL_EXECUTION_STATES:
                     raise ServiceError("SESSION_BUSY", "active execution cannot be closed")
                 if record.external_session_id is not None:
-                    await adapter.open_session(_session_request(record))
-                    snapshot = await adapter.close(_session_request(record))
-                    if snapshot.conversation_state != "closed":
-                        raise ServiceError("RECOVERY_REQUIRED", "native session did not close")
+                    native_session_available = True
+                    try:
+                        await adapter.open_session(_session_request(record))
+                    except ServiceError as exc:
+                        if not (
+                            exc.code == "CAPABILITY_MISSING"
+                            and _can_logically_close_connection_owned_session(
+                                adapter, record
+                            )
+                        ):
+                            raise
+                        native_session_available = False
+                    if native_session_available:
+                        snapshot = await adapter.close(_session_request(record))
+                        if snapshot.conversation_state != "closed":
+                            raise ServiceError(
+                                "RECOVERY_REQUIRED", "native session did not close"
+                            )
                 record = self._store.close_conversation(request.conversation_id)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
@@ -1268,6 +1282,24 @@ def _safe_quota_evidence(details: Mapping[str, Any] | None) -> bool:
         and details.get("is_using_overage") is False
         and details.get("overage_blocked") is True
         and details.get("cleanup_confirmed") is True
+    )
+
+
+def _can_logically_close_connection_owned_session(
+    adapter: Adapter,
+    record: ExecutionRecord,
+) -> bool:
+    observed = record.observed
+    if not isinstance(observed, Mapping):
+        return False
+    capability_gaps = observed.get("capability_gaps")
+    evidence = observed.get("evidence")
+    return bool(
+        isinstance(capability_gaps, (list, tuple))
+        and "resume_after_restart" in capability_gaps
+        and isinstance(evidence, Mapping)
+        and evidence.get("connection_owned_session") is True
+        and "resume" not in adapter.manifest.capabilities
     )
 
 

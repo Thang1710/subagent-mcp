@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a17 - 2026-08-22
+
+- Keep a DeepSeek turn timeout authoritative when an interrupt races its
+  cleanup, and reject any later send after the connection-owned ACP process has
+  closed instead of attempting to reuse a dead client.
+- Allow a terminal conversation to close logically after an MCP restart only
+  when persisted generic capability evidence proves the native session was
+  connection-owned and the adapter explicitly cannot resume it.
+
 ## 0.1.0a16 - 2026-08-22
 
 - Add an optional detached localhost UI with explicit `--background`,

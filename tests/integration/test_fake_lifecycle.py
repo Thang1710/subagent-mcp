@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+from dataclasses import replace
 from pathlib import Path
 
 from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
@@ -12,6 +13,7 @@ from subagent_harness_mcp.contracts import (
     SendRequest,
     SpawnRequest,
     StatusRequest,
+    ServiceError,
     TaskPacket,
     WaitRequest,
     WaitTarget,
@@ -29,7 +31,12 @@ class _Ids:
         return f"{prefix}-{next(self._counter)}"
 
 
-def _configured(tmp_path: Path, harness: FakeHarness, ids: _Ids):
+def _configured(
+    tmp_path: Path,
+    harness: FakeHarness,
+    ids: _Ids,
+    adapter_factory=None,
+):
     paths = resolve_paths(
         {"SUBAGENT_MCP_HOME": str(tmp_path / "home")},
         os_name="nt",
@@ -63,7 +70,7 @@ def _configured(tmp_path: Path, harness: FakeHarness, ids: _Ids):
             config=config,
             store=StateStore.open(paths),
             registry=AdapterRegistry(
-                builtin_factories=(lambda: FakeAdapter(harness),)
+                builtin_factories=(adapter_factory or (lambda: FakeAdapter(harness)),)
             ),
             id_factory=ids,
         )
@@ -230,3 +237,61 @@ def test_service_restart_opens_exact_persisted_session_and_workspace(
     assert resumed.workspace_path == str(workspace.resolve())
     assert resumed.descriptor.model_display_name == "future/model-v9"
     assert harness.call_count("open_session") == 1
+
+
+def test_service_restart_logically_closes_terminal_connection_owned_session(
+    tmp_path: Path,
+) -> None:
+    class ConnectionOwnedNoResumeAdapter(FakeAdapter):
+        def __init__(self, harness: FakeHarness) -> None:
+            super().__init__(harness)
+            self._manifest = replace(
+                self._manifest,
+                capabilities=self._manifest.capabilities - {"resume"},
+            )
+
+        async def resolve_context(self, request):
+            context = await super().resolve_context(request)
+            return replace(context, capability_gaps=("resume_after_restart",))
+
+        async def spawn(self, request):
+            snapshot = await super().spawn(request)
+            return replace(
+                snapshot,
+                evidence={
+                    "source": "connection-owned-fake",
+                    "connection_owned_session": True,
+                },
+            )
+
+        async def open_session(self, request):
+            del request
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                "connection-owned sessions cannot resume after restart",
+            )
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("done", result="terminal before restart")
+    ids = _Ids()
+    create_service, _ = _configured(
+        tmp_path,
+        harness,
+        ids,
+        adapter_factory=lambda: ConnectionOwnedNoResumeAdapter(harness),
+    )
+
+    first_service = create_service()
+    terminal = asyncio.run(first_service.agent_spawn(_spawn(workspace, "terminal")))
+    restarted_service = create_service()
+    closed = asyncio.run(
+        restarted_service.agent_close(
+            ActionRequest("close-after-restart", terminal.conversation_id)
+        )
+    )
+
+    assert terminal.execution_state == "succeeded"
+    assert closed.conversation_state == "closed"
+    assert harness.call_count("close") == 0
