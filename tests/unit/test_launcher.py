@@ -215,7 +215,9 @@ def test_windows_launcher_has_bom_and_only_fixed_execution_argv(tmp_path: Path) 
     assert "Start-Process" not in text
     assert "@args" not in text
     assert "'-I', '-B', '-m', 'subagent_harness_mcp.cli', 'serve'" in text
-    assert "Get-FileHash" in text
+    assert "Get-FileHash" not in text
+    assert "[Security.Cryptography.SHA256]::Create()" in text
+    assert ".ComputeHash(" in text
     assert windows_registration_argv(launcher) == (
         "powershell.exe",
         "-NoProfile",
@@ -225,6 +227,48 @@ def test_windows_launcher_has_bom_and_only_fixed_execution_argv(tmp_path: Path) 
         "-File",
         str(launcher.resolve(strict=False)),
     )
+
+
+def test_lifecycle_cli_registers_the_public_mcp_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    import subagent_harness_mcp.cli as cli_module
+    import subagent_harness_mcp.install as install_module
+
+    registered: list[str] = []
+
+    class _Manager:
+        def __init__(self, paths: object) -> None:
+            assert paths is not None
+
+        def register(
+            self,
+            client_id: str,
+            *,
+            backend: object,
+            dry_run: bool,
+        ) -> install_module.LifecycleResult:
+            assert backend is not None
+            registered.append(client_id)
+            return install_module.LifecycleResult(
+                operation="register",
+                changed=True,
+                dry_run=dry_run,
+                recovery_required=False,
+                actions=("register_official_command",),
+            )
+
+    monkeypatch.setattr(install_module, "WindowsLifecycleManager", _Manager)
+
+    assert cli_module._run_lifecycle(
+        "register",
+        ("--client", "codex", "--dry-run"),
+    ) == 0
+    assert registered == ["subagent-mcp"]
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert "register: planned" in output.out
 
 
 class _ProcessBackend:

@@ -11,6 +11,7 @@ from . import __version__
 
 
 PROGRAM_NAME = "subagent-harness-mcp"
+MCP_REGISTRATION_NAME = "subagent-mcp"
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -98,7 +99,7 @@ def _run_lifecycle(command: str, command_args: Sequence[str]) -> int:
             result = manager.rollback(health=health, dry_run=arguments.dry_run)
         elif command == "register":
             result = manager.register(
-                PROGRAM_NAME,
+                MCP_REGISTRATION_NAME,
                 backend=registration,
                 dry_run=arguments.dry_run,
             )

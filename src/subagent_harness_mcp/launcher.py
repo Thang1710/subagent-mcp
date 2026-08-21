@@ -471,6 +471,19 @@ def render_windows_launcher(launcher_path: Path) -> bytes:
     ):
         raise LifecycleError("LAUNCHER_INVALID", "launcher path is not the stable path")
     text = """$ErrorActionPreference = 'Stop'
+function Get-Sha256([string]$Path) {
+    $stream = [IO.File]::OpenRead($Path)
+    try {
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString($sha256.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+        } finally {
+            $sha256.Dispose()
+        }
+    } finally {
+        $stream.Dispose()
+    }
+}
 $dataRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $runtimesRoot = [IO.Path]::GetFullPath((Join-Path $dataRoot 'runtimes'))
 $pointerPath = Join-Path $dataRoot 'current.json'
@@ -481,12 +494,12 @@ if ([string]::IsNullOrWhiteSpace($rootName) -or $rootName -in @('.', '..') -or [
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $runtimesRoot $rootName))
 if ([IO.Directory]::GetParent($runtimeRoot).FullName -ne $runtimesRoot) { throw 'Subagent MCP runtime escapes its owned root.' }
 $manifestPath = Join-Path $runtimeRoot 'manifest.json'
-$manifestDigest = (Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$manifestDigest = Get-Sha256 $manifestPath
 if ($manifestDigest -ne ([string]$pointer.manifest_sha256).ToLowerInvariant()) { throw 'Subagent MCP runtime manifest digest mismatch.' }
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
 $pythonExe = Join-Path $runtimeRoot 'Scripts\\python.exe'
 if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) { throw 'Subagent MCP staged Python is missing.' }
-$pythonDigest = (Get-FileHash -LiteralPath $pythonExe -Algorithm SHA256).Hash.ToLowerInvariant()
+$pythonDigest = Get-Sha256 $pythonExe
 $expectedPythonDigest = ([string]$manifest.files.'Scripts/python.exe').ToLowerInvariant()
 if ($pythonDigest -ne $expectedPythonDigest) { throw 'Subagent MCP staged Python digest mismatch.' }
 $fixedArgs = @('-I', '-B', '-m', 'subagent_harness_mcp.cli', 'serve')
