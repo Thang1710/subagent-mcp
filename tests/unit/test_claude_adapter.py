@@ -31,6 +31,7 @@ from subagent_harness_mcp.adapters.claude_code import (
     _result_error,
     _spawn_prompt,
     _subscription_oauth_source,
+    _unsafe_rate,
 )
 from subagent_harness_mcp.contracts import ServiceError, TaskPacket
 
@@ -69,6 +70,57 @@ def _pair(base_pair_key: str) -> str:
     ).hexdigest()
 
 
+def test_rate_guard_accepts_optional_missing_overage_status_when_not_in_use() -> None:
+    info = RateLimitInfo(
+        status="allowed_warning",
+        overage_status=None,
+        raw={"isUsingOverage": False},
+    )
+
+    assert _unsafe_rate(info) is None
+
+
+def test_rate_guard_rejects_available_overage_even_when_not_yet_in_use() -> None:
+    info = RateLimitInfo(
+        status="allowed",
+        overage_status="allowed",
+        raw={"isUsingOverage": False},
+    )
+
+    failure = _unsafe_rate(info)
+
+    assert failure is not None
+    assert failure.code == "USAGE_CREDITS_FORBIDDEN"
+
+
+def test_rate_guard_reports_explicit_plan_rejection_as_quota_pause() -> None:
+    info = RateLimitInfo(
+        status="rejected",
+        overage_status="rejected",
+        raw={"isUsingOverage": False},
+    )
+
+    failure = _unsafe_rate(info)
+
+    assert failure is not None
+    assert failure.code == "QUOTA_PAUSED"
+    assert failure.message == "Claude plan quota is exhausted"
+
+
+def test_rate_guard_reports_missing_no_overage_boolean_as_unknown() -> None:
+    info = RateLimitInfo(
+        status="allowed",
+        overage_status=None,
+        raw={},
+    )
+
+    failure = _unsafe_rate(info)
+
+    assert failure is not None
+    assert failure.code == "CAPABILITY_MISSING"
+    assert failure.message == "Claude no-overage evidence is unavailable"
+
+
 def test_manifest_publishes_exact_model_suggestions_and_reasoning_efforts() -> None:
     manifest = ClaudeCodeAdapter().manifest
 
@@ -97,7 +149,7 @@ def test_manifest_publishes_exact_model_suggestions_and_reasoning_efforts() -> N
     ]
 
 
-def test_docs_only_release_keeps_claude_adapter_compatibility_identity(
+def test_claude_adapter_version_changes_its_pair_identity(
     tmp_path: Path,
 ) -> None:
     cli = tmp_path / "claude.exe"
@@ -111,10 +163,10 @@ def test_docs_only_release_keeps_claude_adapter_compatibility_identity(
 
     probe = asyncio.run(adapter.probe())
 
-    assert adapter.manifest.adapter_version == "1.0.0"
-    assert probe.details["adapter_version"] == "1.0.0"
+    assert adapter.manifest.adapter_version == "1.0.1"
+    assert probe.details["adapter_version"] == "1.0.1"
     pair_payload = {
-        "adapter_version": "1.0.0",
+        "adapter_version": "1.0.1",
         "sdk_version": probe.details["sdk_version"],
         "cli_path": os.path.normcase(probe.details["cli_path"]),
         "cli_version": probe.details["cli_version"],
@@ -603,7 +655,7 @@ def test_canary_rejects_unsafe_task_rate_without_accepting_output(tmp_path: Path
     )
 
     assert result.passed is False
-    assert result.error is not None and result.error.code == "QUOTA_PAUSED"
+    assert result.error is not None and result.error.code == "USAGE_CREDITS_FORBIDDEN"
     assert clients[0].query_calls == 1
     assert clients[0].disconnected is True
 
@@ -787,7 +839,7 @@ def test_canary_interrupts_on_any_non_allowed_task_rate(
     assert probe.state == "needs_canary"
     assert result.passed is False
     assert result.error is not None
-    assert result.error.code == "QUOTA_PAUSED"
+    assert result.error.code == "USAGE_CREDITS_FORBIDDEN"
     assert len(clients) == 1
     assert clients[0].connected_with is None
     assert clients[0].query_calls == 1
@@ -840,7 +892,7 @@ def test_canary_interrupts_immediately_on_unsafe_rate_after_query(tmp_path: Path
     )
 
     assert result.passed is False
-    assert result.error is not None and result.error.code == "QUOTA_PAUSED"
+    assert result.error is not None and result.error.code == "USAGE_CREDITS_FORBIDDEN"
     assert clients[0].query_calls == 1
     assert clients[0].interrupt_calls == 1
     assert clients[0].disconnected is True

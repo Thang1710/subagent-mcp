@@ -91,7 +91,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "1.0.0",
+            "adapter_version": "1.0.1",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -137,7 +137,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="1.0.0",
+            adapter_version="1.0.1",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -904,7 +904,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "1.0.0",
+            "adapter_version": "1.0.1",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],
@@ -1363,25 +1363,70 @@ def _unsafe_rate(info: Any) -> AdapterFailure | None:
     raw = getattr(info, "raw", None)
     status = getattr(info, "status", None)
     overage_status = getattr(info, "overage_status", None)
-    if (
-        status not in {"allowed", "allowed_warning"}
-        or not isinstance(raw, Mapping)
-        or raw.get("isUsingOverage") is not False
-        or overage_status != "rejected"
-    ):
+    if not isinstance(raw, Mapping):
         return AdapterFailure(
-            "QUOTA_PAUSED",
+            "CAPABILITY_MISSING",
+            "provider",
+            False,
+            "Claude no-overage evidence is unavailable",
+        )
+    is_using_overage = raw.get("isUsingOverage")
+    if is_using_overage is True:
+        return AdapterFailure(
+            "USAGE_CREDITS_FORBIDDEN",
             "quota",
             False,
-            "Claude quota/no-overage prerequisite is unsafe",
+            "Claude usage credits/overage are active",
+        )
+    if status == "rejected":
+        return AdapterFailure(
+            "QUOTA_PAUSED", "quota", False, "Claude plan quota is exhausted"
+        )
+    if status not in {"allowed", "allowed_warning"}:
+        return AdapterFailure(
+            "CAPABILITY_MISSING",
+            "provider",
+            False,
+            "Claude quota status is unavailable",
+        )
+    if is_using_overage is not False:
+        return AdapterFailure(
+            "CAPABILITY_MISSING",
+            "provider",
+            False,
+            "Claude no-overage evidence is unavailable",
+        )
+    if overage_status in {"allowed", "allowed_warning"}:
+        return AdapterFailure(
+            "USAGE_CREDITS_FORBIDDEN",
+            "quota",
+            False,
+            "Claude usage credits/overage are available",
+        )
+    if overage_status not in {None, "rejected"}:
+        return AdapterFailure(
+            "CAPABILITY_MISSING",
+            "provider",
+            False,
+            "Claude no-overage evidence is unavailable",
         )
     error_code = raw.get("errorCode")
-    if isinstance(error_code, str) and any(
-        word in error_code.casefold() for word in ("credit", "billing", "rate")
-    ):
-        return AdapterFailure(
-            "QUOTA_PAUSED", "quota", False, "Claude reported a billing/quota error"
-        )
+    if isinstance(error_code, str):
+        folded = error_code.casefold()
+        if any(word in folded for word in ("credit", "billing")):
+            return AdapterFailure(
+                "USAGE_CREDITS_FORBIDDEN",
+                "quota",
+                False,
+                "Claude reported a billing/credit error",
+            )
+        if any(word in folded for word in ("quota", "rate")):
+            return AdapterFailure(
+                "QUOTA_PAUSED",
+                "quota",
+                False,
+                "Claude reported a quota/rate error",
+            )
     return None
 
 

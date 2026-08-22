@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.0` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.1` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -45,8 +45,8 @@ then install the stable release and register it with Codex:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-uv tool install subagent-harness-mcp==1.0.0
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.0 subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==1.0.1
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.1 subagent-harness-mcp serve
 ```
 
 Start a new Codex task after registration.
@@ -143,9 +143,9 @@ the persistent tool environment and may hold its executable open.
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==1.0.0
+uv tool install --reinstall subagent-harness-mcp==1.0.1
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.0 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.1 subagent-harness-mcp serve
 subagent-harness-mcp ui --background
 ```
 

@@ -2,6 +2,18 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.1 - 2026-08-23
+
+- Accept Claude Code's documented optional omission of `overageStatus` when the
+  same live event reports `allowed` or `allowed_warning` and exact
+  `isUsingOverage=false`. Explicitly available overage, active overage, rejected
+  plan quota, and billing errors remain blocked.
+- Report exhausted plan quota, forbidden usage credits, and unavailable safety
+  evidence as distinct states; ambiguous evidence no longer fabricates a durable
+  quota pause.
+- Publish MCP Registry metadata through GitHub OIDC with a checksum-pinned
+  official publisher and no repository secret.
+
 ## 1.0.0 - 2026-08-23
 
 - Stabilize the public MCP/API contract and Windows package, CLI, localhost UI,

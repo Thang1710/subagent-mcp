@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -178,7 +178,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert "```mermaid" in readme
     assert "**Claude Code — Ready.**" in readme
     assert "**DeepSeek Harness — Ready.**" in readme
-    assert "**Stable:** `1.0.0`" in readme
+    assert "**Stable:** `1.0.1`" in readme
     assert "fail-closed" not in readme
     assert "subscription-only policy before starting work" not in readme_flat
     assert "no provider task starts" not in readme_flat
@@ -209,6 +209,25 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert workflow.startswith("name: publish-release")
     assert "--prerelease" not in workflow
+
+
+def test_registry_publish_workflow_uses_secretless_oidc_and_pinned_publisher() -> None:
+    workflow = (
+        ROOT / ".github/workflows/publish-mcp-registry.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "types: [published]" in workflow
+    assert "workflow_dispatch:" in workflow
+    assert "id-token: write" in workflow
+    assert (
+        "registry/releases/download/v1.8.1/"
+        "mcp-publisher_linux_amd64.tar.gz"
+    ) in workflow
+    assert "a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc" in workflow
+    assert "./mcp-publisher login github-oidc" in workflow
+    assert "./mcp-publisher publish server.json" in workflow
+    assert "secrets." not in workflow
+    assert "+            " not in workflow
 
 
 def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:

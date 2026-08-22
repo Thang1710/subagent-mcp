@@ -5,9 +5,9 @@
 The Claude adapter currently treats one event ordering as a billing gate: a
 task is rejected when model output arrives before the turn's
 `rate_limit_event`, even if a preceding provider canary reported
-`isUsingOverage=false` and `overageStatus=rejected`. This both spends provider
-quota and discards valid output. Missing or late status evidence must not be
-converted into a durable claim that quota is exhausted.
+`isUsingOverage=false` and an absent or rejected `overageStatus`. This both
+spends provider quota and discards valid output. Missing or late status evidence
+must not be converted into a durable claim that quota is exhausted.
 
 DeepSeek Harness also applies a fixed 900-second product turn deadline. Real
 tasks have completed close to that boundary, while longer tasks are cancelled
@@ -36,14 +36,17 @@ requires all of the following on that same connection:
   MCP configuration;
 - a provider `allowed` or `allowed_warning` status;
 - `isUsingOverage=false`; and
-- `overageStatus=rejected`.
+- `overageStatus` is absent or `rejected`; explicit `allowed` or
+  `allowed_warning` remains unsafe.
 
 After control initialization, the lifecycle sends the one useful query. The
 response loop accepts a rate event before or after stream initialization and
 never accepts assistant output or a result until exact identity and safe rate
 evidence have both been observed. Unsafe evidence interrupts the request and
-discards its output. A bounded connection/cleanup timeout remains an operational
-safety limit, not a quota checkpoint.
+discards its output. Explicit plan rejection, forbidden overage, and ambiguous
+evidence remain distinct public states rather than sharing a fabricated quota
+pause. A bounded connection/cleanup timeout remains an operational safety limit,
+not a quota checkpoint.
 
 Every Claude task uses one native connection and one useful model query; there
 is no second model request for status. The localhost Refresh action remains

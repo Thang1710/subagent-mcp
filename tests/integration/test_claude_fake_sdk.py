@@ -95,8 +95,7 @@ class _PassingClient:
         yield RateLimitEvent(
             rate_limit_info=RateLimitInfo(
                 status="allowed",
-                overage_status="rejected",
-                overage_disabled_reason="out_of_credits",
+                overage_status=None,
                 raw={"isUsingOverage": False},
             ),
             uuid="rate-1",
@@ -722,7 +721,7 @@ def test_spawn_and_send_auto_resume_only_after_safe_task_response(
     asyncio.run(service.runtime_canary(canary | {"request_id": "canary-initial"}))
     with pytest.raises(ServiceError) as spawn_quota:
         asyncio.run(spawn("spawn-quota"))
-    assert spawn_quota.value.code == "QUOTA_PAUSED"
+    assert spawn_quota.value.code == "USAGE_CREDITS_FORBIDDEN"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
     assert isinstance(clients[-1], _QuotaClient)
     assert len(clients) == 2
@@ -738,7 +737,7 @@ def test_spawn_and_send_auto_resume_only_after_safe_task_response(
                 SendRequest("send-quota", started.conversation_id, "Continue safely.")
             )
         )
-    assert send_quota.value.code == "QUOTA_PAUSED"
+    assert send_quota.value.code == "USAGE_CREDITS_FORBIDDEN"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
     assert isinstance(clients[-1], _QuotaClient) and clients[-1].interrupt_calls == 1
     assert len(clients) == 4

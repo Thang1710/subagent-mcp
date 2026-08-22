@@ -26,12 +26,18 @@ following:
 
 - primary status is `allowed` or `allowed_warning`;
 - `raw.isUsingOverage` is exactly `false`;
-- overage status is exactly `rejected`;
+- overage status is absent or exactly `rejected`; an explicit `allowed` or
+  `allowed_warning` remains unsafe;
 - no billing, credit, or rate error is reported.
 
-Missing or ambiguous identity/rate evidence never authorizes output. An absent
-rate event on Refresh is reported as `Unknown`, not fabricated, and does not
-rewrite the circuit. Any unsafe task event fails closed as `QUOTA_PAUSED`.
+Missing or ambiguous identity/rate evidence never authorizes output. The
+optional absence of `overageStatus` is not missing evidence when the same event
+still reports exact `isUsingOverage=false`; the SDK schema makes that field
+optional. An absent rate event on Refresh is reported as `Unknown`, not
+fabricated, and does not rewrite the circuit. An explicit primary rejection is
+`QUOTA_PAUSED`; available or active overage is `USAGE_CREDITS_FORBIDDEN`;
+malformed or missing evidence is `CAPABILITY_MISSING` and never durably
+rewrites a ready circuit as quota-exhausted.
 
 ## Explicit refresh flow
 
