@@ -680,7 +680,9 @@ def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
         expected_revision=ready.revision,
         error_code="QUOTA_PAUSED",
     )
-    assert paused.details["pause_evidence"] == "explicit_provider_result_v1"
+    assert paused.details["pause_evidence"].startswith(
+        "explicit_provider_result_v2:"
+    )
 
     recovered = store.resume_paused_circuit(
         runtime_id="claude-code",
@@ -757,13 +759,107 @@ def test_legacy_ambiguous_pause_cannot_overwrite_safe_task_evidence(
     assert unchanged.details == ready.details
 
 
+def test_legacy_resume_cannot_make_inherited_pause_provenance_reusable(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    claimed = store.claim_canary_request(
+        request_id="legacy-resume-fence-canary",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+    )
+    ready = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        expected_revision=claimed.revision,
+        state="ready",
+        details={
+            "rate_evidence_seen": True,
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": True,
+        },
+    )
+    paused = store.pause_ready_circuit(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key=ready.pair_key,
+        expected_revision=ready.revision,
+        error_code="QUOTA_PAUSED",
+    )
+    inherited_details = dict(paused.details)
+    inherited_details.pop("error_code")
+    with store.transaction(write=True) as database:
+        database.execute(
+            """
+            UPDATE circuits SET state = 'ready', category = NULL,
+                revision = revision + 1, details_json = ?, updated_at_utc = ?
+            WHERE runtime_id = 'claude-code' AND variant_id = 'default'
+              AND state = 'auto_paused' AND revision = ?
+            """,
+            (
+                json.dumps(inherited_details, sort_keys=True, separators=(",", ":")),
+                "2026-08-22T00:00:01Z",
+                paused.revision,
+            ),
+        )
+    legacy_ready = store.load_circuit("claude-code", "default")
+    assert legacy_ready.details["pause_evidence"] == paused.details["pause_evidence"]
+
+    copied_details = dict(legacy_ready.details)
+    copied_details["error_code"] = "USAGE_CREDITS_FORBIDDEN"
+    with pytest.raises(sqlite3.IntegrityError, match="unproven quota pause"):
+        with store.transaction(write=True) as database:
+            database.execute(
+                """
+                UPDATE circuits SET state = 'auto_paused', category = 'quota',
+                    retry_after_utc = NULL, revision = revision + 1,
+                    details_json = ?, updated_at_utc = ?
+                WHERE runtime_id = 'claude-code' AND variant_id = 'default'
+                  AND state = 'ready' AND revision = ?
+                """,
+                (
+                    json.dumps(copied_details, sort_keys=True, separators=(",", ":")),
+                    "2026-08-22T00:00:02Z",
+                    legacy_ready.revision,
+                ),
+            )
+
+    current_pause = store.pause_ready_circuit(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key=legacy_ready.pair_key,
+        expected_revision=legacy_ready.revision,
+        error_code="QUOTA_PAUSED",
+    )
+    assert current_pause.details["pause_evidence"].startswith(
+        "explicit_provider_result_v2:"
+    )
+    assert current_pause.details["pause_evidence"] != paused.details["pause_evidence"]
+
+
 def test_reopening_existing_schema_installs_legacy_quota_guard(
     tmp_path: Path,
 ) -> None:
     paths = _paths(tmp_path)
     store = StateStore.open(paths)
     with store.transaction(write=True) as database:
-        database.execute("DROP TRIGGER IF EXISTS circuits_reject_unproven_quota_pause_v1")
+        database.execute("DROP TRIGGER IF EXISTS circuits_reject_unproven_quota_pause_v2")
+        database.execute(
+            """
+            CREATE TRIGGER circuits_reject_unproven_quota_pause_v1
+            BEFORE UPDATE ON circuits BEGIN SELECT 1; END
+            """
+        )
 
     StateStore.open(paths)
 
@@ -772,10 +868,11 @@ def test_reopening_existing_schema_installs_legacy_quota_guard(
             """
             SELECT name FROM sqlite_master
             WHERE type = 'trigger'
-              AND name = 'circuits_reject_unproven_quota_pause_v1'
+              AND name LIKE 'circuits_reject_unproven_quota_pause_v%'
+            ORDER BY name
             """
-        ).fetchone()
-    assert trigger == ("circuits_reject_unproven_quota_pause_v1",)
+        ).fetchall()
+    assert trigger == [("circuits_reject_unproven_quota_pause_v2",)]
 
 
 def test_ready_circuit_requires_verified_cleanup_after_ambiguous_probe(

@@ -20,8 +20,9 @@ APPLICATION_ID = 0x534D4350  # "SMCP"
 DATABASE_SCHEMA_VERSION = 1
 _SQLITE_TIMEOUT_SECONDS = 5.0
 _PROCESS_INITIALIZE_LOCK = threading.Lock()
-_EXPLICIT_PAUSE_EVIDENCE = "explicit_provider_result_v1"
-_LEGACY_QUOTA_GUARD_NAME = "circuits_reject_unproven_quota_pause_v1"
+_EXPLICIT_PAUSE_EVIDENCE_PREFIX = "explicit_provider_result_v2:"
+_LEGACY_QUOTA_GUARD_NAME = "circuits_reject_unproven_quota_pause_v2"
+_RETIRED_LEGACY_QUOTA_GUARDS = ("circuits_reject_unproven_quota_pause_v1",)
 _LEGACY_QUOTA_GUARD_SQL = f"""
 CREATE TRIGGER IF NOT EXISTS {_LEGACY_QUOTA_GUARD_NAME}
 BEFORE UPDATE OF state, category, details_json ON circuits
@@ -32,8 +33,12 @@ WHEN OLD.state = 'ready'
  AND json_extract(OLD.details_json, '$.is_using_overage') = 0
  AND json_extract(OLD.details_json, '$.overage_blocked') = 1
  AND json_extract(OLD.details_json, '$.cleanup_confirmed') = 1
- AND COALESCE(json_extract(NEW.details_json, '$.pause_evidence'), '')
-     != '{_EXPLICIT_PAUSE_EVIDENCE}'
+ AND (
+     COALESCE(json_extract(NEW.details_json, '$.pause_evidence'), '')
+         NOT GLOB '{_EXPLICIT_PAUSE_EVIDENCE_PREFIX}*'
+     OR COALESCE(json_extract(NEW.details_json, '$.pause_evidence'), '')
+         = COALESCE(json_extract(OLD.details_json, '$.pause_evidence'), '')
+ )
 BEGIN
     SELECT RAISE(ABORT, 'unproven quota pause');
 END
@@ -744,7 +749,9 @@ class StateStore:
                 raise StateError("CIRCUIT_CONFLICT", "runtime quota pause is stale")
             safe_details = dict(details)
             safe_details["error_code"] = error_code
-            safe_details["pause_evidence"] = _EXPLICIT_PAUSE_EVIDENCE
+            safe_details["pause_evidence"] = (
+                _EXPLICIT_PAUSE_EVIDENCE_PREFIX + os.urandom(16).hex()
+            )
             database.execute(
                 """
                 UPDATE circuits SET state = 'auto_paused', category = 'quota',
@@ -1692,6 +1699,8 @@ def _install_online_guards(database: sqlite3.Connection) -> None:
         return
     try:
         database.execute("BEGIN IMMEDIATE")
+        for retired_name in _RETIRED_LEGACY_QUOTA_GUARDS:
+            database.execute(f"DROP TRIGGER IF EXISTS {retired_name}")
         database.execute(_LEGACY_QUOTA_GUARD_SQL)
         database.commit()
     except BaseException:

@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a27 - 2026-08-22
+
+- Rotate explicit quota-pause provenance on every current write. A resident
+  older process that inherits and copies a prior marker can no longer reuse it
+  to bypass the legacy-writer fence.
+- Replace the a26 SQLite guard online without changing schema compatibility or
+  relaxing same-response no-overage enforcement.
+
 ## 0.1.0a26 - 2026-08-22
 
 - Prevent a resident older MCP process from replacing exact safe Claude task
