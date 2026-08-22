@@ -75,11 +75,13 @@ user config, state, sessions, and worktrees.
 
 The UI is foreground by default. `ui --background` starts one detached local
 process on a fixed loopback port; `ui --status` identifies whether it is the
-managed process, and `ui --stop` requests graceful shutdown through a random
-control token. The token lives only in a bounded product-owned Local state file,
-the stop endpoint still requires the exact loopback Origin and Host, and the
-file is removed only when its bytes still match the process that published it.
-There is no automatic login/startup entry.
+managed process, `ui --open` requests a fresh single-use browser bootstrap, and
+`ui --stop` requests graceful shutdown through a random control token. The
+token lives only in a bounded product-owned Local state file. Both control
+endpoints require the exact loopback Origin and Host; the open path returns only
+an exact validated loopback fragment directly to the CLI/browser, and the file
+is removed only when its bytes still match the process that published it. There
+is no automatic login/startup entry.
 
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside

@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a21 - 2026-08-22
+
+- Add `subagent-harness-mcp ui --open` to request a fresh single-use browser
+  session from an already-running managed UI on its fixed loopback port.
+- Authenticate bootstrap rotation with the existing private control token and
+  exact loopback Host/Origin checks; validate and hand the URL directly to the
+  browser without printing or persisting its token.
+
 ## 0.1.0a20 - 2026-08-22
 
 - Replace exact-model text entry and fallback textareas with one accessible

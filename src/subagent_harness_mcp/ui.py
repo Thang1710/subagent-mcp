@@ -25,7 +25,16 @@ from urllib.parse import quote, unquote, urlsplit
 from . import __version__
 from .config import ConfigError, ConfigStore
 from .contracts import ServiceError
-from .ui_process import CONTROL_HEADER, CONTROL_STOP_PATH
+from .ui_process import (
+    CONTROL_CHALLENGE_HEADER,
+    CONTROL_HEADER,
+    CONTROL_OPEN_PATH,
+    CONTROL_PROOF_HEADER,
+    CONTROL_STOP_PATH,
+    UiProcessError,
+    control_open_request_proof,
+    control_open_response_proof,
+)
 
 
 _ASSETS = {
@@ -310,9 +319,29 @@ class _UiState:
         with self.lock:
             return self.sessions.get(session_id)
 
+    def rotate_bootstrap(self) -> str:
+        with self.lock:
+            token = secrets.token_urlsafe(32)
+            self.bootstrap_token = token
+            return token
+
     def control_allowed(self, supplied: str) -> bool:
         expected = self.control_token
         return expected is not None and hmac.compare_digest(supplied, expected)
+
+    def control_open_allowed(self, challenge: str, supplied_proof: str) -> bool:
+        expected = self.control_token
+        if (
+            expected is None
+            or len(supplied_proof) != 64
+            or any(character not in "0123456789abcdef" for character in supplied_proof)
+        ):
+            return False
+        try:
+            expected_proof = control_open_request_proof(expected, challenge)
+        except UiProcessError:
+            return False
+        return hmac.compare_digest(supplied_proof, expected_proof)
 
     def clear(self) -> None:
         with self.lock:
@@ -575,6 +604,28 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
             path = self._request_path(require_origin=True)
             if path is None:
                 return
+            if path == CONTROL_OPEN_PATH:
+                open_control = self._open_control()
+                if open_control is None:
+                    self._discard_bounded_body()
+                    return
+                if not self._require_empty_body():
+                    return
+                challenge, control_token = open_control
+                token = state.rotate_bootstrap()
+                bootstrap_url = f"{state.origin}/#token={quote(token, safe='')}"
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "bootstrap_url": bootstrap_url,
+                        "proof": control_open_response_proof(
+                            control_token,
+                            challenge,
+                            bootstrap_url,
+                        ),
+                    },
+                )
+                return
             if path == CONTROL_STOP_PATH:
                 if not self._control_allowed():
                     self._discard_bounded_body()
@@ -642,6 +693,19 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                 self._json_error(HTTPStatus.UNAUTHORIZED, "CONTROL_REJECTED")
                 return False
             return True
+
+        def _open_control(self) -> tuple[str, str] | None:
+            challenges = self.headers.get_all(CONTROL_CHALLENGE_HEADER, [])
+            proofs = self.headers.get_all(CONTROL_PROOF_HEADER, [])
+            if (
+                len(challenges) != 1
+                or len(proofs) != 1
+                or not state.control_open_allowed(challenges[0], proofs[0])
+                or state.control_token is None
+            ):
+                self._json_error(HTTPStatus.UNAUTHORIZED, "CONTROL_REJECTED")
+                return None
+            return challenges[0], state.control_token
 
         def do_PATCH(self) -> None:
             path = self._request_path(require_origin=True)

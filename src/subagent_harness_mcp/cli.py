@@ -80,6 +80,11 @@ def _ui_parser() -> argparse.ArgumentParser:
         help="Keep the localhost UI running after this command exits",
     )
     mode.add_argument("--status", action="store_true", help="Show localhost UI status")
+    mode.add_argument(
+        "--open",
+        action="store_true",
+        help="Open the managed background UI",
+    )
     mode.add_argument("--stop", action="store_true", help="Stop the managed background UI")
     mode.add_argument("--background-child", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument(
@@ -105,6 +110,8 @@ def _print_ui_result(action: str, result: object) -> None:
         else:
             mode = "background" if result.managed else "foreground"
             print(f"ui: running in {mode} at {origin}")
+    elif action == "open":
+        print(f"ui: opened at {origin}")
     elif result.changed:
         print("ui: stopped")
     else:
@@ -116,6 +123,7 @@ def _run_ui_command(command_args: Sequence[str]) -> int:
     from .ui import UiError, run_ui
     from .ui_process import (
         UiProcessError,
+        open_background_ui,
         start_background_ui,
         status_background_ui,
         stop_background_ui,
@@ -123,9 +131,11 @@ def _run_ui_command(command_args: Sequence[str]) -> int:
 
     parser = _ui_parser()
     arguments = parser.parse_args(command_args)
-    if (arguments.background or arguments.background_child) and arguments.port == 0:
+    if (
+        arguments.background or arguments.background_child or arguments.open
+    ) and arguments.port == 0:
         parser.error("background UI requires a fixed PORT")
-    if (arguments.stop or arguments.status) and arguments.no_open:
+    if (arguments.stop or arguments.status or arguments.open) and arguments.no_open:
         parser.error("--no-open is only valid when starting the UI")
     try:
         if arguments.background:
@@ -139,6 +149,10 @@ def _run_ui_command(command_args: Sequence[str]) -> int:
         if arguments.status:
             result = status_background_ui(resolve_paths(), port=arguments.port)
             _print_ui_result("status", result)
+            return 0
+        if arguments.open:
+            result = open_background_ui(resolve_paths(), port=arguments.port)
+            _print_ui_result("open", result)
             return 0
         if arguments.stop:
             result = stop_background_ui(resolve_paths(), port=arguments.port)

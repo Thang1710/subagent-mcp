@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.client
+import hmac
 import json
 from importlib import resources
 from http.cookies import SimpleCookie
@@ -11,7 +12,13 @@ import pytest
 from subagent_harness_mcp import cli
 from subagent_harness_mcp import ui
 from subagent_harness_mcp.ui import LoopbackUiServer, UiError
-from subagent_harness_mcp.ui_process import CONTROL_HEADER, CONTROL_STOP_PATH
+from subagent_harness_mcp.ui_process import (
+    CONTROL_CHALLENGE_HEADER,
+    CONTROL_HEADER,
+    CONTROL_OPEN_PATH,
+    CONTROL_PROOF_HEADER,
+    CONTROL_STOP_PATH,
+)
 
 
 def _server(
@@ -228,6 +235,102 @@ def test_background_stop_requires_both_exact_origin_and_control_token() -> None:
 
         assert wrong_token == 401
         assert wrong_origin == 403
+        assert thread.is_alive()
+    finally:
+        server.close()
+
+
+def test_background_open_rotates_one_control_authenticated_bootstrap() -> None:
+    control_token = "control-token-with-enough-entropy-for-open"
+    challenge = "challenge-with-enough-entropy-for-open-proof"
+    request_proof = hmac.digest(
+        control_token.encode(),
+        b"open-request\0" + challenge.encode(),
+        "sha256",
+    ).hex()
+    server = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        control_token=control_token,
+    )
+    original_bootstrap = _bootstrap_token(server)
+    thread = server.start()
+    try:
+        wrong_token, _, _ = _request(
+            server,
+            "POST",
+            CONTROL_OPEN_PATH,
+            headers={
+                "Origin": server.origin,
+                CONTROL_CHALLENGE_HEADER: challenge,
+                CONTROL_PROOF_HEADER: "0" * 64,
+            },
+        )
+        opened, _, body = _request(
+            server,
+            "POST",
+            CONTROL_OPEN_PATH,
+            headers={
+                "Origin": server.origin,
+                CONTROL_CHALLENGE_HEADER: challenge,
+                CONTROL_PROOF_HEADER: request_proof,
+            },
+        )
+        open_response = json.loads(body)
+        bootstrap_url = open_response["bootstrap_url"]
+        parsed = urlsplit(bootstrap_url)
+        rotated_bootstrap = parse_qs(parsed.fragment)["token"][0]
+
+        assert wrong_token == 401
+        assert opened == 200
+        assert parsed.scheme == "http"
+        assert parsed.hostname == server.bound_host
+        assert parsed.port == server.bound_port
+        assert parsed.path == "/"
+        assert not parsed.query
+        assert rotated_bootstrap not in {original_bootstrap, control_token}
+        assert hmac.compare_digest(
+            open_response["proof"],
+            hmac.digest(
+                control_token.encode(),
+                b"open-response\0"
+                + challenge.encode()
+                + b"\0"
+                + bootstrap_url.encode(),
+                "sha256",
+            ).hex(),
+        )
+
+        stale, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={
+                "Origin": server.origin,
+                "X-Subagent-MCP-Token": original_bootstrap,
+            },
+        )
+        fresh, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={
+                "Origin": server.origin,
+                "X-Subagent-MCP-Token": rotated_bootstrap,
+            },
+        )
+        replay, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={
+                "Origin": server.origin,
+                "X-Subagent-MCP-Token": rotated_bootstrap,
+            },
+        )
+        assert stale == 401
+        assert fresh == 200
+        assert replay == 401
         assert thread.is_alive()
     finally:
         server.close()

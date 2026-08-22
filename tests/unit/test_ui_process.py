@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -11,6 +13,7 @@ from subagent_harness_mcp.ui import LoopbackUiServer
 from subagent_harness_mcp.ui_process import (
     BackgroundUiResult,
     UiProcessError,
+    open_background_ui,
     publish_control_record,
     start_background_ui,
     status_background_ui,
@@ -160,6 +163,148 @@ def test_control_stop_is_authenticated_and_removes_its_exact_record(
     assert record.endswith(b"\n")
 
 
+def test_control_open_passes_one_validated_bootstrap_directly_to_browser(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    control_token = "control-token-with-enough-entropy-for-open"
+    server = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        control_token=control_token,
+    )
+    server.start()
+    publish_control_record(
+        paths.ui_control_file,
+        pid=123,
+        port=server.bound_port,
+        token=control_token,
+    )
+    opened: list[str] = []
+    try:
+        result = open_background_ui(
+            paths,
+            port=server.bound_port,
+            browser_opener=lambda url: not opened.append(url),
+        )
+    finally:
+        server.close()
+
+    assert result == BackgroundUiResult(False, True, True, server.bound_port, 123)
+    assert len(opened) == 1
+    parsed = urlsplit(opened[0])
+    bootstrap = parse_qs(parsed.fragment)["token"][0]
+    assert parsed.netloc == server.host_header
+    assert parsed.path == "/"
+    assert not parsed.query
+    assert bootstrap != control_token
+
+
+def test_open_refuses_unmanaged_or_malformed_background_ui(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    with pytest.raises(UiProcessError) as unmanaged:
+        open_background_ui(paths, port=8765, probe=lambda _port: True)
+    assert unmanaged.value.code == "UI_UNMANAGED"
+
+    publish_control_record(
+        paths.ui_control_file,
+        pid=77,
+        port=8765,
+        token="control-token-with-enough-entropy-for-malformed",
+    )
+    opened: list[str] = []
+    with pytest.raises(UiProcessError) as malformed:
+        open_background_ui(
+            paths,
+            port=8765,
+            probe=lambda _port: True,
+            request_open=lambda _record: "https://attacker.invalid/#token=x",
+            browser_opener=lambda url: not opened.append(url),
+        )
+    assert malformed.value.code == "UI_OPEN_RESPONSE_INVALID"
+    assert opened == []
+
+
+def test_open_never_sends_bearer_token_and_rejects_an_unproven_server(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subagent_harness_mcp.ui_process as process_module
+
+    paths = _paths(tmp_path)
+    control_token = "stale-control-token-with-enough-entropy"
+    publish_control_record(
+        paths.ui_control_file,
+        pid=77,
+        port=8765,
+        token=control_token,
+    )
+    captured_headers: dict[str, str] = {}
+
+    class Response:
+        status = 200
+
+        @staticmethod
+        def read(_limit: int) -> bytes:
+            return (
+                b'{"bootstrap_url":"http://127.0.0.1:8765/#token='
+                + b"b" * 40
+                + b'","proof":"'
+                + b"0" * 64
+                + b'"}'
+            )
+
+    class Connection:
+        def __init__(self, *_args, **_kwargs) -> None:
+            pass
+
+        def request(self, _method, _path, *, body, headers) -> None:
+            assert body == b""
+            captured_headers.update(headers)
+
+        @staticmethod
+        def getresponse() -> Response:
+            return Response()
+
+        @staticmethod
+        def close() -> None:
+            pass
+
+    monkeypatch.setattr(process_module.http.client, "HTTPConnection", Connection)
+    with pytest.raises(UiProcessError) as rejected:
+        open_background_ui(
+            paths,
+            port=8765,
+            probe=lambda _port: True,
+            browser_opener=lambda _url: pytest.fail("browser must not open"),
+        )
+
+    assert rejected.value.code == "UI_OPEN_RESPONSE_INVALID"
+    assert process_module.CONTROL_HEADER not in captured_headers
+    assert control_token not in json.dumps(captured_headers, sort_keys=True)
+
+
+def test_open_reports_browser_refusal_without_printing_bootstrap(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    publish_control_record(
+        paths.ui_control_file,
+        pid=77,
+        port=8765,
+        token="control-token-with-enough-entropy-for-browser",
+    )
+    bootstrap_url = "http://127.0.0.1:8765/#token=" + "b" * 40
+    with pytest.raises(UiProcessError) as refused:
+        open_background_ui(
+            paths,
+            port=8765,
+            probe=lambda _port: True,
+            request_open=lambda _record: bootstrap_url,
+            browser_opener=lambda _url: False,
+        )
+    assert refused.value.code == "UI_BROWSER_OPEN_FAILED"
+    assert "b" * 40 not in str(refused.value)
+
+
 def test_stop_refuses_a_healthy_unmanaged_ui(tmp_path: Path) -> None:
     with pytest.raises(UiProcessError) as caught:
         stop_background_ui(
@@ -216,19 +361,29 @@ def test_cli_routes_background_status_and_stop_without_starting_a_provider(
         calls.append(("stop", port, None))
         return BackgroundUiResult(True, False, True, port, 11)
 
+    def open_ui(_paths, *, port: int):
+        assert _paths is paths
+        calls.append(("open", port, None))
+        return BackgroundUiResult(False, True, True, port, 11)
+
     monkeypatch.setattr(process_module, "start_background_ui", start)
     monkeypatch.setattr(process_module, "status_background_ui", status)
     monkeypatch.setattr(process_module, "stop_background_ui", stop)
+    monkeypatch.setattr(process_module, "open_background_ui", open_ui)
 
     assert cli.main(["ui", "--background", "--no-open"]) == 0
     assert cli.main(["ui", "--status"]) == 0
+    assert cli.main(["ui", "--open"]) == 0
     assert cli.main(["ui", "--stop"]) == 0
     assert calls == [
         ("start", 8765, False),
         ("status", 8765, None),
+        ("open", 8765, None),
         ("stop", 8765, None),
     ]
     output = capsys.readouterr()
     assert "started in background" in output.out
     assert "running in background" in output.out
+    assert "opened" in output.out
     assert "stopped" in output.out
+    assert "token=" not in output.out + output.err
