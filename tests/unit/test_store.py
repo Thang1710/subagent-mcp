@@ -665,7 +665,13 @@ def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
         pair_key="a" * 64,
         expected_revision=claimed.revision,
         state="ready",
-        details={"model": "claude-opus-5", "cleanup_confirmed": True},
+        details={
+            "model": "claude-opus-5",
+            "rate_evidence_seen": True,
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": True,
+        },
     )
     paused = store.pause_ready_circuit(
         runtime_id="claude-code",
@@ -674,6 +680,7 @@ def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
         expected_revision=ready.revision,
         error_code="QUOTA_PAUSED",
     )
+    assert paused.details["pause_evidence"] == "explicit_provider_result_v1"
 
     recovered = store.resume_paused_circuit(
         runtime_id="claude-code",
@@ -691,6 +698,84 @@ def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
     assert recovered.details["model"] == "claude-opus-5"
     assert recovered.details["is_using_overage"] is False
     assert "error_code" not in recovered.details
+    assert "pause_evidence" not in recovered.details
+
+
+def test_legacy_ambiguous_pause_cannot_overwrite_safe_task_evidence(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    claimed = store.claim_canary_request(
+        request_id="legacy-fence-canary",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+    )
+    ready = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        expected_revision=claimed.revision,
+        state="ready",
+        details={
+            "rate_evidence_seen": True,
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": True,
+        },
+    )
+    legacy_details = dict(ready.details)
+    legacy_details["error_code"] = "USAGE_CREDITS_FORBIDDEN"
+
+    with pytest.raises(sqlite3.IntegrityError, match="unproven quota pause"):
+        with store.transaction(write=True) as database:
+            database.execute(
+                """
+                UPDATE circuits SET state = 'auto_paused', category = 'quota',
+                    retry_after_utc = NULL, revision = revision + 1,
+                    details_json = ?, updated_at_utc = ?
+                WHERE runtime_id = 'claude-code' AND variant_id = 'default'
+                  AND state = 'ready' AND revision = ?
+                """,
+                (
+                    json.dumps(legacy_details, sort_keys=True, separators=(",", ":")),
+                    "2026-08-22T00:00:00Z",
+                    ready.revision,
+                ),
+            )
+
+    unchanged = store.load_circuit("claude-code", "default")
+    assert unchanged.state == "ready"
+    assert unchanged.revision == ready.revision
+    assert unchanged.details == ready.details
+
+
+def test_reopening_existing_schema_installs_legacy_quota_guard(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    store = StateStore.open(paths)
+    with store.transaction(write=True) as database:
+        database.execute("DROP TRIGGER IF EXISTS circuits_reject_unproven_quota_pause_v1")
+
+    StateStore.open(paths)
+
+    with store.transaction() as database:
+        trigger = database.execute(
+            """
+            SELECT name FROM sqlite_master
+            WHERE type = 'trigger'
+              AND name = 'circuits_reject_unproven_quota_pause_v1'
+            """
+        ).fetchone()
+    assert trigger == ("circuits_reject_unproven_quota_pause_v1",)
 
 
 def test_ready_circuit_requires_verified_cleanup_after_ambiguous_probe(

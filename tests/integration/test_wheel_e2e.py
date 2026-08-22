@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a25"
+VERSION = "0.1.0a26"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",

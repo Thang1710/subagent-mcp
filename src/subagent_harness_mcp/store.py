@@ -20,6 +20,24 @@ APPLICATION_ID = 0x534D4350  # "SMCP"
 DATABASE_SCHEMA_VERSION = 1
 _SQLITE_TIMEOUT_SECONDS = 5.0
 _PROCESS_INITIALIZE_LOCK = threading.Lock()
+_EXPLICIT_PAUSE_EVIDENCE = "explicit_provider_result_v1"
+_LEGACY_QUOTA_GUARD_NAME = "circuits_reject_unproven_quota_pause_v1"
+_LEGACY_QUOTA_GUARD_SQL = f"""
+CREATE TRIGGER IF NOT EXISTS {_LEGACY_QUOTA_GUARD_NAME}
+BEFORE UPDATE OF state, category, details_json ON circuits
+WHEN OLD.state = 'ready'
+ AND NEW.state = 'auto_paused'
+ AND NEW.category = 'quota'
+ AND json_extract(OLD.details_json, '$.rate_evidence_seen') = 1
+ AND json_extract(OLD.details_json, '$.is_using_overage') = 0
+ AND json_extract(OLD.details_json, '$.overage_blocked') = 1
+ AND json_extract(OLD.details_json, '$.cleanup_confirmed') = 1
+ AND COALESCE(json_extract(NEW.details_json, '$.pause_evidence'), '')
+     != '{_EXPLICIT_PAUSE_EVIDENCE}'
+BEGIN
+    SELECT RAISE(ABORT, 'unproven quota pause');
+END
+"""
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled", "interrupted"})
 _EXECUTION_STATES = frozenset(
     {"queued", "starting", "running", "needs_input"}
@@ -726,6 +744,7 @@ class StateStore:
                 raise StateError("CIRCUIT_CONFLICT", "runtime quota pause is stale")
             safe_details = dict(details)
             safe_details["error_code"] = error_code
+            safe_details["pause_evidence"] = _EXPLICIT_PAUSE_EVIDENCE
             database.execute(
                 """
                 UPDATE circuits SET state = 'auto_paused', category = 'quota',
@@ -779,6 +798,7 @@ class StateStore:
                 raise StateError("CIRCUIT_CONFLICT", "runtime quota recovery is stale")
             safe_details = dict(existing)
             safe_details.pop("error_code", None)
+            safe_details.pop("pause_evidence", None)
             safe_details.update(details)
             safe_details["pair_key"] = pair_key
             database.execute(
@@ -1458,6 +1478,7 @@ def _open_owned_database(path: Path) -> None:
             raise StateError("DATABASE_MODE_INVALID", "WAL mode is unavailable")
         if version < DATABASE_SCHEMA_VERSION:
             _apply_migration_one(database)
+        _install_online_guards(database)
         _require_quick_check(database)
     except StateError:
         raise
@@ -1628,6 +1649,7 @@ def _apply_migration_one(database: sqlite3.Connection) -> None:
             PRIMARY KEY(runtime_id, variant_id)
         )
         """,
+        _LEGACY_QUOTA_GUARD_SQL,
         """
         CREATE TABLE leases(
             lease_id TEXT PRIMARY KEY,
@@ -1654,6 +1676,23 @@ def _apply_migration_one(database: sqlite3.Connection) -> None:
             "INSERT INTO schema_migrations(version, applied_at_utc) VALUES (?, ?)",
             (DATABASE_SCHEMA_VERSION, _utc_now()),
         )
+        database.commit()
+    except BaseException:
+        if database.in_transaction:
+            database.rollback()
+        raise
+
+
+def _install_online_guards(database: sqlite3.Connection) -> None:
+    existing = database.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        (_LEGACY_QUOTA_GUARD_NAME,),
+    ).fetchone()
+    if existing is not None:
+        return
+    try:
+        database.execute("BEGIN IMMEDIATE")
+        database.execute(_LEGACY_QUOTA_GUARD_SQL)
         database.commit()
     except BaseException:
         if database.in_transaction:

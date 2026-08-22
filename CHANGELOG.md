@@ -2,6 +2,16 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a26 - 2026-08-22
+
+- Prevent a resident older MCP process from replacing exact safe Claude task
+  evidence with an ambiguous `USAGE_CREDITS_FORBIDDEN` pause. Current explicit
+  provider failures carry provenance; an online SQLite guard rejects unproven
+  legacy writes before they can block the configured model.
+- Keep the database schema readable by active older tasks so they can still
+  perform useful work while losing only the unsafe state-write path. No quota
+  reset clock, usage credit, overage, or synthetic availability signal is used.
+
 ## 0.1.0a25 - 2026-08-22
 
 - Keep the managed settings UI directly usable at its fixed
