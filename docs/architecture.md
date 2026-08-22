@@ -83,6 +83,15 @@ an exact validated loopback fragment directly to the CLI/browser, and the file
 is removed only when its bytes still match the process that published it. There
 is no automatic login/startup entry.
 
+## Runtime installation isolation
+
+The persistent `uv tool` installation owns the user-facing CLI and localhost
+UI. MCP clients should start the pinned package through `uvx --from`, which
+uses a separate cached environment. Keeping these process lifetimes separate
+prevents a long-running Windows stdio server from locking the environment that
+an ordinary CLI/UI update needs to replace. The package never rewrites MCP
+client configuration or clears uv caches automatically.
+
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside
 product ownership and are not parsed as a control contract.

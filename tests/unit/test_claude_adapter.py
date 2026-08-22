@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -93,6 +94,36 @@ def test_manifest_publishes_exact_model_suggestions_and_reasoning_efforts() -> N
         "xhigh",
         "max",
     ]
+
+
+def test_docs_only_release_keeps_claude_adapter_compatibility_identity(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    probe = asyncio.run(adapter.probe())
+
+    assert adapter.manifest.adapter_version == "0.1.0a22"
+    assert probe.details["adapter_version"] == "0.1.0a22"
+    pair_payload = {
+        "adapter_version": "0.1.0a22",
+        "sdk_version": probe.details["sdk_version"],
+        "cli_path": os.path.normcase(probe.details["cli_path"]),
+        "cli_version": probe.details["cli_version"],
+        "cli_sha256": probe.details["cli_sha256"],
+        "cli_file_id": probe.details["cli_file_id"],
+        "transport": "managed-sdk-default",
+    }
+    assert probe.details["pair_key"] == hashlib.sha256(
+        json.dumps(pair_payload, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def test_default_provider_timeout_covers_slow_native_opus_turns() -> None:

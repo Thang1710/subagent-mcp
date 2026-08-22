@@ -708,7 +708,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a22"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a23"},
                 },
             ),
             timeout=self._timeout,

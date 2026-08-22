@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a22"
+VERSION = "0.1.0a23"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -201,6 +201,26 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
         (ROOT / "docs/threat-model.md").read_text(encoding="utf-8"),
     ):
         assert "AgentBridge" not in content
+
+
+def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    readme_flat = " ".join(readme.split())
+    architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
+    uvx_command = (
+        "codex mcp add subagent-mcp -- uvx --from "
+        f"{DIST_NAME}=={VERSION} {DIST_NAME} serve"
+    )
+
+    assert uvx_command in readme
+    assert "codex mcp add subagent-mcp -- subagent-harness-mcp serve" not in readme
+    assert "codex mcp remove subagent-mcp" in readme
+    assert "close every Codex window once" in readme_flat
+    assert readme.index("subagent-harness-mcp ui --stop") < readme.index(
+        f"uv tool install --reinstall {DIST_NAME}=={VERSION}"
+    )
+    assert "uvx" in architecture
+    assert "separate" in architecture.lower()
 
 
 def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:

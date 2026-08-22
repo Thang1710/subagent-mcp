@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a23 - 2026-08-22
+
+- Register Codex's stdio MCP through a pinned `uvx --from` environment that is
+  separate from the persistent CLI/UI tool, avoiding Windows launcher locks
+  during normal updates.
+- Document the one-time migration for older direct-launch entries plus explicit
+  update and rollback commands; Subagent MCP still never rewrites Codex config
+  or clears uv caches automatically.
+
 ## 0.1.0a22 - 2026-08-22
 
 - Distinguish models already configured for delegation from additional models

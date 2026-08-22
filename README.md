@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a22` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a23` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -43,22 +43,18 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a22
-codex mcp add subagent-mcp -- subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==0.1.0a23
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a23 subagent-harness-mcp serve
 ```
 
-Start a new Codex task after registration. You can confirm the installation at
-any time:
+The installed tool provides the CLI and localhost UI. Codex runs the stdio MCP
+from a separate, pinned uvx environment so an active MCP process cannot lock a
+normal UI-tool update on Windows. Start a new Codex task after registration.
+You can confirm the installation at any time:
 
 ```powershell
 subagent-harness-mcp --version
 codex mcp list
-```
-
-If `0.1.0a22` has not reached PyPI yet, install the current checkout instead:
-
-```powershell
-uv tool install .
 ```
 
 ## Open the local UI
@@ -98,13 +94,26 @@ subagent-harness-mcp ui --port 0
 Background mode requires a fixed port so status and graceful stop target the
 same loopback service.
 
-On Windows, stop the background UI before upgrading or removing the `uv` tool
-so the running Python environment does not hold package files open:
+## Update or roll back on Windows
+
+If an older MCP entry runs `subagent-harness-mcp serve` directly, close every
+Codex window once before this first migration. That legacy process uses the
+same persistent tool environment and can hold its executable open.
+
+Stop the UI, install the exact version you want, and replace the MCP entry with
+the pinned uvx command:
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a22
+uv tool install --reinstall subagent-harness-mcp==0.1.0a23
+codex mcp remove subagent-mcp
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a23 subagent-harness-mcp serve
+subagent-harness-mcp ui --background
 ```
+
+For rollback, run the same commands with the previous exact version. Then
+restart Codex or start a new task. Subagent MCP never edits Codex configuration
+or clears uv caches automatically.
 
 ## Use it from Codex
 
@@ -203,7 +212,7 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a22` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a23` |
 | Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Native catalog names with a user-ordered priority stack; exact IDs remain available under Advanced |
 
@@ -216,8 +225,13 @@ Point any stdio-compatible MCP client at the installed command:
 
 ```json
 {
-  "command": "subagent-harness-mcp",
-  "args": ["serve"]
+  "command": "uvx",
+  "args": [
+    "--from",
+    "subagent-harness-mcp==0.1.0a23",
+    "subagent-harness-mcp",
+    "serve"
+  ]
 }
 ```
 
