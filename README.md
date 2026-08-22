@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Preview:** `0.1.0a24` targets Windows. The MCP, package, localhost UI, and
+> **Preview:** `0.1.0a25` targets Windows. The MCP, package, localhost UI, and
 > Claude Code native-harness integration are ready.
 
 ## Runtime status
@@ -44,8 +44,8 @@ then install the pinned preview and register it with Codex:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-uv tool install subagent-harness-mcp==0.1.0a24
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==0.1.0a25
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a25 subagent-harness-mcp serve
 ```
 
 Start a new Codex task after registration.
@@ -63,11 +63,11 @@ For a persistent background UI:
 
 ```powershell
 subagent-harness-mcp ui --background
-subagent-harness-mcp ui --open
 ```
 
-`ui --open` creates a fresh authorized tab using a single-use bootstrap token
-that is passed directly to the browser and never printed.
+The browser profile opened by this command can later open or reload
+`http://127.0.0.1:8765/` directly. Use `ui --open` once for another browser
+profile. The UI does not depend on an active MCP connection.
 
 ### 3. Delegate
 
@@ -142,9 +142,9 @@ the persistent tool environment and may hold its executable open.
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a24
+uv tool install --reinstall subagent-harness-mcp==0.1.0a25
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a25 subagent-harness-mcp serve
 subagent-harness-mcp ui --background
 ```
 

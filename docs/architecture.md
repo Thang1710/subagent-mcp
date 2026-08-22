@@ -93,7 +93,10 @@ token lives only in a bounded product-owned Local state file. Both control
 endpoints require the exact loopback Origin and Host; the open path returns only
 an exact validated loopback fragment directly to the CLI/browser, and the file
 is removed only when its bytes still match the process that published it. There
-is no automatic login/startup entry.
+is no automatic login/startup entry. An already authorized browser session is
+restored from the bare fixed-port URL through an exact same-origin POST; a new
+browser profile still requires the one-time background or `ui --open`
+bootstrap.
 
 ## Runtime installation isolation
 

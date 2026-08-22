@@ -26,6 +26,18 @@ credential, or provider data. Existing browser sessions remain valid; each new
 bootstrap token is still single-use. A wrong/stale control record, foreground
 UI, browser refusal, malformed response, or port mismatch fails closed.
 
+## Direct managed URL amendment
+
+The fixed-port managed UI must also be usable by opening or reloading
+`http://127.0.0.1:8765/` directly after that browser profile has been
+authorized. On boot, the package-owned page posts to the session endpoint
+without a token; the server may only restore a valid HttpOnly session cookie.
+Missing or stale cookies remain rejected, so another local process cannot mint
+a session by spoofing HTTP headers. The POST still requires an exact loopback
+Host and same-origin Origin. A new browser profile receives its one-time token
+from the background launch or `ui --open`; the control token is never sent to
+the browser.
+
 ## Non-goals
 
 - No Windows login/startup registration.
@@ -41,3 +53,5 @@ UI, browser refusal, malformed response, or port mismatch fails closed.
 - Foreground/unmanaged/mismatched/malformed cases fail before browser open.
 - Existing `--background`, `--status`, `--stop`, and bare foreground behavior
   stay compatible.
+- An authorized browser profile opens and reloads the bare managed URL without
+  another CLI command; every new profile still requires one bootstrap.

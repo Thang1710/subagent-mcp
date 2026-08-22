@@ -308,7 +308,8 @@
   }
 
   async function openSession(token) {
-    const data = await request('POST', API_SESSION, null, { [TOKEN_HEADER]: token });
+    const headers = token ? { [TOKEN_HEADER]: token } : {};
+    const data = await request('POST', API_SESSION, null, headers);
     csrf = str(pick(data, 'csrfToken', 'csrf_token', 'csrf'));
     if (!csrf) throw new ApiError('The server did not issue a CSRF token.', 0);
     return data;
@@ -1638,12 +1639,6 @@
     setDocState('loading');
     showLoadingSkeletons();
     setBusy(true);
-
-    if (!token) {
-      setBusy(false);
-      fatal('This page was opened without a bootstrap token.');
-      return;
-    }
 
     try {
       await openSession(token);

@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a25 - 2026-08-22
+
+- Keep the managed settings UI directly usable at its fixed
+  `http://127.0.0.1:8765/` address without rerunning the CLI for every new tab
+  or reload.
+- Restore existing browser sessions without weakening the one-time bootstrap
+  required to authorize a new browser profile. Loopback Host/Origin, HttpOnly
+  cookie, and CSRF checks remain unchanged.
+
 ## 0.1.0a24 - 2026-08-22
 
 - Allow write-capable external agents to work concurrently when their canonical

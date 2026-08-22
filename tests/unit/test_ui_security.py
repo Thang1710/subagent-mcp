@@ -25,6 +25,7 @@ def _server(
     *,
     patch_calls: list[tuple[dict[str, object], int]] | None = None,
     refresh_calls: list[None] | None = None,
+    control_token: str | None = None,
 ):
     calls = [] if patch_calls is None else patch_calls
     refreshes = [] if refresh_calls is None else refresh_calls
@@ -65,6 +66,7 @@ def _server(
         snapshot,
         patch_config,
         provider_refresher=refresh_provider,
+        control_token=control_token,
     )
 
 
@@ -368,6 +370,18 @@ def test_static_javascript_invokes_its_iife_with_valid_syntax() -> None:
     assert not source.endswith("}());")
 
 
+def test_static_javascript_attempts_session_restore_without_a_fragment_token() -> None:
+    source = (
+        resources.files("subagent_harness_mcp")
+        .joinpath("static/app.js")
+        .read_text(encoding="utf-8")
+    )
+    boot = source.split("(async function boot() {", 1)[1]
+
+    assert "if (!token)" not in boot
+    assert "await openSession(token);" in boot
+
+
 def test_static_css_preserves_the_hidden_attribute() -> None:
     source = (
         resources.files("subagent_harness_mcp")
@@ -506,6 +520,84 @@ def test_bootstrap_is_single_use_and_api_requires_cookie_and_csrf() -> None:
     assert patched == 200
     assert json.loads(patched_body) == {"revision": 8}
     assert patch_calls == [({"runtimes": {"fake": {"enabled": False}}}, 7)]
+
+
+def test_managed_ui_requires_bootstrap_for_its_first_browser_session() -> None:
+    server = _server(control_token="managed-control-token-with-enough-entropy")
+    server.start()
+    try:
+        status, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={"Origin": server.origin},
+        )
+    finally:
+        server.close()
+
+    assert status == 401
+
+
+def test_authorized_managed_tab_restores_its_existing_session() -> None:
+    server = _server(control_token="managed-control-token-with-enough-entropy")
+    server.start()
+    try:
+        cookie, csrf = _open_session(server)
+
+        restored, restored_headers, restored_body = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={"Cookie": cookie, "Origin": server.origin},
+        )
+        snapshot, _, _ = _request(
+            server,
+            "GET",
+            "/api/v1/snapshot",
+            headers={"Cookie": cookie},
+        )
+    finally:
+        server.close()
+
+    assert restored == 200
+    assert json.loads(restored_body) == {"csrf_token": csrf}
+    assert "set-cookie" not in restored_headers
+    assert snapshot == 200
+
+
+def test_foreground_ui_still_requires_bootstrap_for_its_first_session() -> None:
+    server = _server()
+    server.start()
+    try:
+        status, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={"Origin": server.origin},
+        )
+    finally:
+        server.close()
+
+    assert status == 401
+
+
+def test_authorized_foreground_tab_restores_its_existing_session() -> None:
+    server = _server()
+    server.start()
+    try:
+        cookie, csrf = _open_session(server)
+        status, headers, body = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={"Cookie": cookie, "Origin": server.origin},
+        )
+    finally:
+        server.close()
+
+    assert status == 200
+    assert json.loads(body) == {"csrf_token": csrf}
+    assert "set-cookie" not in headers
 
 
 def test_provider_refresh_requires_csrf_and_an_empty_body() -> None:

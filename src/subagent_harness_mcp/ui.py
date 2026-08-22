@@ -664,12 +664,24 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
             if not self._require_empty_body():
                 return
             values = self.headers.get_all("X-Subagent-MCP-Token", [])
-            if len(values) != 1 or not values[0] or len(values[0]) > 256:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
-                return
-            exchanged = state.exchange_bootstrap(values[0])
-            if exchanged is None:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
+            if values:
+                if len(values) != 1 or not values[0] or len(values[0]) > 256:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
+                    return
+                exchanged = state.exchange_bootstrap(values[0])
+                if exchanged is None:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
+                    return
+            else:
+                session_id = self._session(require_csrf=False, reject_missing=False)
+                if session_id is None:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
+                    return
+                csrf = state.csrf_for(session_id)
+                if csrf is None:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                    return
+                self._send_json(HTTPStatus.OK, {"csrf_token": csrf})
                 return
             session_id, csrf = exchanged
             cookie = (
@@ -773,24 +785,33 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                 return None
             return path
 
-        def _session(self, *, require_csrf: bool) -> str | None:
+        def _session(
+            self,
+            *,
+            require_csrf: bool,
+            reject_missing: bool = True,
+        ) -> str | None:
             cookie_headers = self.headers.get_all("Cookie", [])
             if len(cookie_headers) != 1:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                if reject_missing:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
                 return None
             cookies = SimpleCookie()
             try:
                 cookies.load(cookie_headers[0])
             except CookieError:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                if reject_missing:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
                 return None
             morsel = cookies.get(_SESSION_COOKIE)
             if morsel is None or len(morsel.value) > 256:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                if reject_missing:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
                 return None
             expected_csrf = state.csrf_for(morsel.value)
             if expected_csrf is None:
-                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                if reject_missing:
+                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
                 return None
             if require_csrf:
                 supplied = self.headers.get_all("X-CSRF-Token", [])

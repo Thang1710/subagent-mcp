@@ -26,3 +26,10 @@
   JavaScript/Python/diff/privacy checks, and one bounded Critical-only review.
 - [ ] Commit/mirror with the owner's exact identity, publish GitHub/PyPI a21,
   reinstall, and prove `ui --open` in Chrome without exposing its token.
+
+### Task 4: Direct fixed-port managed access
+
+- [x] Reproduce the bare-URL failure in server and static-boot RED tests.
+- [x] Restore an existing cookie without weakening the one-time bootstrap,
+  Host/Origin, CSRF, or loopback checks for a new browser profile.
+- [ ] Run focused/full verification and prove direct open plus reload in Chrome.
