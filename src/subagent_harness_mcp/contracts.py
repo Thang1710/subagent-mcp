@@ -20,6 +20,7 @@ RESULT_CAPSULE_MAX_CHARS = 512
 RESULT_SLICE_DEFAULT_CHARS = 4_096
 RESULT_SLICE_MAX_CHARS = 8_192
 PROMPT_MAX_BYTES = 128 * 1024
+_PROMPT_FORMATTING_CONTROLS = frozenset({"\t", "\n", "\r"})
 ROUGH_TOKEN_ESTIMATE_BASIS = (
     "content-only rough estimate: ceil(utf8_bytes / 3);"
     " not provider billing or a tokenizer claim"
@@ -164,6 +165,7 @@ def validate_bounded_text(
     max_bytes: int,
     *,
     strip: bool,
+    allowed_controls: frozenset[str] = frozenset(),
 ) -> str:
     if not isinstance(value, str) or not value or (strip and value != value.strip()):
         raise ContractError("REQUEST_INVALID", f"{label} must be nonempty")
@@ -171,7 +173,11 @@ def validate_bounded_text(
         raise ContractError("REQUEST_INVALID", f"{label} must be nonempty")
     if len(value.encode("utf-8")) > max_bytes:
         raise ContractError("REQUEST_INVALID", f"{label} is too long")
-    if any(unicodedata.category(character) == "Cc" for character in value):
+    if any(
+        unicodedata.category(character) == "Cc"
+        and character not in allowed_controls
+        for character in value
+    ):
         raise ContractError("REQUEST_INVALID", f"{label} contains a control character")
     return value
 
@@ -335,7 +341,13 @@ class TaskPacket:
 
     def __post_init__(self) -> None:
         validate_bounded_text(self.title, "task.title", 512, strip=False)
-        validate_bounded_text(self.prompt, "task.prompt", PROMPT_MAX_BYTES, strip=False)
+        validate_bounded_text(
+            self.prompt,
+            "task.prompt",
+            PROMPT_MAX_BYTES,
+            strip=False,
+            allowed_controls=_PROMPT_FORMATTING_CONTROLS,
+        )
         validate_bounded_text(self.role, "task.role", 128, strip=False)
         _validate_text_collection(
             self.acceptance_criteria,
@@ -498,7 +510,13 @@ class SendRequest:
     def __post_init__(self) -> None:
         validate_identifier(self.request_id, "request_id", 256)
         validate_identifier(self.conversation_id, "conversation_id")
-        validate_bounded_text(self.prompt, "prompt", PROMPT_MAX_BYTES, strip=False)
+        validate_bounded_text(
+            self.prompt,
+            "prompt",
+            PROMPT_MAX_BYTES,
+            strip=False,
+            allowed_controls=_PROMPT_FORMATTING_CONTROLS,
+        )
         if self.reply_to is not None:
             validate_identifier(self.reply_to, "reply_to", 256)
         validate_json_object(self.answers, "answers", 64 * 1024)

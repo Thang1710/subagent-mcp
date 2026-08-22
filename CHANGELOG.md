@@ -2,6 +2,12 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a28 - 2026-08-22
+
+- Accept normal multiline formatting in spawn and follow-up prompts. Newlines,
+  carriage returns, and tabs are preserved for native harnesses; NUL, escape,
+  and every other control character remain rejected.
+
 ## 0.1.0a27 - 2026-08-22
 
 - Rotate explicit quota-pause provenance on every current write. A resident

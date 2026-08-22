@@ -379,6 +379,24 @@ def test_send_request_artifact_is_optional_and_backward_compatible() -> None:
         )
 
 
+def test_prompts_accept_multiline_formatting_but_reject_unsafe_controls() -> None:
+    prompt = "Read AGENTS.md.\n\nImplement the bounded lane:\n\t- preserve data"
+    task = TaskPacket("Implement", prompt, ("Done",), "writer")
+    send = SendRequest("send-multiline", "conversation-1", prompt)
+
+    assert task.prompt == prompt
+    assert send.prompt == prompt
+
+    for unsafe in ("\x00", "\x1b"):
+        with pytest.raises(ContractError, match="control character"):
+            TaskPacket("Implement", f"Before{unsafe}after", ("Done",), "writer")
+        with pytest.raises(ContractError, match="control character"):
+            SendRequest("send-unsafe", "conversation-1", f"Before{unsafe}after")
+
+    with pytest.raises(ContractError, match="control character"):
+        TaskPacket("Bad\ntitle", "Prompt.", ("Done",), "writer")
+
+
 def test_rough_token_estimate_is_labelled_content_only_bytes_over_three() -> None:
     assert "ceil(utf8_bytes / 3)" in ROUGH_TOKEN_ESTIMATE_BASIS
     assert "not provider billing" in ROUGH_TOKEN_ESTIMATE_BASIS

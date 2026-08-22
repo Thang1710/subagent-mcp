@@ -308,7 +308,7 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
                 "variant_id": "vendor/model-policy:v1",
                 "task": {
                     "title": "Bounded implementation",
-                    "prompt": "Implement the requested slice.",
+                    "prompt": "Read AGENTS.md.\n\nImplement the requested slice.",
                     "acceptance_criteria": ["Return one normalized result."],
                     "role": "sub-agent",
                     "authority": ["AGENTS.md"],
@@ -333,7 +333,7 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
     assert request.request_id == "spawn-1"
     assert request.runtime_id == "future-runtime"
     assert request.variant_id == "vendor/model-policy:v1"
-    assert request.task.prompt == "Implement the requested slice."
+    assert request.task.prompt == "Read AGENTS.md.\n\nImplement the requested slice."
     assert request.task.authority == ("AGENTS.md",)
     assert request.task.repository_base == "base-commit"
     assert request.task.repository_head == "head-commit"
