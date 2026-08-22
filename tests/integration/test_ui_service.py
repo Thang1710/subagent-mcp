@@ -477,7 +477,11 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     assert deepseek_fields["delegation_priority"]["value"] == 0
     deepseek_priority = deepseek_fields["model_priority"]
     assert deepseek_priority["kind"] == "model-priority"
-    assert deepseek_priority["value"] == [
+    # Native catalog rows are suggestions, not silently configured fallbacks.
+    # Applying the popup may promote this suggested order into the persisted
+    # value, but a read-only snapshot must reflect the empty fresh config.
+    assert deepseek_priority["value"] == []
+    assert [item["value"] for item in deepseek_priority["options"]] == [
         "deepseek-official::deepseek-v4-flash",
         "deepseek-official::deepseek-v4-pro",
         "deepseek-official::deepseek-v4-flash-vision-exp",
@@ -561,7 +565,7 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     assert updated["revision"] == 1
     assert updated_claude["enabled"] is True
     assert updated_fields["delegation_priority"]["value"] == 50
-    assert updated_fields["model_priority"]["value"][:3] == [
+    assert updated_fields["model_priority"]["value"] == [
         model,
         "future/provider-fallback-1@2026.08",
         "future/provider-fallback-2@2026.08",

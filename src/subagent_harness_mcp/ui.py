@@ -1455,7 +1455,10 @@ def _model_priority_field(
         "id": "model_priority",
         "label": "Model priority",
         "kind": "model-priority",
-        "value": order,
+        # Keep persisted configuration separate from adapter suggestions.  The
+        # dialog may offer every native model, but only an explicit Apply +
+        # Save turns those suggestions into configured fallbacks.
+        "value": configured,
         "options": ordered_options,
         "required": True,
         "allowCustom": True,

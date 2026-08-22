@@ -845,9 +845,15 @@
     };
 
     function updateSummary() {
-      const first = item.order.length ? optionFor(item.order[0]).label : 'Choose models';
       const count = item.order.length;
-      setText(item.control, count ? '#1 ' + first + ' · ' + count + (count === 1 ? ' model' : ' models') : first);
+      const available = item.field.options.length;
+      const first = count ? optionFor(item.order[0]).label : 'Choose priority';
+      const extra = Math.max(0, available - count);
+      let summary = count
+        ? '#1 ' + first + ' · ' + count + ' configured'
+        : first;
+      if (extra) summary += ' · ' + extra + ' more available';
+      setText(item.control, summary);
       item.control.value = item.order.join('\n');
     }
 
@@ -912,6 +918,9 @@
     updateSummary();
     item.control.addEventListener('click', () => {
       draft = item.order.slice();
+      item.field.options.forEach((option) => {
+        if (draft.indexOf(option.value) === -1) draft.push(option.value);
+      });
       setHidden(addError, true);
       exact.value = '';
       renderDraft();

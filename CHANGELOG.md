@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a22 - 2026-08-22
+
+- Distinguish models already configured for delegation from additional models
+  published by a native harness, instead of presenting catalog suggestions as
+  active fallbacks.
+- Let **Apply order** turn the complete native catalog order into a saveable
+  draft even when the user accepts the harness's default order unchanged.
+
 ## 0.1.0a21 - 2026-08-22
 
 - Add `subagent-harness-mcp ui --open` to request a fresh single-use browser

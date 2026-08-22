@@ -175,7 +175,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a21",
+            adapter_version="0.1.0a22",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -708,7 +708,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a21"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a22"},
                 },
             ),
             timeout=self._timeout,
