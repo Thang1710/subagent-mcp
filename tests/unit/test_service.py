@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import itertools
 import json
 from pathlib import Path
@@ -9,6 +10,7 @@ import pytest
 
 from subagent_harness_mcp.adapters.base import (
     AdapterFailure,
+    AdapterSendRequest,
     CanaryRequest,
     CanaryResult,
     ProbeResult,
@@ -17,8 +19,12 @@ from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigStore
 from subagent_harness_mcp.contracts import (
+    PROMPT_MAX_BYTES,
     ActionRequest,
+    ArtifactReference,
     ResultReadRequest,
+    ROUGH_TOKEN_ESTIMATE_BASIS,
+    SendRequest,
     ServiceError,
     SpawnRequest,
     TaskPacket,
@@ -104,6 +110,24 @@ class _QuotaFakeAdapter(FakeAdapter):
         )
 
 
+class _CatalogFakeAdapter(FakeAdapter):
+    async def model_catalog(self) -> tuple[dict[str, str], ...]:
+        return (
+            {
+                "value": "vendor::model-a",
+                "label": "Model A",
+                "provider": "vendor",
+                "model": "model-a",
+            },
+            {
+                "value": "vendor::model-b",
+                "label": "Model B",
+                "provider": "vendor",
+                "model": "model-b",
+            },
+        )
+
+
 def _service(
     tmp_path: Path,
     harness: FakeHarness,
@@ -183,6 +207,28 @@ def test_runtime_list_publishes_external_delegation_priority(tmp_path: Path) -> 
     assert runtimes[0]["delegation_priority"] == 73
 
 
+def test_runtime_list_publishes_adapter_owned_model_catalog(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness, adapter=_CatalogFakeAdapter(harness))
+
+    runtime = asyncio.run(service.runtime_list())[0]
+
+    assert runtime["model_catalog"] == [
+        {
+            "value": "vendor::model-a",
+            "label": "Model A",
+            "provider": "vendor",
+            "model": "model-a",
+        },
+        {
+            "value": "vendor::model-b",
+            "label": "Model B",
+            "provider": "vendor",
+            "model": "model-b",
+        },
+    ]
+
+
 def test_runtime_list_publishes_ordered_model_fallback_policy(tmp_path: Path) -> None:
     service, _ = _service(tmp_path, FakeHarness())
     paths = resolve_paths(
@@ -215,6 +261,55 @@ def test_runtime_list_publishes_ordered_model_fallback_policy(tmp_path: Path) ->
         ],
         "fallback_on": ["QUOTA_PAUSED"],
     }
+
+
+@pytest.mark.parametrize(
+    ("error_code", "expected_order"),
+    [
+        ("QUOTA_PAUSED", ["fallback-1", "future-deep"]),
+        ("USAGE_CREDITS_FORBIDDEN", ["fallback-1", "future-deep"]),
+        ("FAKE_FAILURE", ["future-deep", "fallback-1"]),
+    ],
+)
+def test_terminal_quota_failure_demotes_only_the_exact_model_for_future_tasks(
+    tmp_path: Path,
+    error_code: str,
+    expected_order: list[str],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness)
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(tmp_path / "home")},
+        os_name="nt",
+    )
+    config = ConfigStore(paths)
+    document = config.load()
+    document["runtimes"]["fake"]["variants"].append(
+        {
+            "id": "fallback-1",
+            "model": "vendor/fallback-model",
+            "reasoning": {"provider_depth": "deep"},
+        }
+    )
+    config.save(document, expected_revision=1)
+    harness.enqueue("failure", error_code=error_code)
+
+    status = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+
+    assert status.execution_state == "failed"
+    assert harness.call_count("spawn") == 1
+    variants = config.load()["runtimes"]["fake"]["variants"]
+    assert [item["id"] for item in variants] == expected_order
+    failed = next(item for item in variants if item["id"] == "future-deep")
+    if error_code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}:
+        assert failed["availability"] == {
+            "state": "quota_paused",
+            "reason_code": error_code,
+        }
+    else:
+        assert "availability" not in failed
 
 
 def test_runtime_check_refreshes_ready_quota_only_when_explicit(tmp_path: Path) -> None:
@@ -352,6 +447,11 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
     harness = FakeHarness()
     adapter = _QuotaFakeAdapter(harness)
     service, store = _service(tmp_path, harness, adapter=adapter)
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(tmp_path / "home")},
+        os_name="nt",
+    )
+    config = ConfigStore(paths)
 
     async def run():
         await service.runtime_check("fake")
@@ -368,8 +468,22 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
 
     refreshed = asyncio.run(run())
 
-    assert refreshed["quota"]["state"] == "quota_paused"
-    assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+    assert refreshed["quota"] == {
+        "state": "unknown",
+        "variants": [
+            {
+                "variant_id": "future-deep",
+                "state": "unknown",
+                "error_code": "USAGE_CREDITS_FORBIDDEN",
+            }
+        ],
+    }
+    circuit = store.load_circuit("fake", "future-deep")
+    assert circuit.state == "auto_paused"
+    assert circuit.details["error_code"] == "USAGE_CREDITS_FORBIDDEN"
+    variants = config.load()["runtimes"]["fake"]["variants"]
+    assert [item["id"] for item in variants] == ["future-deep"]
+    assert "availability" not in variants[0]
 
 
 def test_runtime_check_explains_unknown_no_model_quota_failure(tmp_path: Path) -> None:
@@ -625,3 +739,368 @@ def test_unimplemented_preview_surface_is_explicit_capability_gap(tmp_path: Path
 
     assert captured.value.code == "CAPABILITY_MISSING"
     assert captured.value.retryable is False
+
+
+_SOURCE_REPORT = (
+    "CAPSULE: relay source\n"
+    "DETAILS:\nunique-relay-payload-42 plus complete provider evidence"
+)
+_RELAY_OPERATIONS = ("spawn", "send", "open_session", "probe")
+
+
+class _RecordingSendAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.sent_prompts: list[str] = []
+
+    async def send(self, request: AdapterSendRequest):
+        self.sent_prompts.append(request.prompt)
+        return await super().send(request)
+
+
+def _adapter_counts(harness: FakeHarness) -> tuple[int, ...]:
+    return tuple(harness.call_count(operation) for operation in _RELAY_OPERATIONS)
+
+
+def _relay_pair(
+    tmp_path: Path,
+    harness: FakeHarness,
+    *,
+    source_outcome: str = "done",
+) -> tuple[SubagentMcpService, StateStore, _RecordingSendAdapter, object, object]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = _RecordingSendAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    harness.enqueue(source_outcome, result=_SOURCE_REPORT if source_outcome == "done" else None)
+    source = asyncio.run(
+        service.agent_spawn(_spawn_request(workspace, request_id="relay-source"))
+    )
+    harness.enqueue("done", result="target primed")
+    target = asyncio.run(
+        service.agent_spawn(_spawn_request(workspace, request_id="relay-target"))
+    )
+    return service, store, adapter, source, target
+
+
+def test_artifact_relay_expands_full_source_only_in_memory(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    service, store, adapter, source, target = _relay_pair(tmp_path, harness)
+    digest = hashlib.sha256(_SOURCE_REPORT.encode("utf-8")).hexdigest()
+    request = SendRequest(
+        request_id="relay-send-1",
+        conversation_id=target.conversation_id,
+        prompt="Summarize the attached prior report.",
+        artifact=ArtifactReference(source.conversation_id, source.execution_id, digest),
+    )
+
+    status = asyncio.run(service.agent_send(request))
+
+    assert status.execution_state == "succeeded"
+    assert len(adapter.sent_prompts) == 1
+    expanded = adapter.sent_prompts[0]
+    assert _SOURCE_REPORT in expanded
+    assert "UNTRUSTED REPORT DATA" in expanded
+    assert f"sha256: {digest}" in expanded
+    assert f"char_count: {len(_SOURCE_REPORT)}" in expanded
+    assert "unique-relay-payload-42" not in json.dumps(status.to_compact_dict())
+    with store.transaction() as database:
+        copied = {
+            "requests": [
+                row[0]
+                for row in database.execute(
+                    "SELECT response_json FROM requests WHERE request_id = ?",
+                    (request.request_id,),
+                )
+            ],
+            "events": [
+                row[0]
+                for row in database.execute(
+                    "SELECT payload_json FROM events WHERE execution_id = ?",
+                    (status.execution_id,),
+                )
+            ],
+            "observed_and_requested": list(
+                database.execute(
+                    "SELECT observed_json, requested_json FROM executions"
+                    " WHERE execution_id = ?",
+                    (status.execution_id,),
+                ).fetchone()
+            ),
+            "descriptor": [
+                database.execute(
+                    "SELECT descriptor_json FROM conversations"
+                    " WHERE conversation_id = ?",
+                    (target.conversation_id,),
+                ).fetchone()[0]
+            ],
+        }
+        results = [
+            row[0]
+            for row in database.execute(
+                "SELECT result_json FROM executions WHERE result_json IS NOT NULL"
+            )
+        ]
+        stored_input = database.execute(
+            "SELECT input_sha256 FROM requests"
+            " WHERE tool = 'agent_send' AND request_id = 'relay-send-1'"
+        ).fetchone()[0]
+    for bucket, blobs in copied.items():
+        leaked = [blob for blob in blobs if blob and "unique-relay-payload-42" in blob]
+        assert leaked == [], bucket
+    assert sum("unique-relay-payload-42" in blob for blob in results) == 1
+    durable_payload = {
+        "answers": {},
+        "artifact": {
+            "conversation_id": source.conversation_id,
+            "execution_id": source.execution_id,
+            "expected_sha256": digest,
+        },
+        "conversation_id": target.conversation_id,
+        "prompt": request.prompt,
+        "reply_to": None,
+    }
+    expected_input = hashlib.sha256(
+        (
+            json.dumps(
+                durable_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    ).hexdigest()
+    assert stored_input == expected_input
+
+    replay = asyncio.run(service.agent_send(request))
+
+    assert replay.execution_id == status.execution_id
+    assert replay.execution_state == "succeeded"
+    assert len(adapter.sent_prompts) == 1
+
+
+def test_artifact_relay_rejects_wrong_conversation_before_native_work(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    service, _, _, source, target = _relay_pair(tmp_path, harness)
+    digest = hashlib.sha256(_SOURCE_REPORT.encode("utf-8")).hexdigest()
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-bad-conversation",
+                    conversation_id=target.conversation_id,
+                    prompt="Relay.",
+                    artifact=ArtifactReference(
+                        "conversation-unknown", source.execution_id, digest
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "RESULT_NOT_FOUND"
+    assert _adapter_counts(harness) == before
+
+
+def test_artifact_relay_rejects_changed_hash_before_native_work(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    service, _, _, source, target = _relay_pair(tmp_path, harness)
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-bad-hash",
+                    conversation_id=target.conversation_id,
+                    prompt="Relay.",
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, "f" * 64
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "RESULT_CHANGED"
+    assert _adapter_counts(harness) == before
+
+
+@pytest.mark.parametrize("source_outcome", ["running", "failure"])
+def test_artifact_relay_rejects_non_succeeded_source_before_native_work(
+    tmp_path: Path,
+    source_outcome: str,
+) -> None:
+    harness = FakeHarness()
+    service, _, _, source, target = _relay_pair(
+        tmp_path, harness, source_outcome=source_outcome
+    )
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id=f"relay-{source_outcome}-source",
+                    conversation_id=target.conversation_id,
+                    prompt="Relay.",
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, "a" * 64
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "RESULT_NOT_AVAILABLE"
+    assert captured.value.next_action == "inspect_status"
+    assert _adapter_counts(harness) == before
+
+
+def test_artifact_relay_rejects_same_source_and_target_conversation(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    service, _, _, source, _ = _relay_pair(tmp_path, harness)
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-self",
+                    conversation_id=source.conversation_id,
+                    prompt="Relay to myself.",
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, "a" * 64
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "REQUEST_INVALID"
+    assert _adapter_counts(harness) == before
+
+
+def test_artifact_relay_rejects_cross_workspace_identity(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    service, store, _, source, target = _relay_pair(tmp_path, harness)
+    digest = hashlib.sha256(_SOURCE_REPORT.encode("utf-8")).hexdigest()
+    with store.transaction(write=True) as database:
+        database.execute(
+            "UPDATE conversations SET workspace_key = ? WHERE conversation_id = ?",
+            (r"Z:\elsewhere", source.conversation_id),
+        )
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-cross-workspace",
+                    conversation_id=target.conversation_id,
+                    prompt="Relay.",
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, digest
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "WORKSPACE_MISMATCH"
+    assert _adapter_counts(harness) == before
+
+
+def test_artifact_relay_fails_closed_without_workspace_identity(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    service, store, _, source, target = _relay_pair(tmp_path, harness)
+    digest = hashlib.sha256(_SOURCE_REPORT.encode("utf-8")).hexdigest()
+    with store.transaction(write=True) as database:
+        database.execute(
+            "UPDATE conversations SET workspace_key = NULL WHERE conversation_id = ?",
+            (source.conversation_id,),
+        )
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-no-workspace",
+                    conversation_id=target.conversation_id,
+                    prompt="Relay.",
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, digest
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "WORKSPACE_MISMATCH"
+    assert _adapter_counts(harness) == before
+
+
+def test_artifact_relay_rejects_oversized_expanded_prompt_before_native_work(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    service, _, _, source, target = _relay_pair(tmp_path, harness)
+    digest = hashlib.sha256(_SOURCE_REPORT.encode("utf-8")).hexdigest()
+    near_limit_prompt = "x" * (PROMPT_MAX_BYTES - 64)
+    before = _adapter_counts(harness)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    request_id="relay-overflow",
+                    conversation_id=target.conversation_id,
+                    prompt=near_limit_prompt,
+                    artifact=ArtifactReference(
+                        source.conversation_id, source.execution_id, digest
+                    ),
+                )
+            )
+        )
+
+    assert captured.value.code == "REQUEST_INVALID"
+    assert _adapter_counts(harness) == before
+
+
+def test_result_read_slice_reports_exact_bytes_and_labelled_rough_tokens(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    full_text = "CAPSULE: metrics\nDETAILS:\nhéllo ✓ provider evidence"
+    harness.enqueue("done", result=full_text)
+    service, _ = _service(tmp_path, harness)
+
+    status = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    artifact = status.to_compact_dict()["result"]["artifact"]
+    read = asyncio.run(
+        service.agent_result_read(
+            ResultReadRequest(
+                status.conversation_id,
+                status.execution_id,
+                artifact["sha256"],
+                offset=0,
+                limit=10,
+            )
+        )
+    )
+    slice_text = full_text[:10]
+
+    assert read["text"] == slice_text
+    assert read["slice_metrics"] == {
+        "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+        "chars": len(slice_text),
+        "utf8_bytes": len(slice_text.encode("utf-8")),
+        "rough_tokens": (len(slice_text.encode("utf-8")) + 2) // 3,
+    }

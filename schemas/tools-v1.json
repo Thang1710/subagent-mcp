@@ -62,7 +62,14 @@
       "approval": "automatic",
       "request_id_required": true,
       "response_mode_default": "compact",
-      "purpose": "Continue one native session with a new execution"
+      "artifact_reference": {
+        "optional": true,
+        "maximum": 1,
+        "fields": ["conversation_id", "execution_id", "expected_sha256"],
+        "same_verified_workspace_required": true,
+        "source_state_required": "succeeded"
+      },
+      "purpose": "Continue one native session, optionally relaying one hash-bound result artifact"
     },
     "agent_wait": {
       "approval": "automatic",

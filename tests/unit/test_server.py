@@ -465,6 +465,40 @@ def test_result_read_is_bounded_read_only_and_parses_exact_artifact_identity() -
     assert schemas["agent_result_read"]["properties"]["limit"]["maximum"] == 8192
 
 
+def test_send_accepts_one_hash_bound_artifact_reference() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+    schemas = {tool.name: tool.input_schema for tool in _run(server.list_tools())}
+    digest = "b" * 64
+
+    result = _run(
+        server.call_tool(
+            "agent_send",
+            {
+                "request_id": "relay-1",
+                "conversation_id": "target-conversation",
+                "prompt": "Review this source result.",
+                "artifact": {
+                    "conversation_id": "source-conversation",
+                    "execution_id": "source-execution",
+                    "expected_sha256": digest,
+                },
+            },
+        )
+    )
+
+    assert result.is_error is False
+    assert "artifact" in schemas["agent_send"]["properties"]
+    name, request = service.calls[-1]
+    assert name == "agent_send"
+    assert request.artifact is not None
+    assert request.artifact.to_dict() == {
+        "conversation_id": "source-conversation",
+        "execution_id": "source-execution",
+        "expected_sha256": digest,
+    }
+
+
 def test_status_is_compact_by_default_and_full_only_when_requested() -> None:
     class _StatusService(_RecordingService):
         async def agent_status(self, request):

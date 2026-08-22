@@ -11,7 +11,7 @@ same-user code.
 | Risk | Control |
 |---|---|
 | Duplicate or wrong work | Request idempotency, exact session/model/workspace/context attestation |
-| Provider/model downgrade | Opaque exact selection, no fallback, pair-specific canary |
+| Provider/model downgrade | Explicit ordered selection, stable variant identity, pair-specific canary, and demotion only after terminal quota/credit evidence |
 | Claude billing/overage | Subscription-auth preflight, credential-source attestation, live no-overage event before output, circuit pause |
 | Pre-authorized provider balance | Exact provider/model route, explicit runtime enablement, and no purchase, reload, or limit-changing capability |
 | Recursive orchestration | Strict declared MCP and explicit client/Subagent MCP deny rules |
@@ -20,6 +20,8 @@ same-user code.
 | Destructive lifecycle action | Immutable runtimes, atomic pointer, ownership journal/read-back, identity-matching uninstall/rollback |
 | PID reuse | PID plus creation identity and executable digest; otherwise `RECOVERY_REQUIRED` |
 | Sensitive output | Bounded key-aware redaction; no credentials, hidden thinking, or raw provider evidence persistence |
+| Cross-agent result confusion | One hash-bound successful source, distinct conversations, same verified workspace, and an explicit untrusted-data wrapper expanded only in memory |
+| Native catalog leakage | Bounded catalog child emits only provider/model IDs and labels; it never reads the credential document or calls a provider |
 
 ## Explicit non-boundaries
 
@@ -57,7 +59,7 @@ conversation config process is absent. Missing or ambiguous evidence leaves
 the execution running and requires recovery; this check never kills a process
 or calls a provider.
 
-In `0.1.0a14`, project/local `CLAUDE.md`, `.claude` hooks, agents, skills, and
+In the current preview, project/local `CLAUDE.md`, `.claude` hooks, agents, skills, and
 declared project MCP are unavailable; only the native user setting source is
 selected until `project_scan`/`project_trust` can enforce that gate.
 Report vulnerabilities privately as described in `SECURITY.md`; never attach

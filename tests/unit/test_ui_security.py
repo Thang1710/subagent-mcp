@@ -287,8 +287,12 @@ def test_static_ui_exposes_only_plain_runtime_controls() -> None:
     assert 'id="circuits-section" hidden' in html
     assert 'id="update-row" hidden' in html
     assert 'id="config-revision"' not in html
-    assert "picker.dataset.modelPicker = 'true'" in javascript
-    assert "Custom exact model ID…" in javascript
+    assert "showModal()" in javascript
+    assert "Model priority" in javascript
+    assert "Advanced: add exact model ID" in javascript
+    assert "draggable = true" in javascript
+    assert "Move up" in javascript
+    assert "Move down" in javascript
     assert "createElement('datalist')" not in javascript
     assert "setHidden(dom.circuitsSection, circuits.length === 0)" in javascript
     assert "setHidden(dom.updateRow" in javascript

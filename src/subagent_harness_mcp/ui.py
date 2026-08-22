@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import hmac
 import ipaddress
 import json
@@ -1312,15 +1313,100 @@ def _runtime_cards(
                 "canEnable": configurable,
                 "locked": not configurable,
                 "capabilities": [_capability_card(str(item)) for item in capabilities],
-                "groups": _runtime_groups(policy, manifest),
+                "groups": _runtime_groups(
+                    policy,
+                    manifest,
+                    model_catalog=record.get("model_catalog", ()),
+                ),
             }
         )
     return cards
 
 
+def _model_priority_field(
+    variants: Sequence[object],
+    manifest: Mapping[str, Any],
+    *,
+    model_catalog: object,
+) -> dict[str, Any]:
+    configured: list[str] = []
+    state_by_model: dict[str, str] = {}
+    for variant in variants:
+        if not isinstance(variant, Mapping):
+            continue
+        model = variant.get("model")
+        if not isinstance(model, str) or not model:
+            continue
+        configured.append(model)
+        availability = variant.get("availability")
+        if isinstance(availability, Mapping) and isinstance(
+            availability.get("state"), str
+        ):
+            state_by_model[model] = str(availability["state"])
+
+    suggested: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def append_option(value: object, label: object) -> None:
+        if not isinstance(value, str) or not value or value in seen:
+            return
+        seen.add(value)
+        state = state_by_model.get(value, "available")
+        suggested.append(
+            {
+                "value": value,
+                "label": label if isinstance(label, str) and label else value,
+                "available": state != "quota_paused",
+                "state": state,
+            }
+        )
+
+    for option in _schema_options(manifest.get("model_schema", {})):
+        append_option(option.get("value"), option.get("label"))
+    if isinstance(model_catalog, Sequence) and not isinstance(
+        model_catalog, (str, bytes, bytearray)
+    ):
+        for option in model_catalog:
+            if isinstance(option, Mapping):
+                append_option(option.get("value"), option.get("label"))
+    labels = {
+        str(option["value"]): str(option["label"])
+        for option in suggested
+        if isinstance(option.get("value"), str)
+    }
+    for model in configured:
+        if model not in seen:
+            append_option(model, model)
+
+    order = configured + [
+        str(option["value"])
+        for option in suggested
+        if option["value"] not in configured
+    ]
+    options_by_value = {str(option["value"]): option for option in suggested}
+    ordered_options = [options_by_value[model] for model in order]
+    for option in ordered_options:
+        option["label"] = labels.get(str(option["value"]), str(option["value"]))
+    return {
+        "id": "model_priority",
+        "label": "Model priority",
+        "kind": "model-priority",
+        "value": order,
+        "options": ordered_options,
+        "required": True,
+        "allowCustom": True,
+        "help": (
+            "Top models are preferred. Explicit quota or credit exhaustion moves "
+            "that model to the bottom for future tasks; the failed task is not retried."
+        ),
+    }
+
+
 def _runtime_groups(
     policy: Mapping[str, Any],
     manifest: Mapping[str, Any],
+    *,
+    model_catalog: object = (),
 ) -> list[dict[str, Any]]:
     rendered_policy = policy if policy else _new_runtime_policy(manifest)
     variants = rendered_policy.get("variants", ())
@@ -1349,22 +1435,11 @@ def _runtime_groups(
         }
     )
     policy_fields.append(
-        {
-            "id": "fallback_models",
-            "label": "Fallback models (in order)",
-            "kind": "textarea",
-            "value": "\n".join(
-                str(item.get("model", ""))
-                for item in variants[1:]
-                if isinstance(item, Mapping) and item.get("model")
-            ),
-            "placeholder": "One exact model ID per line",
-            "required": False,
-            "help": (
-                "Codex uses this order only after the current model explicitly reports "
-                "exhausted quota or credit. Ambiguous failures are never retried."
-            ),
-        }
+        _model_priority_field(
+            variants,
+            manifest,
+            model_catalog=model_catalog,
+        )
     )
     if len(transports) > 1:
         policy_fields.append(
@@ -1387,61 +1462,29 @@ def _runtime_groups(
         )
     if policy_fields:
         groups.append({"id": "policy", "label": "Policy", "fields": policy_fields})
-    for index, variant in enumerate(variants):
-        if not isinstance(variant, Mapping):
-            continue
-        variant_id = str(variant.get("id", index))
-        model_schema = manifest.get("model_schema", {})
-        if not isinstance(model_schema, Mapping):
-            model_schema = {}
-        model_placeholder = model_schema.get(
-            "placeholder", "Choose a model or enter an exact model ID"
-        )
-        model_help = model_schema.get(
-            "description",
-            "Choose a suggested model or enter another exact provider model ID.",
-        )
-        reasoning_fields = _simple_reasoning_fields(variant, manifest, index)
-        if reasoning_fields is None:
-            reasoning_fields = [
-                {
-                    "id": f"variant.{index}.reasoning",
-                    "label": "Provider reasoning JSON",
-                    "kind": "text",
-                    "value": json.dumps(
-                        variant.get("reasoning", {}),
-                        ensure_ascii=False,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        allow_nan=False,
-                    ),
-                    "required": True,
-                    "format": "json-object",
-                    "help": "Validated by the selected adapter's provider-native schema.",
-                }
-            ]
-        groups.append(
+    primary = next((item for item in variants if isinstance(item, Mapping)), {})
+    reasoning_fields = _simple_reasoning_fields(primary, manifest, 0)
+    if reasoning_fields is None:
+        reasoning_fields = [
             {
-                "id": f"variant-{index}",
-                "label": (
-                    ("Model & reasoning" if reasoning_fields else "Model")
-                    if len(variants) == 1
-                    else f"Variant {variant_id}"
+                "id": "variant.0.reasoning",
+                "label": "Provider reasoning JSON",
+                "kind": "text",
+                "value": json.dumps(
+                    primary.get("reasoning", {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
                 ),
-                "fields": [
-                    {
-                        "id": f"variant.{index}.model",
-                        "label": "Model",
-                        "kind": "model",
-                        "value": variant.get("model", ""),
-                        "options": _schema_options(model_schema),
-                        "required": True,
-                        "placeholder": str(model_placeholder),
-                        "help": str(model_help),
-                    },
-                    *reasoning_fields,
-                ],
+                "required": True,
+                "format": "json-object",
+                "help": "Applied to every model in this runtime's priority order.",
             }
+        ]
+    if reasoning_fields:
+        groups.append(
+            {"id": "reasoning", "label": "Reasoning", "fields": reasoning_fields}
         )
     context = rendered_policy.get("context")
     if isinstance(context, Mapping):
@@ -1511,7 +1554,7 @@ def _apply_runtime_patch(
         transports = _manifest_strings(manifests.get(runtime_id, {}), "supported_transports")
         has_transport = len(transports) == 1 or "transport" in options
         if creating and (
-            "variant.0.model" not in options
+            "model_priority" not in options
             or not has_required_reasoning
             or not has_transport
         ):
@@ -1519,11 +1562,14 @@ def _apply_runtime_patch(
                 "UI_PATCH_INVALID",
                 "new runtime policy needs model, reasoning, and a supported transport",
             )
-        ordered_options = [
+        ordered_options: list[tuple[object, object]] = []
+        if "model_priority" in options:
+            ordered_options.append(("model_priority", options["model_priority"]))
+        ordered_options.extend(
             (field_id, value)
             for field_id, value in options.items()
-            if str(field_id) != "fallback_models"
-        ]
+            if str(field_id) not in {"model_priority", "fallback_models"}
+        )
         if "fallback_models" in options:
             ordered_options.append(("fallback_models", options["fallback_models"]))
         for field_id, value in ordered_options:
@@ -1533,6 +1579,7 @@ def _apply_runtime_patch(
                 value,
                 manifest=manifests.get(runtime_id, {}),
             )
+        _synchronize_variant_reasoning(policy)
         _validate_runtime_model_order(policy)
 
 
@@ -1559,6 +1606,57 @@ def _apply_runtime_option(
         ):
             raise UiError("UI_PATCH_INVALID", "transport is not supported")
         policy["transport"] = value
+        return
+    if field_id == "model_priority":
+        if not isinstance(value, Sequence) or isinstance(
+            value, (str, bytes, bytearray)
+        ):
+            raise UiError("UI_PATCH_INVALID", "model priority must be an array")
+        models = list(value)
+        if not 1 <= len(models) <= 8:
+            raise UiError(
+                "UI_PATCH_INVALID", "model priority must contain one to eight models"
+            )
+        if any(
+            not isinstance(model, str)
+            or not model.strip()
+            or model != model.strip()
+            or len(model.encode("utf-8")) > 256
+            or any(ord(character) < 32 or ord(character) == 127 for character in model)
+            for model in models
+        ):
+            raise UiError("UI_PATCH_INVALID", "model priority contains an invalid model")
+        if len(models) != len(set(models)):
+            raise UiError("UI_PATCH_INVALID", "model priority contains a duplicate")
+        variants = policy.get("variants")
+        if not isinstance(variants, list):
+            raise UiError("UI_PATCH_INVALID", "model priority is not configurable")
+        existing = {
+            str(item.get("model")): item
+            for item in variants
+            if isinstance(item, dict) and isinstance(item.get("model"), str)
+        }
+        primary_reasoning = (
+            copy.deepcopy(variants[0].get("reasoning", {}))
+            if variants and isinstance(variants[0], dict)
+            else {}
+        )
+        ordered: list[dict[str, Any]] = []
+        for model in models:
+            assert isinstance(model, str)
+            variant = copy.deepcopy(existing.get(model, {}))
+            if not variant:
+                variant = {
+                    "id": f"model-{hashlib.sha256(model.encode('utf-8')).hexdigest()[:12]}",
+                    "model": model,
+                    "reasoning": copy.deepcopy(primary_reasoning),
+                }
+            else:
+                variant["model"] = model
+                variant.setdefault("reasoning", copy.deepcopy(primary_reasoning))
+            ordered.append(variant)
+        policy["variants"] = ordered
+        policy["selection_mode"] = "lead-selects" if len(ordered) > 1 else "fixed"
         return
     if field_id == "fallback_models":
         if not isinstance(value, str):
@@ -1650,6 +1748,20 @@ def _apply_runtime_option(
         context[key] = _coerce_editable_value(context[key], value)
         return
     raise UiError("UI_PATCH_INVALID", "runtime option is not recognized")
+
+
+def _synchronize_variant_reasoning(policy: Mapping[str, Any]) -> None:
+    variants = policy.get("variants", ())
+    if (
+        not isinstance(variants, list)
+        or not variants
+        or not isinstance(variants[0], dict)
+    ):
+        return
+    reasoning = copy.deepcopy(variants[0].get("reasoning", {}))
+    for variant in variants[1:]:
+        if isinstance(variant, dict):
+            variant["reasoning"] = copy.deepcopy(reasoning)
 
 
 def _validate_runtime_model_order(policy: Mapping[str, Any]) -> None:

@@ -19,6 +19,11 @@ TERMINAL_EXECUTION_STATES = frozenset(
 RESULT_CAPSULE_MAX_CHARS = 512
 RESULT_SLICE_DEFAULT_CHARS = 4_096
 RESULT_SLICE_MAX_CHARS = 8_192
+PROMPT_MAX_BYTES = 128 * 1024
+ROUGH_TOKEN_ESTIMATE_BASIS = (
+    "content-only rough estimate: ceil(utf8_bytes / 3);"
+    " not provider billing or a tokenizer claim"
+)
 
 
 class ContractError(ValueError):
@@ -330,7 +335,7 @@ class TaskPacket:
 
     def __post_init__(self) -> None:
         validate_bounded_text(self.title, "task.title", 512, strip=False)
-        validate_bounded_text(self.prompt, "task.prompt", 128 * 1024, strip=False)
+        validate_bounded_text(self.prompt, "task.prompt", PROMPT_MAX_BYTES, strip=False)
         validate_bounded_text(self.role, "task.role", 128, strip=False)
         _validate_text_collection(
             self.acceptance_criteria,
@@ -372,6 +377,83 @@ class SpawnRequest:
         _validate_text_collection(self.permissions, "permissions", max_items=32, allow_empty=True)
 
 
+def rough_token_estimate(utf8_bytes: int) -> int:
+    """Content-only comparison signal: ``ceil(utf8_bytes / 3)``.
+
+    This is not provider billing and not a tokenizer claim. Exact token use
+    still depends on the controller model and tool-schema overhead.
+    """
+
+    if isinstance(utf8_bytes, bool) or not isinstance(utf8_bytes, int):
+        raise ValueError("utf8_bytes must be an integer")
+    if utf8_bytes < 0:
+        raise ValueError("utf8_bytes must be nonnegative")
+    return (utf8_bytes + 2) // 3
+
+
+def content_transfer_metrics(
+    full_text: str,
+    compact_text: str | None,
+) -> dict[str, Any]:
+    """Exact UTF-8 byte counts plus labelled rough token comparison values."""
+
+    full_bytes = len(full_text.encode("utf-8"))
+    compact_bytes = 0 if not compact_text else len(compact_text.encode("utf-8"))
+    full_tokens = rough_token_estimate(full_bytes)
+    compact_tokens = rough_token_estimate(compact_bytes)
+    return {
+        "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+        "full_utf8_bytes": full_bytes,
+        "compact_utf8_bytes": compact_bytes,
+        "rough_tokens_full": full_tokens,
+        "rough_tokens_compact": compact_tokens,
+        "rough_tokens_saved": max(full_tokens - compact_tokens, 0),
+    }
+
+
+def slice_transfer_metrics(text: str) -> dict[str, Any]:
+    """Exact slice character/byte counts plus the same content-only estimate."""
+
+    raw_bytes = len(text.encode("utf-8"))
+    return {
+        "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+        "chars": len(text),
+        "utf8_bytes": raw_bytes,
+        "rough_tokens": rough_token_estimate(raw_bytes),
+    }
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReference:
+    """Hash-bound pointer to one persisted redacted result artifact.
+
+    The reference alone is durable state; artifact text is expanded only in
+    memory by the service for the target adapter request.
+    """
+
+    conversation_id: str
+    execution_id: str
+    expected_sha256: str
+
+    def __post_init__(self) -> None:
+        validate_identifier(self.conversation_id, "artifact.conversation_id")
+        validate_identifier(self.execution_id, "artifact.execution_id")
+        if not isinstance(self.expected_sha256, str) or len(self.expected_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in self.expected_sha256
+        ):
+            raise ContractError(
+                "REQUEST_INVALID",
+                "artifact.expected_sha256 must be lowercase SHA-256",
+            )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "conversation_id": self.conversation_id,
+            "execution_id": self.execution_id,
+            "expected_sha256": self.expected_sha256,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class SendRequest:
     request_id: str
@@ -379,14 +461,19 @@ class SendRequest:
     prompt: str
     reply_to: str | None = None
     answers: Mapping[str, Any] = field(default_factory=dict)
+    artifact: ArtifactReference | None = None
 
     def __post_init__(self) -> None:
         validate_identifier(self.request_id, "request_id", 256)
         validate_identifier(self.conversation_id, "conversation_id")
-        validate_bounded_text(self.prompt, "prompt", 128 * 1024, strip=False)
+        validate_bounded_text(self.prompt, "prompt", PROMPT_MAX_BYTES, strip=False)
         if self.reply_to is not None:
             validate_identifier(self.reply_to, "reply_to", 256)
         validate_json_object(self.answers, "answers", 64 * 1024)
+        if self.artifact is not None and not isinstance(self.artifact, ArtifactReference):
+            raise ContractError(
+                "REQUEST_INVALID", "artifact must be an ArtifactReference"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -558,14 +645,19 @@ def result_artifact_metadata(
         "char_count": len(text),
     }
     capsule_at = text.casefold().find("capsule:")
+    compact_text: str | None = None
     if capsule_at >= 0:
         capsule = text[capsule_at + len("capsule:") :].splitlines()[0].strip()
         if capsule:
-            metadata["capsule"] = capsule[:RESULT_CAPSULE_MAX_CHARS]
+            compact_text = capsule[:RESULT_CAPSULE_MAX_CHARS]
+            metadata["capsule"] = compact_text
+            metadata["transfer_metrics"] = content_transfer_metrics(text, compact_text)
             return metadata
     preview = " ".join(text.split())[:RESULT_CAPSULE_MAX_CHARS]
     if preview:
         metadata["preview"] = preview
+        compact_text = preview
+    metadata["transfer_metrics"] = content_transfer_metrics(text, compact_text)
     return metadata
 
 

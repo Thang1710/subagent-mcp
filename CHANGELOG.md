@@ -2,6 +2,23 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a20 - 2026-08-22
+
+- Replace exact-model text entry and fallback textareas with one accessible
+  model-priority popup: native catalog names, drag-and-drop ordering, keyboard
+  and touch-friendly move controls, plus an advanced exact-ID path.
+- Read DeepSeek Harness's own official and configured provider catalog without
+  resolving credentials or calling a model, and mount both official DeepSeek
+  and pi-ai provider adapters in native ACP sessions.
+- Persistently move an exact model to the bottom after terminal quota or
+  forbidden-credit evidence, without retrying the failed task or reacting to
+  ambiguous errors.
+- Keep ambiguous no-overage evidence visibly unknown and safety-paused without
+  labelling it as exhausted quota or changing the saved model order.
+- Allow `agent_send` to relay one hash-bound successful result between two
+  conversations in the same verified workspace. Full report text is expanded
+  only in memory; durable state keeps the reference and transfer metrics.
+
 ## 0.1.0a19 - 2026-08-22
 
 - Recover a connection-owned DeepSeek execution left running after its MCP

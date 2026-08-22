@@ -85,6 +85,73 @@ class ConfigStore:
             raise ConfigError("CONFIG_WRITE_FAILED", "config write failed") from exc
         return copy.deepcopy(candidate)
 
+    def set_variant_quota_state(
+        self,
+        runtime_id: str,
+        variant_id: str,
+        *,
+        paused: bool,
+        reason_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Persist one exact model's quota state and demote it when paused."""
+
+        _require_bounded_text(runtime_id, "runtime id", 128)
+        _require_bounded_text(variant_id, "variant id", 128)
+        if type(paused) is not bool:
+            raise ConfigError("CONFIG_INVALID", "paused must be boolean")
+        if paused:
+            _require_bounded_text(reason_code, "quota reason code", 128)
+        try:
+            with _PROCESS_CONFIG_LOCK:
+                with _exclusive_file_lock(
+                    self._paths.config_file.with_name("config.json.lock"),
+                    timeout_seconds=_LOCK_TIMEOUT_SECONDS,
+                ):
+                    current = _read_config(self._paths.config_file)
+                    candidate = copy.deepcopy(current)
+                    policies = candidate.get("runtimes")
+                    policy = policies.get(runtime_id) if isinstance(policies, dict) else None
+                    variants = policy.get("variants") if isinstance(policy, dict) else None
+                    if not isinstance(variants, list):
+                        return copy.deepcopy(current)
+                    index = next(
+                        (
+                            position
+                            for position, item in enumerate(variants)
+                            if isinstance(item, dict) and item.get("id") == variant_id
+                        ),
+                        None,
+                    )
+                    if index is None:
+                        return copy.deepcopy(current)
+                    variant = variants[index]
+                    if paused:
+                        variant["availability"] = {
+                            "state": "quota_paused",
+                            "reason_code": reason_code,
+                        }
+                        if index != len(variants) - 1:
+                            variants.append(variants.pop(index))
+                    else:
+                        availability = variant.get("availability")
+                        if (
+                            isinstance(availability, dict)
+                            and availability.get("state") == "quota_paused"
+                        ):
+                            variant.pop("availability", None)
+                    if candidate == current:
+                        return copy.deepcopy(current)
+                    candidate["revision"] = current["revision"] + 1
+                    validate_config(candidate)
+                    _atomic_write_bytes(self._paths.config_file, _encode_config(candidate))
+                    return copy.deepcopy(candidate)
+        except TimeoutError as exc:
+            raise ConfigError("CONFIG_LOCK_TIMEOUT", "config is busy") from exc
+        except ConfigError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise ConfigError("CONFIG_WRITE_FAILED", "config write failed") from exc
+
 
 def validate_config(document: object) -> None:
     if not isinstance(document, dict):

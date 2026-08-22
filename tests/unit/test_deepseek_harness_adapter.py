@@ -76,6 +76,8 @@ def _binding(tmp_path: Path) -> DshBinding:
     for name in (
         "settings-file",
         "credentials-local",
+        "llm",
+        "llm-deepseek",
         "llm-pi-ai",
         "sandbox-local",
         "sandbox-policy",
@@ -146,6 +148,74 @@ def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None
     assert context.attestation["permission_mode"] == "workspace-write"
     assert "resume_after_restart" in context.capability_gaps
     assert "provider_quota_evidence" in context.capability_gaps
+
+
+def test_native_model_catalog_is_cached_by_binding_and_settings_identity(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path)
+    settings = tmp_path / "settings.yaml"
+    settings.write_text("llm-pi-ai: {}\n", encoding="utf-8")
+    calls: list[tuple[DshBinding, Path]] = []
+
+    async def catalog_reader(
+        current: DshBinding,
+        settings_path: Path,
+    ) -> tuple[dict[str, str], ...]:
+        calls.append((current, settings_path))
+        return (
+            {
+                "value": "deepseek-official::deepseek-v4-flash",
+                "label": "DeepSeek-V4-Flash",
+                "provider": "deepseek-official",
+                "model": "deepseek-v4-flash",
+            },
+            {
+                "value": "ox-provider::stealth/ox-alpha",
+                "label": "OX Alpha - OpenRouter",
+                "provider": "ox-provider",
+                "model": "stealth/ox-alpha",
+            },
+        )
+
+    adapter = DeepSeekHarnessAdapter(
+        binding_locator=lambda: binding,
+        catalog_reader=catalog_reader,
+        settings_path_locator=lambda: settings,
+        data_root=tmp_path / "data",
+    )
+
+    first = asyncio.run(adapter.model_catalog())
+    second = asyncio.run(adapter.model_catalog())
+    settings.write_text("llm-pi-ai:\n  providers: {}\n", encoding="utf-8")
+    third = asyncio.run(adapter.model_catalog())
+
+    assert [item["value"] for item in first] == [
+        "deepseek-official::deepseek-v4-flash",
+        "ox-provider::stealth/ox-alpha",
+    ]
+    assert second == first == third
+    assert len(calls) == 2
+    assert calls[0][1] == settings
+
+
+def test_generated_acp_config_mounts_every_catalog_provider_adapter(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path)
+
+    rendered = render_dsh_config(
+        binding,
+        provider="deepseek-official",
+        model="deepseek-v4-flash",
+        workspace_path=str(tmp_path),
+        persistence_root=tmp_path / "sessions",
+        permission_mode="read-only",
+    )
+
+    assert binding.plugins["llm-deepseek"].resolve().as_uri() in rendered
+    assert binding.plugins["llm-pi-ai"].resolve().as_uri() in rendered
+    assert rendered.index('id: llm-deepseek') < rendered.index('id: acp-agent')
 
 
 @pytest.mark.parametrize(

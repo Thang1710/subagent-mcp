@@ -158,6 +158,14 @@ class OrphanCleanupAdapter(Protocol):
 
 
 @runtime_checkable
+class ModelCatalogAdapter(Protocol):
+    """Optional read-only native model directory published by an adapter."""
+
+    async def model_catalog(self) -> tuple[Mapping[str, Any], ...]:
+        ...
+
+
+@runtime_checkable
 class CanaryAdapter(Adapter, Protocol):
     """Optional bootstrap implemented only by live-capable adapters."""
 

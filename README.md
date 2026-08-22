@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a19` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a20` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -25,12 +25,11 @@ silently opts into usage credits or paid overage.
   Current provider availability is shown separately in the localhost UI.
 - **DeepSeek Harness — In development.** The current source includes a first
   native ACP vertical slice. It discovers a standard Windows Node install even
-  when an MCP client filters `ProgramFiles`, and
-  the source checkout linked by the native `~/.dsh` profile without depending
-  on a separate web launcher. Initial provider-backed review proof has passed;
-  broader provider and lifecycle coverage remains in progress. Billing may use
-  credits or unlimited offers the user already authorizes; auto-top-up and
-  overage are never enabled.
+  when an MCP client filters `ProgramFiles`, and follows the source checkout
+  linked by the native `~/.dsh` profile without depending on a separate web
+  launcher. Broader provider and lifecycle coverage remains in progress.
+  Billing may use credits or unlimited offers the user already authorizes;
+  auto-top-up and overage are never enabled.
 
 ## Install
 
@@ -44,7 +43,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a19
+uv tool install subagent-harness-mcp==0.1.0a20
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -56,7 +55,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a19` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a20` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -101,7 +100,7 @@ so the running Python environment does not hold package files open:
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a19
+uv tool install --reinstall subagent-harness-mcp==0.1.0a20
 ```
 
 ## Use it from Codex
@@ -119,17 +118,20 @@ harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
 ### Configure DeepSeek Harness (development)
 
 Install and configure DeepSeek Harness normally, then open the Subagent MCP UI
-and enable **DeepSeek Harness**. Enter the exact native model as
-`provider-name::model-id`; Subagent MCP does not maintain a provider or model
-allowlist. The adapter uses DeepSeek Harness's native ACP transport, not its web
-UI.
+and enable **DeepSeek Harness**. Subagent MCP reads the model catalog published
+by the installed native harness, so its official DeepSeek routes and configured
+custom providers appear by name; typing an ID is needed only for an advanced
+custom route. The adapter uses DeepSeek Harness's native ACP transport, not its
+web UI.
 
-The primary model is followed by an optional **Fallback models (in order)**
-list. Enter one exact model ID per line. Codex moves to the next configured
-variant only after the current provider explicitly reports exhausted quota or
-credit (`QUOTA_PAUSED`); ambiguous failures, timeouts, and crashes are reported
-without an automatic retry. No model, including Ox Alpha, is selected by
-default for public users.
+Open **Model priority** to see the complete ordered model stack. Drag rows, or
+use the accessible up/down controls, to choose which model Codex should prefer.
+When the current provider explicitly reports exhausted quota or credit
+(`QUOTA_PAUSED`), Subagent MCP persistently moves that exact model to the bottom
+so the next configured model becomes first for future tasks. It does not retry
+the failed task, and ambiguous failures, timeouts, and crashes do not change the
+order. Public installs keep the runtime disabled until the user reviews and
+saves this configuration.
 
 Enabling this runtime authorizes the selected route to consume quota from an
 existing subscription or unlimited offer, or an already funded provider
@@ -152,6 +154,10 @@ required input, or a timeout. A completed agent keeps its full redacted report
 in local product state, bounded at 65,536 characters. Compact status returns a
 short capsule or preview plus its SHA-256 and character count; Codex can use
 `agent_result_read` to pull only the hash-bound 4,096-character slices it needs.
+For cross-agent review, `agent_send` can relay one successful result by its
+conversation, execution, and SHA-256 reference. The service verifies both
+agents used the same workspace and expands the complete report only in memory;
+durable request state keeps the small reference, not another copy of the text.
 Transport compression such as gzip can reduce network bytes but does not reduce
 model tokens after decompression, so Subagent MCP avoids opaque compressed text.
 
@@ -194,9 +200,9 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a19` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a20` |
 | Claude Code native adapter | Ready in the Windows preview |
-| Provider model selection | Opaque native model IDs; user-ordered fallback only after explicit quota exhaustion |
+| Provider model selection | Native catalog names with a user-ordered priority stack; exact IDs remain available under Advanced |
 
 Live provider availability still depends on the user's installed native
 harness, authentication, selected model, and current provider limits.

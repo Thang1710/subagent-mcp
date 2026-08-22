@@ -10,6 +10,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 
 from subagent_harness_mcp.adapters import claude_code as claude_code_module
+from subagent_harness_mcp.adapters import deepseek_harness as deepseek_harness_module
 from subagent_harness_mcp.adapters.fake import FakeAdapter
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigError, ConfigStore
@@ -195,6 +196,14 @@ def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
     }
     assert snapshot["health"]["state"] == "unavailable"
     assert snapshot["health"]["label"] == "Unavailable"
+    fields = {
+        field["id"]: field
+        for group in snapshot["runtimes"][0]["groups"]
+        for field in group["fields"]
+    }
+    configured = fields["model_priority"]["options"][0]
+    assert configured["state"] == "available"
+    assert configured["available"] is True
 
 
 def test_ui_provider_refresh_reports_unknown_without_backend_details(
@@ -308,7 +317,7 @@ def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) ->
                 "fake": {
                     "enabled": False,
                     "options": {
-                        "variant.0.model": "provider/model-beta",
+                        "model_priority": ["provider/model-beta"],
                         "variant.0.reasoning": '{"mode":"adapter-deep"}',
                     },
                 }
@@ -353,7 +362,7 @@ def test_real_loopback_ui_reads_and_cas_updates_shared_config(tmp_path: Path) ->
     assert status == 200
     assert runtime["id"] == "fake"
     assert runtime["enabled"] is True
-    assert fields["variant.0.model"]["value"] == "provider/model-alpha"
+    assert fields["model_priority"]["value"] == ["provider/model-alpha"]
     assert fields["variant.0.reasoning"]["value"] == '{"mode":"provider-native"}'
     assert snapshot["trust"][0]["trusted"] is False
     assert stale == 409
@@ -390,6 +399,42 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         )
 
     monkeypatch.setattr(claude_code_module, "ClaudeCodeAdapter", guarded_adapter)
+    real_deepseek_adapter = deepseek_harness_module.DeepSeekHarnessAdapter
+
+    class CatalogDeepSeekAdapter(real_deepseek_adapter):
+        async def model_catalog(self) -> tuple[dict[str, str], ...]:
+            return (
+                {
+                    "value": "deepseek-official::deepseek-v4-flash",
+                    "label": "DeepSeek-V4-Flash",
+                    "provider": "deepseek-official",
+                    "model": "deepseek-v4-flash",
+                },
+                {
+                    "value": "deepseek-official::deepseek-v4-pro",
+                    "label": "DeepSeek-V4-Pro",
+                    "provider": "deepseek-official",
+                    "model": "deepseek-v4-pro",
+                },
+                {
+                    "value": "deepseek-official::deepseek-v4-flash-vision-exp",
+                    "label": "DeepSeek-V4-Flash-Vision-Exp",
+                    "provider": "deepseek-official",
+                    "model": "deepseek-v4-flash-vision-exp",
+                },
+                {
+                    "value": "ox-provider::stealth/ox-alpha",
+                    "label": "OX Alpha - OpenRouter",
+                    "provider": "ox-provider",
+                    "model": "stealth/ox-alpha",
+                },
+            )
+
+    monkeypatch.setattr(
+        deepseek_harness_module,
+        "DeepSeekHarnessAdapter",
+        CatalogDeepSeekAdapter,
+    )
 
     backend = create_local_backend()
     fresh = backend.snapshot()
@@ -427,17 +472,23 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     }
     assert set(deepseek_fields) == {
         "delegation_priority",
-        "fallback_models",
-        "variant.0.model",
+        "model_priority",
     }
     assert deepseek_fields["delegation_priority"]["value"] == 0
-    assert deepseek_fields["fallback_models"]["kind"] == "textarea"
-    assert deepseek_fields["fallback_models"]["value"] == ""
-    assert deepseek_fields["variant.0.model"]["kind"] == "model"
-    assert deepseek_fields["variant.0.model"]["placeholder"] == (
-        "provider-name::model-id"
-    )
-    assert "provider::model" in deepseek_fields["variant.0.model"]["help"]
+    deepseek_priority = deepseek_fields["model_priority"]
+    assert deepseek_priority["kind"] == "model-priority"
+    assert deepseek_priority["value"] == [
+        "deepseek-official::deepseek-v4-flash",
+        "deepseek-official::deepseek-v4-pro",
+        "deepseek-official::deepseek-v4-flash-vision-exp",
+        "ox-provider::stealth/ox-alpha",
+    ]
+    assert [item["label"] for item in deepseek_priority["options"]] == [
+        "DeepSeek-V4-Flash",
+        "DeepSeek-V4-Pro",
+        "DeepSeek-V4-Flash-Vision-Exp",
+        "OX Alpha - OpenRouter",
+    ]
 
     fields = {
         field["id"]: field
@@ -446,13 +497,12 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     }
     assert set(fields) == {
         "delegation_priority",
-        "fallback_models",
-        "variant.0.model",
+        "model_priority",
         "variant.0.reasoning.effort",
     }
-    model_field = fields["variant.0.model"]
-    assert model_field["label"] == "Model"
-    assert model_field["kind"] == "model"
+    model_field = fields["model_priority"]
+    assert model_field["label"] == "Model priority"
+    assert model_field["kind"] == "model-priority"
     assert [option["value"] for option in model_field["options"]] == [
         "claude-opus-5",
         "claude-sonnet-5",
@@ -481,13 +531,13 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
             "claude-code": {
                 "enabled": True,
                 "options": {
-                    "variant.0.model": model,
+                    "model_priority": [
+                        model,
+                        "future/provider-fallback-1@2026.08",
+                        "future/provider-fallback-2@2026.08",
+                    ],
                     "variant.0.reasoning.effort": reasoning["effort"],
                     "delegation_priority": 50,
-                    "fallback_models": (
-                        "future/provider-fallback-1@2026.08\n"
-                        "future/provider-fallback-2@2026.08"
-                    ),
                 },
             }
         }
@@ -511,12 +561,12 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     assert updated["revision"] == 1
     assert updated_claude["enabled"] is True
     assert updated_fields["delegation_priority"]["value"] == 50
-    assert updated_fields["variant.0.model"]["value"] == model
+    assert updated_fields["model_priority"]["value"][:3] == [
+        model,
+        "future/provider-fallback-1@2026.08",
+        "future/provider-fallback-2@2026.08",
+    ]
     assert updated_fields["variant.0.reasoning.effort"]["value"] == "xhigh"
-    assert updated_fields["fallback_models"]["value"] == (
-        "future/provider-fallback-1@2026.08\n"
-        "future/provider-fallback-2@2026.08"
-    )
 
     persisted = ConfigStore(
         resolve_paths(
@@ -524,29 +574,27 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
             os_name="nt",
         )
     ).load()
-    assert persisted["runtimes"]["claude-code"] == {
+    persisted_policy = persisted["runtimes"]["claude-code"]
+    assert persisted_policy["enabled"] is True
+    assert persisted_policy["delegation_priority"] == 50
+    assert persisted_policy["fallback"] is False
+    assert persisted_policy["selection_mode"] == "lead-selects"
+    assert persisted_policy["transport"] == "managed-sdk"
+    assert [item["model"] for item in persisted_policy["variants"]][:3] == [
+        model,
+        "future/provider-fallback-1@2026.08",
+        "future/provider-fallback-2@2026.08",
+    ]
+    assert all(
+        item["reasoning"] == reasoning for item in persisted_policy["variants"]
+    )
+    assert persisted_policy | {"variants": []} == {
         "enabled": True,
         "delegation_priority": 50,
         "fallback": False,
         "selection_mode": "lead-selects",
         "transport": "managed-sdk",
-        "variants": [
-            {
-                "id": "default",
-                "model": model,
-                "reasoning": reasoning,
-            },
-            {
-                "id": "fallback-1",
-                "model": "future/provider-fallback-1@2026.08",
-                "reasoning": reasoning,
-            },
-            {
-                "id": "fallback-2",
-                "model": "future/provider-fallback-2@2026.08",
-                "reasoning": reasoning,
-            },
-        ],
+        "variants": [],
     }
 
 

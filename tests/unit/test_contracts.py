@@ -6,20 +6,29 @@ from pathlib import Path
 
 import pytest
 
+import dataclasses
+
 from subagent_harness_mcp.contracts import (
     ADAPTER_API_VERSION,
     AdapterManifest,
     AgentDescriptor,
     AgentEvent,
     AgentStatus,
+    ArtifactReference,
     ContractError,
     ExecutionState,
+    PROMPT_MAX_BYTES,
     ResultReadRequest,
+    ROUGH_TOKEN_ESTIMATE_BASIS,
+    SendRequest,
     SpawnRequest,
     TaskPacket,
     WaitRequest,
     WaitTarget,
     require_execution_transition,
+    result_artifact_metadata,
+    rough_token_estimate,
+    slice_transfer_metrics,
     validate_model_id,
 )
 
@@ -141,6 +150,21 @@ def test_agent_status_compact_projection_uses_result_artifact_metadata() -> None
                 "sha256": digest,
                 "char_count": len(text),
                 "capsule": "bounded answer",
+                "transfer_metrics": {
+                    "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+                    "full_utf8_bytes": len(text.encode("utf-8")),
+                    "compact_utf8_bytes": len("bounded answer".encode("utf-8")),
+                    "rough_tokens_full": rough_token_estimate(
+                        len(text.encode("utf-8"))
+                    ),
+                    "rough_tokens_compact": rough_token_estimate(
+                        len("bounded answer".encode("utf-8"))
+                    ),
+                    "rough_tokens_saved": (
+                        rough_token_estimate(len(text.encode("utf-8")))
+                        - rough_token_estimate(len("bounded answer".encode("utf-8")))
+                    ),
+                },
             }
         },
     }
@@ -251,3 +275,100 @@ def test_spawn_contract_accepts_native_acp_transport() -> None:
     )
 
     assert request.transport == "native-acp"
+
+
+def test_artifact_reference_is_frozen_and_exactly_hash_bound() -> None:
+    reference = ArtifactReference(
+        "conversation-source", "execution-source", "a" * 64
+    )
+
+    assert reference.conversation_id == "conversation-source"
+    assert reference.execution_id == "execution-source"
+    assert reference.expected_sha256 == "a" * 64
+    assert reference.to_dict() == {
+        "conversation_id": "conversation-source",
+        "execution_id": "execution-source",
+        "expected_sha256": "a" * 64,
+    }
+    with pytest.raises(dataclasses.FrozenInstanceError):
+        reference.expected_sha256 = "b" * 64  # type: ignore[misc]
+    for bad_hash in ("A" * 64, "a" * 63, "g" * 64, 123):
+        with pytest.raises(ContractError, match="sha256"):
+            ArtifactReference("conversation-source", "execution-source", bad_hash)
+    with pytest.raises(ContractError, match="conversation_id"):
+        ArtifactReference("", "execution-source", "a" * 64)
+    with pytest.raises(ContractError, match="execution_id"):
+        ArtifactReference("conversation-source", "execution\nid", "a" * 64)
+
+
+def test_send_request_artifact_is_optional_and_backward_compatible() -> None:
+    legacy = SendRequest(
+        request_id="send-1",
+        conversation_id="conversation-1",
+        prompt="Continue.",
+    )
+
+    assert legacy.artifact is None
+    assert PROMPT_MAX_BYTES == 128 * 1024
+
+    relay = SendRequest(
+        request_id="send-2",
+        conversation_id="conversation-target",
+        prompt="Summarize the attached report.",
+        artifact=ArtifactReference(
+            "conversation-source", "execution-source", "a" * 64
+        ),
+    )
+
+    assert relay.artifact is not None
+    assert relay.artifact.execution_id == "execution-source"
+    with pytest.raises(ContractError, match="artifact"):
+        SendRequest(
+            request_id="send-3",
+            conversation_id="conversation-1",
+            prompt="Continue.",
+            artifact={"execution_id": "not-a-reference"},  # type: ignore[arg-type]
+        )
+
+
+def test_rough_token_estimate_is_labelled_content_only_bytes_over_three() -> None:
+    assert "ceil(utf8_bytes / 3)" in ROUGH_TOKEN_ESTIMATE_BASIS
+    assert "not provider billing" in ROUGH_TOKEN_ESTIMATE_BASIS
+    assert rough_token_estimate(0) == 0
+    assert rough_token_estimate(1) == 1
+    assert rough_token_estimate(3) == 1
+    assert rough_token_estimate(4) == 2
+    assert rough_token_estimate(65_535) == 21_845
+
+
+def test_result_artifact_metadata_reports_exact_utf8_bytes_and_rough_tokens() -> None:
+    text = "Rapport détaillé ✓\nsecond line of evidence"
+
+    metadata = result_artifact_metadata("execution-mb", {"text": text})
+
+    assert metadata is not None
+    assert metadata["char_count"] == len(text)
+    preview = " ".join(text.split())[:512]
+    full_bytes = len(text.encode("utf-8"))
+    compact_bytes = len(preview.encode("utf-8"))
+    metrics = metadata["transfer_metrics"]
+    assert metrics == {
+        "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+        "full_utf8_bytes": full_bytes,
+        "compact_utf8_bytes": compact_bytes,
+        "rough_tokens_full": (full_bytes + 2) // 3,
+        "rough_tokens_compact": (compact_bytes + 2) // 3,
+        "rough_tokens_saved": (full_bytes + 2) // 3 - (compact_bytes + 2) // 3,
+    }
+    assert metrics["full_utf8_bytes"] != metadata["char_count"]
+
+
+def test_slice_transfer_metrics_reports_exact_chars_bytes_and_rough_tokens() -> None:
+    metrics = slice_transfer_metrics("héllo ✓")
+
+    assert metrics == {
+        "basis": ROUGH_TOKEN_ESTIMATE_BASIS,
+        "chars": 7,
+        "utf8_bytes": 10,
+        "rough_tokens": 4,
+    }

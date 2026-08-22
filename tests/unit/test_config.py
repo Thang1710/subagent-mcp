@@ -75,6 +75,70 @@ def test_save_increments_revision_and_round_trips_unknown_additive_fields(
     assert saved_again["runtimes"]["claude-code"]["variants"][0]["future_variant"] == "kept"  # type: ignore[index]
 
 
+def test_quota_state_persistently_demotes_exact_variant_without_reassigning_ids(
+    tmp_path: Path,
+) -> None:
+    store = ConfigStore(_paths(tmp_path))
+    document = _document()
+    policy = document["runtimes"]["claude-code"]  # type: ignore[index]
+    policy["selection_mode"] = "lead-selects"
+    policy["variants"] = [
+        {"id": "model-a", "model": "provider/model-a", "reasoning": {}},
+        {"id": "model-b", "model": "provider/model-b", "reasoning": {}},
+        {"id": "model-c", "model": "provider/model-c", "reasoning": {}},
+    ]
+    store.save(document, expected_revision=0)
+
+    changed = store.set_variant_quota_state(
+        "claude-code",
+        "model-a",
+        paused=True,
+        reason_code="QUOTA_PAUSED",
+    )
+
+    variants = changed["runtimes"]["claude-code"]["variants"]
+    assert changed["revision"] == 2
+    assert [item["id"] for item in variants] == ["model-b", "model-c", "model-a"]
+    assert [item["model"] for item in variants] == [
+        "provider/model-b",
+        "provider/model-c",
+        "provider/model-a",
+    ]
+    assert variants[-1]["availability"] == {
+        "state": "quota_paused",
+        "reason_code": "QUOTA_PAUSED",
+    }
+
+    available = store.set_variant_quota_state(
+        "claude-code",
+        "model-a",
+        paused=False,
+    )
+
+    assert available["revision"] == 3
+    assert [item["id"] for item in available["runtimes"]["claude-code"]["variants"]] == [
+        "model-b",
+        "model-c",
+        "model-a",
+    ]
+    assert "availability" not in available["runtimes"]["claude-code"]["variants"][-1]
+
+
+def test_quota_state_noop_does_not_rewrite_config_or_revision(tmp_path: Path) -> None:
+    store = ConfigStore(_paths(tmp_path))
+    saved = store.save(_document(), expected_revision=0)
+
+    unchanged = store.set_variant_quota_state(
+        "claude-code",
+        "missing-variant",
+        paused=True,
+        reason_code="QUOTA_PAUSED",
+    )
+
+    assert unchanged == saved
+    assert store.load()["revision"] == 1
+
+
 def test_concurrent_writers_with_same_revision_have_exactly_one_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -11,7 +11,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol
 
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError
 from .base import (
@@ -45,6 +45,8 @@ _QUOTA_EXHAUSTED = re.compile(
 _PACKAGES = {
     "settings-file": "@deepseek-ai/dsh-settings-file",
     "credentials-local": "@deepseek-ai/dsh-credentials-local",
+    "llm": "@deepseek-ai/dsh-llm",
+    "llm-deepseek": "@deepseek-ai/dsh-llm-deepseek",
     "llm-pi-ai": "@deepseek-ai/dsh-llm-pi-ai",
     "sandbox-local": "@deepseek-ai/dsh-sandbox-local",
     "sandbox-policy": "@deepseek-ai/dsh-sandbox-policy",
@@ -96,6 +98,10 @@ class _AcpClient(Protocol):
 
 BindingLocator = Callable[[], DshBinding | None]
 ClientFactory = Callable[[DshLaunch], _AcpClient]
+CatalogReader = Callable[
+    [DshBinding, Path], Awaitable[tuple[Mapping[str, str], ...]]
+]
+SettingsPathLocator = Callable[[], Path]
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +141,8 @@ class DeepSeekHarnessAdapter:
         binding_locator: BindingLocator | None = None,
         client_factory: ClientFactory | None = None,
         process_inventory: ProcessInventory | None = None,
+        catalog_reader: CatalogReader | None = None,
+        settings_path_locator: SettingsPathLocator | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
@@ -150,6 +158,10 @@ class DeepSeekHarnessAdapter:
             )
         )
         self._process_inventory = process_inventory or _windows_process_inventory
+        self._catalog_reader = catalog_reader or _read_dsh_model_catalog
+        self._settings_path_locator = settings_path_locator or _dsh_settings_path
+        self._catalog_identity: tuple[object, ...] | None = None
+        self._catalog_cache: tuple[Mapping[str, str], ...] = ()
         if data_root is None:
             from ..paths import resolve_paths
 
@@ -163,7 +175,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a19",
+            adapter_version="0.1.0a20",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -190,6 +202,23 @@ class DeepSeekHarnessAdapter:
     @property
     def manifest(self) -> AdapterManifest:
         return self._manifest
+
+    async def model_catalog(self) -> tuple[Mapping[str, str], ...]:
+        binding = self._binding_locator()
+        if binding is None:
+            return ()
+        settings_path = self._settings_path_locator()
+        identity = _catalog_file_identity(binding, settings_path)
+        if identity == self._catalog_identity:
+            return self._catalog_cache
+        try:
+            catalog = await self._catalog_reader(binding, settings_path)
+        except Exception:
+            self._catalog_identity = identity
+            return self._catalog_cache
+        self._catalog_identity = identity
+        self._catalog_cache = tuple(catalog[:128])
+        return self._catalog_cache
 
     async def probe(self) -> ProbeResult:
         if sys.platform != "win32":
@@ -679,7 +708,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a19"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a20"},
                 },
             ),
             timeout=self._timeout,
@@ -892,6 +921,148 @@ def _fold_command(value: object) -> str:
     return str(value).replace("/", "\\").casefold()
 
 
+def _dsh_settings_path() -> Path:
+    configured = os.environ.get("DSH_HOME")
+    root = Path(configured) if configured else Path.home() / ".dsh"
+    return root / "settings.yaml"
+
+
+def _catalog_file_identity(
+    binding: DshBinding, settings_path: Path
+) -> tuple[object, ...]:
+    try:
+        resolved = settings_path.resolve(strict=True)
+        stat = resolved.stat()
+        return (binding.pair_key, str(resolved), stat.st_size, stat.st_mtime_ns)
+    except OSError:
+        return (binding.pair_key, str(settings_path.resolve(strict=False)), "absent")
+
+
+_CATALOG_SCRIPT = r"""
+import { readFile } from 'node:fs/promises';
+const [cordisUrl, llmUrl, deepseekUrl, piUrl, yamlUrl, settingsPath] = process.argv.slice(1);
+const [cordis, llm, deepseek, pi, yamlModule] = await Promise.all([
+  import(cordisUrl), import(llmUrl), import(deepseekUrl), import(piUrl), import(yamlUrl),
+]);
+let document = {};
+try {
+  const parse = yamlModule.parse ?? yamlModule.default?.parse;
+  if (typeof parse !== 'function') throw new Error('yaml parser unavailable');
+  document = parse(await readFile(settingsPath, 'utf8')) ?? {};
+} catch (error) {
+  if (error?.code !== 'ENOENT') throw error;
+}
+const section = (name) => {
+  const value = document?.[name];
+  return value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+};
+const ctx = new cordis.Context();
+try {
+  await ctx.plugin(llm.default ?? llm.LlmRuntime);
+  await ctx.plugin(deepseek, section('llm-deepseek'));
+  await ctx.plugin(pi, section('llm-pi-ai'));
+  const rows = [];
+  for (const provider of ctx.llm.listProviders()) {
+    for (const model of await ctx.llm.listModels(provider.id)) {
+      rows.push({
+        value: `${provider.id}::${model.id}`,
+        label: model.name || model.id,
+        provider: provider.id,
+        model: model.id,
+      });
+    }
+  }
+  process.stdout.write(JSON.stringify(rows));
+} finally {
+  await ctx.fiber.dispose();
+}
+"""
+
+
+async def _read_dsh_model_catalog(
+    binding: DshBinding, settings_path: Path
+) -> tuple[Mapping[str, str], ...]:
+    """Read DSH's native catalog without resolving credentials or calling a model."""
+
+    try:
+        source_root = binding.acp_bin_path.resolve(strict=True).parents[4]
+        cordis = (source_root / "vendor" / "cordis" / "lib" / "index.js").resolve(
+            strict=True
+        )
+        llm = binding.plugins["llm"].resolve(strict=True)
+        deepseek = binding.plugins["llm-deepseek"].resolve(strict=True)
+        pi_ai = binding.plugins["llm-pi-ai"].resolve(strict=True)
+        yaml_entry = (
+            binding.plugins["settings-file"].resolve(strict=True).parents[1]
+            / "node_modules"
+            / "yaml"
+            / "dist"
+            / "index.js"
+        ).resolve(strict=True)
+    except (OSError, KeyError, IndexError) as exc:
+        raise RuntimeError("DeepSeek catalog modules are unavailable") from exc
+
+    process = await asyncio.create_subprocess_exec(
+        str(binding.node_path),
+        "--input-type=module",
+        "-e",
+        _CATALOG_SCRIPT,
+        cordis.as_uri(),
+        llm.as_uri(),
+        deepseek.as_uri(),
+        pi_ai.as_uri(),
+        yaml_entry.as_uri(),
+        str(settings_path),
+        cwd=str(source_root),
+        env=_dsh_env("read-only"),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    try:
+        stdout, _stderr = await asyncio.wait_for(process.communicate(), timeout=15.0)
+    except (TimeoutError, asyncio.TimeoutError) as exc:
+        process.kill()
+        await process.wait()
+        raise RuntimeError("DeepSeek catalog read timed out") from exc
+    if process.returncode != 0 or len(stdout) > 256 * 1024:
+        raise RuntimeError("DeepSeek catalog read failed")
+    try:
+        raw = json.loads(stdout.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("DeepSeek catalog returned invalid data") from exc
+    if not isinstance(raw, list):
+        raise RuntimeError("DeepSeek catalog returned invalid data")
+
+    result: list[Mapping[str, str]] = []
+    seen: set[str] = set()
+    for item in raw[:128]:
+        if not isinstance(item, Mapping):
+            continue
+        value = item.get("value")
+        label = item.get("label")
+        provider = item.get("provider")
+        model = item.get("model")
+        if not all(isinstance(part, str) and part.strip() for part in (value, label, provider, model)):
+            continue
+        assert isinstance(value, str)
+        assert isinstance(label, str)
+        assert isinstance(provider, str)
+        assert isinstance(model, str)
+        if (
+            value != f"{provider}::{model}"
+            or value in seen
+            or len(value.encode("utf-8")) > 256
+            or len(label.encode("utf-8")) > 256
+        ):
+            continue
+        seen.add(value)
+        result.append(
+            {"value": value, "label": label, "provider": provider, "model": model}
+        )
+    return tuple(result)
+
+
 def locate_dsh_binding() -> DshBinding | None:
     """Resolve a reviewed DSH source install without changing user configuration."""
 
@@ -952,7 +1123,9 @@ def render_dsh_config(
   name: {uri('settings-file')}
 - id: credentials
   name: {uri('credentials-local')}
-- id: llm
+- id: llm-deepseek
+  name: {uri('llm-deepseek')}
+- id: llm-pi-ai
   name: {uri('llm-pi-ai')}
 - id: sandbox
   name: {uri('sandbox-local')}

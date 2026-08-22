@@ -601,6 +601,7 @@
       label: str(pick(raw, 'label', 'title', 'name', 'value')) || str(value),
       available: available === undefined ? raw.disabled !== true : available === true,
       detail: str(pick(raw, 'detail', 'description', 'help')),
+      state: str(pick(raw, 'state', 'status')),
       when: pick(raw, 'when', 'showWhen', 'visibleWhen', 'dependsOn', 'variants') || null,
       requires: toList(pick(raw, 'requires', 'requiresCapability', 'capability')).map(str),
     };
@@ -615,6 +616,7 @@
     if (['boolean', 'bool', 'toggle', 'checkbox', 'switch'].indexOf(raw) !== -1) return 'boolean';
     if (['number', 'integer', 'int', 'float', 'range'].indexOf(raw) !== -1) return 'number';
     if (['select', 'choice', 'enum', 'options', 'variant'].indexOf(raw) !== -1) return 'select';
+    if (['model-priority', 'model_priority'].indexOf(raw) !== -1) return 'model-priority';
     if (['model', 'suggested-text'].indexOf(raw) !== -1) return 'model';
     if (['text', 'string'].indexOf(raw) !== -1) return 'text';
     if (options.length) return 'select';
@@ -637,6 +639,7 @@
       ? (raw.value !== undefined ? raw.value : pick(raw, 'current', 'selected', 'default'))
       : undefined;
     if (kind === 'boolean') value = value === true;
+    if (kind === 'model-priority') value = asArray(value).map(str).filter(Boolean);
     return {
       id,
       label: str(pick(raw, 'label', 'title', 'name')) || humanize(id),
@@ -762,6 +765,13 @@
       select.id = controlId;
       return select;
     }
+    if (field.kind === 'model-priority') {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.id = controlId;
+      button.className = 'model-priority-trigger';
+      return button;
+    }
     if (field.kind === 'textarea') {
       const textarea = document.createElement('textarea');
       textarea.id = controlId;
@@ -776,6 +786,160 @@
     if (field.placeholder) input.placeholder = field.placeholder;
     input.value = field.value === undefined || field.value === null ? '' : String(field.value);
     return input;
+  }
+
+  function moveItem(values, from, to) {
+    if (from === to || from < 0 || to < 0 || from >= values.length || to >= values.length) return;
+    const moved = values.splice(from, 1)[0];
+    values.splice(to, 0, moved);
+  }
+
+  function setupModelPriority(entry, item, controlId) {
+    const dialog = document.createElement('dialog');
+    dialog.className = 'model-priority-dialog';
+    const title = make('h3', null, 'Model priority');
+    title.id = controlId + '-title';
+    dialog.setAttribute('aria-labelledby', title.id);
+    dialog.appendChild(title);
+    dialog.appendChild(make('p', 'model-priority-intro',
+      'Drag models into priority order. The first available model is preferred for future tasks.'));
+
+    const list = make('ol', 'model-priority-list');
+    dialog.appendChild(list);
+
+    const advanced = document.createElement('details');
+    advanced.className = 'model-priority-advanced';
+    advanced.appendChild(make('summary', null, 'Advanced: add exact model ID'));
+    const addRow = make('div', 'model-priority-add');
+    const exact = document.createElement('input');
+    exact.type = 'text';
+    exact.placeholder = 'Exact provider-native model ID';
+    exact.setAttribute('aria-label', 'Exact provider-native model ID');
+    const add = make('button', 'btn btn-quiet', 'Add model');
+    add.type = 'button';
+    const addError = make('p', 'err');
+    setHidden(addError, true);
+    addRow.appendChild(exact);
+    addRow.appendChild(add);
+    advanced.appendChild(addRow);
+    advanced.appendChild(addError);
+    dialog.appendChild(advanced);
+
+    const actions = make('div', 'model-priority-actions');
+    const cancel = make('button', 'btn btn-quiet', 'Cancel');
+    cancel.type = 'button';
+    const apply = make('button', 'btn btn-primary', 'Apply order');
+    apply.type = 'button';
+    actions.appendChild(cancel);
+    actions.appendChild(apply);
+    dialog.appendChild(actions);
+    item.wrap.appendChild(dialog);
+
+    let draft = [];
+    let dragging = -1;
+    const optionFor = (value) => item.field.options.find((option) => option.value === value) || {
+      value,
+      label: value,
+      available: true,
+      state: '',
+    };
+
+    function updateSummary() {
+      const first = item.order.length ? optionFor(item.order[0]).label : 'Choose models';
+      const count = item.order.length;
+      setText(item.control, count ? '#1 ' + first + ' · ' + count + (count === 1 ? ' model' : ' models') : first);
+      item.control.value = item.order.join('\n');
+    }
+
+    function renderDraft() {
+      clear(list);
+      draft.forEach((value, index) => {
+        const option = optionFor(value);
+        const row = make('li', 'model-priority-item');
+        row.draggable = true;
+        row.dataset.index = String(index);
+        row.appendChild(make('span', 'model-priority-grip', '⋮⋮'));
+        row.appendChild(make('span', 'model-priority-rank', String(index + 1)));
+        const copy = make('span', 'model-priority-copy');
+        copy.appendChild(make('b', null, option.label));
+        copy.appendChild(make('code', null, value));
+        row.appendChild(copy);
+        if (!option.available || option.state === 'quota_paused') {
+          row.appendChild(make('span', 'model-priority-paused', 'Quota paused'));
+        }
+        const controls = make('span', 'model-priority-move');
+        const up = make('button', 'btn btn-quiet', '↑');
+        up.type = 'button';
+        up.title = 'Move up';
+        up.setAttribute('aria-label', 'Move up ' + option.label);
+        up.disabled = index === 0;
+        const down = make('button', 'btn btn-quiet', '↓');
+        down.type = 'button';
+        down.title = 'Move down';
+        down.setAttribute('aria-label', 'Move down ' + option.label);
+        down.disabled = index === draft.length - 1;
+        up.addEventListener('click', () => { moveItem(draft, index, index - 1); renderDraft(); });
+        down.addEventListener('click', () => { moveItem(draft, index, index + 1); renderDraft(); });
+        controls.appendChild(up);
+        controls.appendChild(down);
+        row.appendChild(controls);
+        row.addEventListener('dragstart', (event) => {
+          dragging = index;
+          row.classList.add('is-dragging');
+          if (event.dataTransfer) {
+            event.dataTransfer.effectAllowed = 'move';
+            event.dataTransfer.setData('text/plain', String(index));
+          }
+        });
+        row.addEventListener('dragend', () => { dragging = -1; row.classList.remove('is-dragging'); });
+        row.addEventListener('dragover', (event) => { event.preventDefault(); });
+        row.addEventListener('drop', (event) => {
+          event.preventDefault();
+          const from = dragging >= 0 ? dragging : Number(event.dataTransfer && event.dataTransfer.getData('text/plain'));
+          moveItem(draft, from, index);
+          dragging = -1;
+          renderDraft();
+        });
+        list.appendChild(row);
+      });
+    }
+
+    item.order = Array.isArray(item.field.value) ? item.field.value.slice() : [];
+    item.setOrder = (value) => {
+      item.order = Array.isArray(value) ? value.slice() : [];
+      updateSummary();
+    };
+    updateSummary();
+    item.control.addEventListener('click', () => {
+      draft = item.order.slice();
+      setHidden(addError, true);
+      exact.value = '';
+      renderDraft();
+      dialog.showModal();
+    });
+    cancel.addEventListener('click', () => dialog.close());
+    apply.addEventListener('click', () => {
+      item.setOrder(draft);
+      dialog.close();
+      item.control.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    add.addEventListener('click', () => {
+      const value = exact.value.trim();
+      let message = '';
+      if (!value) message = 'Enter an exact model ID.';
+      else if (draft.indexOf(value) !== -1) message = 'That model is already in the list.';
+      else if (draft.length >= 8) message = 'At most eight models are supported.';
+      if (message) {
+        setText(addError, message);
+        setHidden(addError, false);
+        return;
+      }
+      item.field.options.push({ value, label: value, available: true, state: '', detail: '', when: null, requires: [] });
+      draft.push(value);
+      exact.value = '';
+      setHidden(addError, true);
+      renderDraft();
+    });
   }
 
   function fillSelect(entry, item, values) {
@@ -859,6 +1023,7 @@
     }
 
     const item = { field, wrap, control, picker, help, kind: field.kind, emptyOptions: false, gated: [] };
+    if (field.kind === 'model-priority') setupModelPriority(entry, item, controlId);
 
     if (picker) {
       item.syncModelPicker = () => {
@@ -902,6 +1067,7 @@
 
   function readValue(item) {
     if (item.kind === 'boolean') return item.control.checked;
+    if (item.kind === 'model-priority') return item.order.slice();
     if (item.kind === 'number') {
       if (item.control.value === '') return null;
       const value = Number(item.control.value);
@@ -1113,6 +1279,7 @@
       if (!state.values.has(fieldId)) return;
       const value = state.values.get(fieldId);
       if (item.kind === 'boolean') item.control.checked = value === true;
+      else if (item.kind === 'model-priority') item.setOrder(value);
       else if (value === null || value === undefined) item.control.value = '';
       else item.control.value = String(value);
       if (item.kind === 'select') item.control.dataset.selected = item.control.value;
@@ -1147,7 +1314,8 @@
       item.control.removeAttribute('aria-invalid');
       item.control.setCustomValidity('');
       if (item.wrap.hidden || item.control.disabled) return;
-      const raw = item.control.value;
+      const value = readValue(item);
+      const raw = item.kind === 'model-priority' ? value.join('\n') : item.control.value;
       let message = '';
       if (item.field.required && str(raw).trim() === '') {
         message = 'A value is required.';

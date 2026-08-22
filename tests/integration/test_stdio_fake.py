@@ -260,6 +260,72 @@ def test_in_memory_legacy_protocol_preserves_session_model_and_workspace(
     assert harness.call_count("send") == 1
 
 
+def test_stdio_relays_hash_bound_result_without_controller_read(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_fake_config(home)
+    harness = FakeHarness()
+    source_text = "CAPSULE: source ready\nDETAILS:\nunique relay evidence"
+    harness.enqueue("done", result=source_text)
+    harness.enqueue("done", result="target ready")
+    harness.enqueue("done", result="review complete")
+    captured: list[str] = []
+
+    class CapturingFakeAdapter(FakeAdapter):
+        async def send(self, request):
+            captured.append(request.prompt)
+            return await super().send(request)
+
+    paths = resolve_paths({"SUBAGENT_MCP_HOME": str(home)}, os_name="nt")
+    service = SubagentMcpService(
+        config=ConfigStore(paths),
+        store=StateStore.open(paths),
+        registry=AdapterRegistry(
+            builtin_factories=(lambda: CapturingFakeAdapter(harness),)
+        ),
+        id_factory=_Ids(),
+    )
+
+    async def run() -> None:
+        async with Client(
+            create_server(service), mode="legacy", read_timeout_seconds=5
+        ) as client:
+            source_args = _spawn_arguments(workspace, "relay-source-spawn")
+            source_args["response_mode"] = "compact"
+            source = _meta(await client.call_tool("agent_spawn", source_args))["result"]
+            artifact = source["result"]["artifact"]
+
+            target_args = _spawn_arguments(workspace, "relay-target-spawn")
+            target_args["response_mode"] = "compact"
+            target = _meta(await client.call_tool("agent_spawn", target_args))["result"]
+            relayed = await client.call_tool(
+                "agent_send",
+                {
+                    "request_id": "relay-target-send",
+                    "conversation_id": target["conversation_id"],
+                    "prompt": "Review the attached report.",
+                    "artifact": {
+                        "conversation_id": source["conversation_id"],
+                        "execution_id": artifact["execution_id"],
+                        "expected_sha256": artifact["sha256"],
+                    },
+                },
+            )
+
+            assert relayed.is_error is False, _meta(relayed)
+
+    asyncio.run(run())
+
+    assert len(captured) == 1
+    assert source_text in captured[0]
+    assert "UNTRUSTED REPORT DATA" in captured[0]
+    assert harness.call_count("spawn") == 2
+    assert harness.call_count("send") == 1
+
+
 def test_real_stdio_subprocess_uses_temp_home_and_protocol_only_stdout(
     tmp_path: Path,
 ) -> None:

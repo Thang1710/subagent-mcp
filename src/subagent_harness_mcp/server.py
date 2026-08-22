@@ -15,6 +15,7 @@ from pydantic import Field
 from . import __version__
 from .contracts import (
     ActionRequest,
+    ArtifactReference,
     ContractError,
     RESULT_SLICE_DEFAULT_CHARS,
     RESULT_SLICE_MAX_CHARS,
@@ -270,10 +271,11 @@ def create_server(service: object) -> MCPServer:
         prompt: str,
         reply_to: str | None = None,
         answers: dict[str, Any] | None = None,
+        artifact: dict[str, Any] | None = None,
         response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Continue a native session and return compact status by default."""
+        """Continue a native session, optionally relaying one hash-bound result."""
 
         return await _invoke(
             "agent_send",
@@ -287,6 +289,7 @@ def create_server(service: object) -> MCPServer:
                     prompt,
                     reply_to,
                     answers,
+                    artifact,
                 ),
             ),
             response_mode=response_mode,
@@ -603,6 +606,7 @@ def _send_request(
     prompt: str,
     reply_to: str | None,
     answers: Mapping[str, Any] | None,
+    artifact: Mapping[str, Any] | None,
 ) -> SendRequest:
     _api_version(api_version)
     return SendRequest(
@@ -611,6 +615,23 @@ def _send_request(
         prompt=prompt,
         reply_to=reply_to,
         answers={} if answers is None else answers,
+        artifact=_artifact_reference(artifact),
+    )
+
+
+def _artifact_reference(raw: Mapping[str, Any] | None) -> ArtifactReference | None:
+    if raw is None:
+        return None
+    required = {"conversation_id", "execution_id", "expected_sha256"}
+    if not isinstance(raw, Mapping) or set(raw) != required:
+        raise ContractError(
+            "REQUEST_INVALID",
+            "artifact needs conversation_id, execution_id, and expected_sha256",
+        )
+    return ArtifactReference(
+        conversation_id=raw["conversation_id"],
+        execution_id=raw["execution_id"],
+        expected_sha256=raw["expected_sha256"],
     )
 
 

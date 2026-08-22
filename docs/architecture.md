@@ -31,12 +31,24 @@ response mode remains available for compatibility. This keeps all bounded
 result information locally retrievable without repeating it in every Codex
 controller turn.
 
+`agent_send` may carry one hash-bound reference to a successful result from a
+different conversation in the same verified workspace. The service verifies
+conversation, execution, state, workspace identity, and SHA-256 before wrapping
+the report as untrusted data for the target adapter. Full text exists only in
+that in-memory adapter request; idempotency state and events retain the compact
+reference. Exact UTF-8 byte counts and clearly labelled rough token estimates
+make controller-versus-relay transfer costs visible without claiming provider
+billing precision.
+
 Every execution records requested/effective model, reasoning, transport,
 workspace, session, and context identity. Provider differences appear only in
 the descriptor and explicit capability gaps. Unknown or mismatched critical
-identity fails closed. Model fallback is never implicit: an adapter may expose
-the user's explicit ordered variants, and Codex may advance only after the
-current variant returns the terminal `QUOTA_PAUSED` classification.
+identity fails closed. An adapter may publish its native model catalog without
+reading credentials or calling a provider. The user's ordered variants remain
+the source of truth. An explicit terminal `QUOTA_PAUSED` or forbidden-credit
+classification moves that exact model to the bottom persistently for future
+tasks; it never retries the failed task or changes order after an ambiguous
+failure.
 
 Each runtime can publish a neutral `delegation_priority` from 0 to 100. Higher
 values appear first in `runtime_list` and the localhost UI so the orchestrator
@@ -79,7 +91,7 @@ The deterministic fake adapter proves the local contract without provider
 quota. The Claude managed adapter cannot run normal work until its exact
 standalone CLI/SDK/model/reasoning/transport pair passes the dedicated live
 no-overage canary. Visible-background, promotion, and native Codex-panel
-integration are explicit preview gaps. Ordinary `0.1.0a14` Claude turns select
+integration are explicit preview gaps. Current Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.

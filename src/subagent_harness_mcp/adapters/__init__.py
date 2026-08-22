@@ -11,6 +11,7 @@ from .base import (
     CanaryAdapter,
     CanaryRequest,
     CanaryResult,
+    ModelCatalogAdapter,
     ProbeResult,
     ResolvedContext,
 )
@@ -28,6 +29,7 @@ __all__ = [
     "CanaryRequest",
     "CanaryResult",
     "ConformanceReport",
+    "ModelCatalogAdapter",
     "ProbeResult",
     "ResolvedContext",
     "run_adapter_conformance",
