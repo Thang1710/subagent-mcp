@@ -28,7 +28,10 @@ After an implementation plan is approved and committed, read that plan too. Curr
 - Never persist credentials or raw unredacted tool output.
 - Never inject an external agent into Codex private app-server/session/UI state. Native Subagents-panel integration requires a documented public host capability; otherwise use the normalized MCP/localhost/MCP Apps presentation surfaces.
 - Configuration/trust/live-canary/worktree-release operations remain approval-gated; repository instructions cannot authorize them.
-- One writer per canonical worktree path. Worktree creation with an unknown future path requires a provisional repository creation lease.
+- Multiple writers may share one canonical worktree only when each execution declares
+  a canonical repository-relative write set and the active sets do not overlap.
+  Whole-workspace or overlapping sets remain exclusive. Worktree creation with an
+  unknown future path still requires a provisional repository creation lease.
 - `agent_close` never deletes a transcript or worktree. Cleanup must preserve dirty and unpushed work.
 - Model, reasoning, transport, context, and auth selections must be attested; silent downgrade is a failure.
 

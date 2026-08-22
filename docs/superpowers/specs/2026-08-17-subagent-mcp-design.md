@@ -336,7 +336,8 @@ Hard limits replace intelligence level as the resource guard:
 - two active conversations per runtime;
 - four active conversations globally;
 - six starts per hour per runtime;
-- one writer per canonical workspace path;
+- up to the normal global/runtime concurrency caps for writers whose canonical
+  repository-relative write sets do not overlap;
 - four depth-one nested agents per execution.
 
 ## 11. MCP tools
@@ -513,7 +514,21 @@ Workspace strategies:
 
 Subagent MCP records repository common-dir, origin path, canonical worktree path, base commit, branch, creator, and active leases.
 
-One active writer is allowed per canonical workspace identity. Windows keys the resolved path with volume/file identity and case-insensitive normalization; POSIX keys resolved path plus device/inode identity. Read-only executions may run concurrently within the global/runtime caps.
+Multiple active writers may share one canonical workspace identity when every
+writer declares a canonical repository-relative write set and no active set is
+equal to, an ancestor of, or a descendant of another active set. A missing write
+set means the whole workspace for backwards compatibility. Windows comparisons
+are case-insensitive; POSIX comparisons are case-sensitive. Lease acquisition is
+atomic across all roots in one set. Read-only executions remain concurrent within
+the global/runtime caps.
+
+The write set is a scheduling and native-permission boundary, not a lane-name
+heuristic. Human labels such as `Context/status` never participate in collision
+decisions. Each adapter must attest the normalized set and enforce the narrowest
+native boundary it supports. An adapter that cannot enforce a requested shape
+returns `CAPABILITY_MISSING`; it must not silently widen the scope. Legacy
+whole-workspace lease rows remain ownership/recovery evidence but do not become a
+permanent mutex after the scoped-lease contract is installed.
 
 For a visible-background run whose final worktree path does not exist at spawn time, Subagent MCP first takes a short-lived provisional creation lease on the repository common-dir. Configuring Claude's `WorktreeCreate` hook replaces Claude Code's default Git worktree creation; it is not a notification hook. Its input supplies a worktree `name`, not a completed path, and a command hook must create the worktree and print the resulting path as its last non-empty stdout line.
 
