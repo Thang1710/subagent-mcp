@@ -48,7 +48,9 @@ Restart handling follows the adapter's advertised capability, never a simulated
 resume. A terminal session may be closed logically without reopening the native
 harness only when persisted evidence says its lifetime belonged to the old
 connection, `resume_after_restart` is an explicit gap, and the current adapter
-does not advertise resume. Active executions never use this path.
+does not advertise resume. A connection-owned active execution can transition
+to failed only through an adapter verifier that proves its exact native process
+is absent; an unverified or ambiguous cleanup stays fail-closed.
 
 ## State and ownership
 

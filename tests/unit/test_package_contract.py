@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a18"
+VERSION = "0.1.0a19"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -110,6 +110,7 @@ def test_pyproject_declares_publishable_package_contract() -> None:
     assert project["dependencies"] == [
         "mcp>=2.0.0,<2.1",
         "claude-agent-sdk==0.2.142",
+        "psutil>=6.1,<8",
     ]
     assert project["scripts"] == {
         DIST_NAME: "subagent_harness_mcp.cli:main"
@@ -154,6 +155,7 @@ def test_lock_has_direct_runtime_dependencies_and_exact_versions() -> None:
     assert {dependency["name"] for dependency in project["dependencies"]} == {
         "claude-agent-sdk",
         "mcp",
+        "psutil",
     }
 
 

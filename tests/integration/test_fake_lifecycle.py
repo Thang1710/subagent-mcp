@@ -5,6 +5,8 @@ import itertools
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
 from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigStore
@@ -94,6 +96,49 @@ def _spawn(workspace: Path, request_id: str) -> SpawnRequest:
         transport="managed-sdk",
         permissions=("repo_read",),
     )
+
+
+class _ConnectionOwnedNoResumeAdapter(FakeAdapter):
+    def __init__(
+        self,
+        harness: FakeHarness,
+        *,
+        cleanup_confirmed: bool,
+        cleanup_calls: list[str] | None = None,
+    ) -> None:
+        super().__init__(harness)
+        self._cleanup_confirmed = cleanup_confirmed
+        self._cleanup_calls = [] if cleanup_calls is None else cleanup_calls
+        self._manifest = replace(
+            self._manifest,
+            capabilities=self._manifest.capabilities - {"resume"},
+        )
+
+    async def resolve_context(self, request):
+        context = await super().resolve_context(request)
+        return replace(context, capability_gaps=("resume_after_restart",))
+
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            evidence={
+                "source": "connection-owned-fake",
+                "connection_owned_session": True,
+            },
+        )
+
+    async def open_session(self, request):
+        del request
+        raise ServiceError(
+            "CAPABILITY_MISSING",
+            "connection-owned sessions cannot resume after restart",
+        )
+
+    async def orphan_cleanup_confirmed(self, request, context):
+        del context
+        self._cleanup_calls.append(request.conversation_id)
+        return self._cleanup_confirmed
 
 
 def test_done_failure_and_wait_use_one_normalized_shape(tmp_path: Path) -> None:
@@ -242,35 +287,6 @@ def test_service_restart_opens_exact_persisted_session_and_workspace(
 def test_service_restart_logically_closes_terminal_connection_owned_session(
     tmp_path: Path,
 ) -> None:
-    class ConnectionOwnedNoResumeAdapter(FakeAdapter):
-        def __init__(self, harness: FakeHarness) -> None:
-            super().__init__(harness)
-            self._manifest = replace(
-                self._manifest,
-                capabilities=self._manifest.capabilities - {"resume"},
-            )
-
-        async def resolve_context(self, request):
-            context = await super().resolve_context(request)
-            return replace(context, capability_gaps=("resume_after_restart",))
-
-        async def spawn(self, request):
-            snapshot = await super().spawn(request)
-            return replace(
-                snapshot,
-                evidence={
-                    "source": "connection-owned-fake",
-                    "connection_owned_session": True,
-                },
-            )
-
-        async def open_session(self, request):
-            del request
-            raise ServiceError(
-                "CAPABILITY_MISSING",
-                "connection-owned sessions cannot resume after restart",
-            )
-
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     harness = FakeHarness()
@@ -280,7 +296,10 @@ def test_service_restart_logically_closes_terminal_connection_owned_session(
         tmp_path,
         harness,
         ids,
-        adapter_factory=lambda: ConnectionOwnedNoResumeAdapter(harness),
+        adapter_factory=lambda: _ConnectionOwnedNoResumeAdapter(
+            harness,
+            cleanup_confirmed=False,
+        ),
     )
 
     first_service = create_service()
@@ -295,3 +314,84 @@ def test_service_restart_logically_closes_terminal_connection_owned_session(
     assert terminal.execution_state == "succeeded"
     assert closed.conversation_state == "closed"
     assert harness.call_count("close") == 0
+
+
+def test_service_restart_fails_orphan_after_exact_cleanup_confirmation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    cleanup_calls: list[str] = []
+    create_service, store = _configured(
+        tmp_path,
+        harness,
+        _Ids(),
+        adapter_factory=lambda: _ConnectionOwnedNoResumeAdapter(
+            harness,
+            cleanup_confirmed=True,
+            cleanup_calls=cleanup_calls,
+        ),
+    )
+
+    running = asyncio.run(create_service().agent_spawn(_spawn(workspace, "orphan")))
+    restarted_service = create_service()
+    recovered = asyncio.run(
+        restarted_service.agent_status(
+            StatusRequest(running.conversation_id, after_cursor=0, refresh=True)
+        )
+    )
+    closed = asyncio.run(
+        restarted_service.agent_close(
+            ActionRequest("close-orphan", running.conversation_id)
+        )
+    )
+
+    assert recovered.execution_state == "failed"
+    assert recovered.conversation_state == "idle"
+    assert recovered.result["error"]["code"] == "CONTROLLER_DISCONNECTED"
+    assert cleanup_calls == [running.conversation_id]
+    assert store.load_latest_execution(running.conversation_id).execution_state == "failed"
+    assert closed.conversation_state == "closed"
+    assert harness.call_count("close") == 0
+
+
+def test_service_restart_keeps_orphan_running_when_cleanup_is_unverified(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    cleanup_calls: list[str] = []
+    create_service, store = _configured(
+        tmp_path,
+        harness,
+        _Ids(),
+        adapter_factory=lambda: _ConnectionOwnedNoResumeAdapter(
+            harness,
+            cleanup_confirmed=False,
+            cleanup_calls=cleanup_calls,
+        ),
+    )
+
+    running = asyncio.run(create_service().agent_spawn(_spawn(workspace, "orphan")))
+    restarted_service = create_service()
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            restarted_service.agent_status(
+                StatusRequest(running.conversation_id, after_cursor=0, refresh=True)
+            )
+        )
+    with pytest.raises(ServiceError) as close_error:
+        asyncio.run(
+            restarted_service.agent_close(
+                ActionRequest("close-live-orphan", running.conversation_id)
+            )
+        )
+
+    assert captured.value.code == "RECOVERY_REQUIRED"
+    assert close_error.value.code == "SESSION_BUSY"
+    assert cleanup_calls == [running.conversation_id]
+    assert store.load_latest_execution(running.conversation_id).execution_state == "running"

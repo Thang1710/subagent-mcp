@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "subagent-harness-mcp"
-version = "0.1.0a18"
+version = "0.1.0a19"
 description = "Subagent MCP gateway for Codex to orchestrate external coding agents through native harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,7 @@ classifiers = [
 dependencies = [
     "mcp>=2.0.0,<2.1",
     "claude-agent-sdk==0.2.142",
+    "psutil>=6.1,<8",
 ]
 
 [project.urls]

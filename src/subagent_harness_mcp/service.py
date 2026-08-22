@@ -21,6 +21,7 @@ from .adapters.base import (
     AdapterSpawnRequest,
     CanaryAdapter,
     CanaryRequest,
+    OrphanCleanupAdapter,
     ProbeResult,
     QuotaProbeAdapter,
     ResolvedContext,
@@ -433,7 +434,36 @@ class SubagentMcpService:
             ):
                 adapter = self._registry.get(record.runtime_id)
                 session = _session_request(record)
-                await adapter.open_session(session)
+                try:
+                    await adapter.open_session(session)
+                except ServiceError as exc:
+                    if not (
+                        exc.code == "CAPABILITY_MISSING"
+                        and isinstance(adapter, OrphanCleanupAdapter)
+                        and _can_logically_close_connection_owned_session(adapter, record)
+                    ):
+                        raise
+                    context = _context_from_record(record)
+                    if (
+                        await adapter.orphan_cleanup_confirmed(session, context)
+                        is not True
+                    ):
+                        raise ServiceError(
+                            "RECOVERY_REQUIRED",
+                            "orphaned native process cleanup is unverified",
+                            category="adapter",
+                            next_action="verify_cleanup",
+                        ) from exc
+                    self._record_failure(
+                        record.execution_id,
+                        ServiceError(
+                            "CONTROLLER_DISCONNECTED",
+                            "native controller disconnected after process cleanup",
+                            category="adapter",
+                        ),
+                    )
+                    record = self._store.load_execution(record.execution_id)
+                    return self._status(record, after_cursor=request.after_cursor)
                 snapshot = await adapter.snapshot(session)
                 context = _context_from_record(record)
                 record = self._apply_snapshot(

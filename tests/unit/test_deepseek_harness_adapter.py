@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +21,7 @@ from subagent_harness_mcp.adapters.deepseek_harness import (
     DshLaunch,
     _StdioAcpClient,
     _bounded_result,
+    _windows_process_inventory,
     render_dsh_config,
     _node_path,
     _dsh_env,
@@ -174,6 +178,143 @@ def test_context_rejects_ambiguous_native_selection(
         )
 
     assert error.value.code == "POLICY_REJECTED"
+
+
+def _orphan_confirmation(
+    tmp_path: Path,
+    processes: object,
+    *,
+    drift_binding: bool = False,
+    legacy_attestation: bool = False,
+) -> bool:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    current_binding = [binding]
+    adapter = DeepSeekHarnessAdapter(
+        binding_locator=lambda: current_binding[0],
+        process_inventory=lambda: processes,
+        data_root=tmp_path / "data",
+    )
+    asyncio.run(adapter.probe())
+    context = asyncio.run(adapter.resolve_context(_context_request(workspace)))
+    if legacy_attestation:
+        context = replace(
+            context,
+            attestation={
+                key: context.attestation[key]
+                for key in (
+                    "source",
+                    "variant_id",
+                    "permissions",
+                    "context_policy_id",
+                    "permission_policy_id",
+                )
+            },
+        )
+    if drift_binding:
+        current_binding[0] = replace(binding, pair_key="pair-2")
+    request = AdapterSessionRequest(
+        "conversation-1",
+        "execution-1",
+        "dsh-session-1",
+        "execution-1",
+    )
+    return asyncio.run(adapter.orphan_cleanup_confirmed(request, context))
+
+
+def test_orphan_cleanup_is_unconfirmed_while_exact_acp_process_exists(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path)
+    config = tmp_path / "data" / "deepseek-harness" / "conversation-1" / "cordis.yml"
+    process = SimpleNamespace(
+        name="node.exe",
+        executable_path=str(binding.node_path),
+        command_line=(
+            f'"{binding.node_path}" "{binding.acp_bin_path}" --config "{config}"'
+        ),
+    )
+
+    assert _orphan_confirmation(tmp_path, [process]) is False
+
+
+def test_orphan_cleanup_is_confirmed_when_only_visible_unrelated_node_exists(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path)
+    process = SimpleNamespace(
+        name="node.exe",
+        executable_path=str(binding.node_path),
+        command_line=f'"{binding.node_path}" unrelated.js',
+    )
+
+    assert _orphan_confirmation(tmp_path, [process]) is True
+
+
+def test_orphan_cleanup_fails_closed_for_opaque_matching_node(
+    tmp_path: Path,
+) -> None:
+    process = SimpleNamespace(
+        name="node.exe",
+        executable_path=None,
+        command_line=None,
+    )
+
+    assert _orphan_confirmation(tmp_path, [process]) is False
+
+
+def test_orphan_cleanup_fails_closed_after_harness_binding_drift(
+    tmp_path: Path,
+) -> None:
+    assert _orphan_confirmation(tmp_path, [], drift_binding=True) is False
+
+
+def test_orphan_cleanup_fails_closed_when_process_inventory_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    class UnavailableInventory:
+        def __iter__(self):
+            raise OSError("process inventory unavailable")
+
+    assert _orphan_confirmation(tmp_path, UnavailableInventory()) is False
+
+
+def test_orphan_cleanup_accepts_legacy_context_hash_without_persisted_pair_key(
+    tmp_path: Path,
+) -> None:
+    assert _orphan_confirmation(tmp_path, [], legacy_attestation=True) is True
+
+
+def test_windows_inventory_uses_process_api_without_wmi(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    process = SimpleNamespace(
+        info={
+            "name": "node.exe",
+            "exe": r"C:\Program Files\nodejs\node.exe",
+            "cmdline": [
+                r"C:\Program Files\nodejs\node.exe",
+                r"D:\DeepSeek Harness\acp.js",
+            ],
+        }
+    )
+    fake_psutil = SimpleNamespace(
+        process_iter=lambda attrs, ad_value: (
+            process
+            if attrs == ["name", "exe", "cmdline"] and ad_value is None
+            else None
+            for _ in range(1)
+        )
+    )
+    monkeypatch.setitem(sys.modules, "psutil", fake_psutil)
+
+    observed = _windows_process_inventory()
+
+    assert len(observed) == 1
+    assert observed[0].name == "node.exe"
+    assert observed[0].executable_path == r"C:\Program Files\nodejs\node.exe"
+    assert r"D:\DeepSeek Harness\acp.js" in str(observed[0].command_line)
 
 
 def test_background_lifecycle_reuses_native_session_and_interrupts(tmp_path: Path) -> None:

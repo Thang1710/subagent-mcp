@@ -146,6 +146,18 @@ class Adapter(Protocol):
 
 
 @runtime_checkable
+class OrphanCleanupAdapter(Protocol):
+    """Optional exact cleanup attestation for a lost native connection."""
+
+    async def orphan_cleanup_confirmed(
+        self,
+        request: AdapterSessionRequest,
+        context: ResolvedContext,
+    ) -> bool:
+        ...
+
+
+@runtime_checkable
 class CanaryAdapter(Adapter, Protocol):
     """Optional bootstrap implemented only by live-capable adapters."""
 

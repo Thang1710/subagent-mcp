@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a19 - 2026-08-22
+
+- Recover a connection-owned DeepSeek execution left running after its MCP
+  controller exits, but only after a read-only Windows process inventory proves
+  the exact conversation-bound ACP process is gone.
+- Fail closed without changing lifecycle state when the harness binding,
+  process identity, command line, or process inventory is unavailable or
+  ambiguous. Recovery never kills a process or calls a provider.
+
 ## 0.1.0a18 - 2026-08-22
 
 - Preserve complete redacted native-agent reports in bounded local state while

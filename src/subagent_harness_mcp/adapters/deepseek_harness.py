@@ -11,7 +11,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol
+from typing import Any, Callable, Iterable, Mapping, Protocol
 
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError
 from .base import (
@@ -98,6 +98,16 @@ BindingLocator = Callable[[], DshBinding | None]
 ClientFactory = Callable[[DshLaunch], _AcpClient]
 
 
+@dataclass(frozen=True, slots=True)
+class _ProcessObservation:
+    name: str
+    executable_path: str | None
+    command_line: str | None
+
+
+ProcessInventory = Callable[[], Iterable[_ProcessObservation]]
+
+
 @dataclass(slots=True)
 class _Turn:
     execution_id: str
@@ -124,6 +134,7 @@ class DeepSeekHarnessAdapter:
         *,
         binding_locator: BindingLocator | None = None,
         client_factory: ClientFactory | None = None,
+        process_inventory: ProcessInventory | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
@@ -138,6 +149,7 @@ class DeepSeekHarnessAdapter:
                 turn_timeout_seconds=self._turn_timeout,
             )
         )
+        self._process_inventory = process_inventory or _windows_process_inventory
         if data_root is None:
             from ..paths import resolve_paths
 
@@ -151,7 +163,7 @@ class DeepSeekHarnessAdapter:
             provider_id="multi-provider",
             harness_id="deepseek-harness",
             display_name="DeepSeek Harness",
-            adapter_version="0.1.0a18",
+            adapter_version="0.1.0a19",
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
@@ -418,6 +430,48 @@ class DeepSeekHarnessAdapter:
             raise ServiceError("SESSION_CLOSED", "DeepSeek ACP session is closed")
         return session.snapshot
 
+    async def orphan_cleanup_confirmed(
+        self,
+        request: AdapterSessionRequest,
+        context: ResolvedContext,
+    ) -> bool:
+        binding = self._binding_locator()
+        if (
+            binding is None
+            or not _binding_matches_context(binding, context)
+        ):
+            return False
+        try:
+            processes = await asyncio.to_thread(
+                lambda: tuple(self._process_inventory())
+            )
+        except Exception:
+            return False
+
+        node_path = _fold_path(binding.node_path)
+        acp_path = _fold_path(binding.acp_bin_path)
+        config_path = _fold_path(
+            self._data_root / request.conversation_id / "cordis.yml"
+        )
+        node_name = binding.node_path.name.casefold()
+        for process in processes:
+            name = str(getattr(process, "name", "") or "").casefold()
+            executable = getattr(process, "executable_path", None)
+            command_line = getattr(process, "command_line", None)
+            executable_matches = bool(executable) and _fold_path(executable) == node_path
+            if not command_line:
+                if executable_matches or (not executable and name == node_name):
+                    return False
+                continue
+            command = _fold_command(command_line)
+            if (
+                acp_path in command
+                and config_path in command
+                and (executable_matches or node_path in command)
+            ):
+                return False
+        return True
+
     def _session(self, session_id: str) -> _Session:
         try:
             return self._sessions[session_id]
@@ -625,7 +679,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a18"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a19"},
                 },
             ),
             timeout=self._timeout,
@@ -802,6 +856,42 @@ class _StdioAcpClient:
                 future.set_exception(error)
 
 
+def _windows_process_inventory() -> tuple[_ProcessObservation, ...]:
+    import psutil
+
+    observed: list[_ProcessObservation] = []
+    for process in psutil.process_iter(
+        ["name", "exe", "cmdline"],
+        ad_value=None,
+    ):
+        info = process.info
+        command = info.get("cmdline")
+        if isinstance(command, (list, tuple)):
+            command_line = "\x00".join(str(part) for part in command) or None
+        else:
+            command_line = _optional_text(command)
+        observed.append(
+            _ProcessObservation(
+                str(info.get("name") or ""),
+                _optional_text(info.get("exe")),
+                command_line,
+            )
+        )
+    return tuple(observed)
+
+
+def _optional_text(value: object) -> str | None:
+    return str(value) if value else None
+
+
+def _fold_path(value: str | os.PathLike[str]) -> str:
+    return str(Path(value).resolve(strict=False)).replace("/", "\\").casefold()
+
+
+def _fold_command(value: object) -> str:
+    return str(value).replace("/", "\\").casefold()
+
+
 def locate_dsh_binding() -> DshBinding | None:
     """Resolve a reviewed DSH source install without changing user configuration."""
 
@@ -940,6 +1030,51 @@ def _provider_model(model: str, reasoning: Mapping[str, Any]) -> tuple[str, str]
             "DeepSeek model must be an exact provider::model pair",
         )
     return provider, native_model
+
+
+def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> bool:
+    attestation = context.attestation
+    permissions = attestation.get("permissions")
+    variant_id = attestation.get("variant_id")
+    context_policy_id = attestation.get("context_policy_id")
+    permission_policy_id = attestation.get("permission_policy_id")
+    if not (
+        isinstance(permissions, (list, tuple))
+        and all(isinstance(permission, str) for permission in permissions)
+        and isinstance(variant_id, str)
+        and isinstance(context_policy_id, str)
+        and isinstance(permission_policy_id, str)
+    ):
+        return False
+    try:
+        provider, model = _provider_model(
+            context.effective_model,
+            context.effective_reasoning,
+        )
+    except ServiceError:
+        return False
+    permission_mode = (
+        "workspace-write" if "workspace_write" in permissions else "read-only"
+    )
+    payload = {
+        "runtime_id": context.runtime_id,
+        "variant_id": variant_id,
+        "provider": provider,
+        "model": model,
+        "reasoning": {},
+        "permission_mode": permission_mode,
+        "workspace_path": context.workspace_path,
+        "workspace_key": context.workspace_key,
+        "transport": context.transport,
+        "permissions": list(permissions),
+        "context_policy_id": context_policy_id,
+        "permission_policy_id": permission_policy_id,
+        "pair_key": binding.pair_key,
+    }
+    expected_hash = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return expected_hash == context.context_hash
 
 
 def _dsh_env(permission_mode: str) -> dict[str, str]:

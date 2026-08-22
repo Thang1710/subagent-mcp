@@ -50,7 +50,12 @@ subscription-only or no-cost route.
 DeepSeek ACP sessions are connection-owned and currently cannot resume after an
 MCP restart. Logical close is allowed only for a terminal persisted execution
 that records both that ownership and the explicit resume gap; it never deletes
-provider history or substitutes for stopping active native work.
+provider history or substitutes for stopping active native work. A nonterminal
+orphan may be failed only when the current harness binding still matches and a
+read-only Windows process inventory proves the exact Node, ACP entrypoint, and
+conversation config process is absent. Missing or ambiguous evidence leaves
+the execution running and requires recovery; this check never kills a process
+or calls a provider.
 
 In `0.1.0a14`, project/local `CLAUDE.md`, `.claude` hooks, agents, skills, and
 declared project MCP are unavailable; only the native user setting source is

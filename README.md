@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a18` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a19` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -44,7 +44,7 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a18
+uv tool install subagent-harness-mcp==0.1.0a19
 codex mcp add subagent-mcp -- subagent-harness-mcp serve
 ```
 
@@ -56,7 +56,7 @@ subagent-harness-mcp --version
 codex mcp list
 ```
 
-If `0.1.0a18` has not reached PyPI yet, install the current checkout instead:
+If `0.1.0a19` has not reached PyPI yet, install the current checkout instead:
 
 ```powershell
 uv tool install .
@@ -101,7 +101,7 @@ so the running Python environment does not hold package files open:
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a18
+uv tool install --reinstall subagent-harness-mcp==0.1.0a19
 ```
 
 ## Use it from Codex
@@ -140,6 +140,10 @@ On Windows, the adapter discovers Node from `PATH` or the standard Program
 Files installation and follows the native `~/.dsh` profile link to the source
 checkout. Non-standard installations can set `SUBAGENT_MCP_DSH_NODE` and
 `SUBAGENT_MCP_DSH_SOURCE_ROOT` before starting the MCP or UI.
+
+If the MCP controller exits during a DeepSeek turn, restart recovery changes
+the execution only after read-only process inspection proves that the exact
+conversation-bound ACP process is gone. It never kills an unverified process.
 
 To keep Codex supervision lean without discarding detail, leave lifecycle
 responses in their default `compact` mode and use one `agent_wait` call with its
@@ -190,7 +194,7 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a18` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a19` |
 | Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Opaque native model IDs; user-ordered fallback only after explicit quota exhaustion |
 
