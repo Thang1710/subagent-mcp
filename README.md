@@ -2,193 +2,111 @@
 
 <!-- mcp-name: io.github.Thang1710/subagent-mcp -->
 
-One agent that plans, implements, and reviews the same work is also grading its
-own assumptions. Subagent MCP keeps Codex as the main agent and orchestrator,
-then lets it delegate bounded work to external agent runtimes. Each runtime is
-an independent model paired with its native harness, so implementation and
-review can come from a different model, context, and set of assumptions.
+**Independent harnesses. One Codex orchestrator.**
 
-Adapters translate each native harness into one normalized lifecycle. The core
-does not hard-code provider roles or model names. These runtimes supplement
-Codex's native subagent pool and can use provider quota under an explicit
-runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
-silently opts into usage credits or paid overage.
+When one model plans a change, implements it, and reviews it, the reviewer shares
+the author's context and blind spots. It can end up confirming its own plan
+instead of testing it.
 
-> **Preview:** `0.1.0a24` targets Windows. The local MCP, deterministic adapter,
-> package, localhost UI, and Claude Code native-harness integration are ready.
+Subagent MCP keeps Codex as the main agent and final decision-maker while
+delegating bounded work to external agent runtimes. Each runtime is a model
+paired with its native harness, so Codex can get implementation or review from
+an independent model with different context and assumptions.
 
-### Runtime status
+That expands Codex's effective sub-agent pool and can use provider quota you
+already have. Subagent MCP never enables, purchases, auto-reloads, or silently
+opts into usage credits or paid overage.
 
-- **Claude Code — Ready.** It delegates through the native Claude Code harness,
-  keeps model and reasoning choices provider-native, and verifies subscription
-  OAuth identity plus live no-overage evidence before accepting its output.
-  Current provider availability is shown separately in the localhost UI.
-- **DeepSeek Harness — In development.** The current source includes a first
-  native ACP vertical slice. It discovers a standard Windows Node install even
-  when an MCP client filters `ProgramFiles`, and follows the source checkout
-  linked by the native `~/.dsh` profile without depending on a separate web
-  launcher. Broader provider and lifecycle coverage remains in progress.
-  Billing may use credits or unlimited offers the user already authorizes;
-  auto-top-up and overage are never enabled.
+Adapters translate every native harness into the same lifecycle: delegate,
+observe, steer, and close. The core hard-codes no provider role or model name.
 
-## Install
+> **Preview:** `0.1.0a24` targets Windows. The MCP, package, localhost UI, and
+> Claude Code native-harness integration are ready.
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) first if
-you do not already have it:
+## Runtime status
+
+- **Claude Code — Ready.** Uses the native Claude Code harness, provider-native
+  model and reasoning settings, subscription OAuth identity, and live
+  no-overage evidence before accepting its output.
+- **DeepSeek Harness — In development.** A native ACP vertical slice and model
+  catalog integration are present; broader provider and lifecycle coverage is
+  still being built.
+
+No other runtime is supported yet. Future runtimes use adapters rather than
+provider-specific branches in the core.
+
+## Quick start
+
+### 1. Install
+
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed,
+then install the pinned preview and register it with Codex:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-```
-
-Then install the pinned preview and connect it to Codex:
-
-```powershell
 uv tool install subagent-harness-mcp==0.1.0a24
 codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
 ```
 
-The installed tool provides the CLI and localhost UI. Codex runs the stdio MCP
-from a separate, pinned uvx environment so an active MCP process cannot lock a
-normal UI-tool update on Windows. Start a new Codex task after registration.
-You can confirm the installation at any time:
+Start a new Codex task after registration.
 
-```powershell
-subagent-harness-mcp --version
-codex mcp list
-```
-
-## Open the local UI
+### 2. Configure runtimes
 
 ```powershell
 subagent-harness-mcp ui
 ```
 
-This opens `http://127.0.0.1:8765` for settings, health, and read-only activity.
-It does not require the MCP server to be active. The default foreground command
-runs until you press `Ctrl+C`; the page is not an agent chat window.
+The settings and read-only activity UI opens at
+`http://127.0.0.1:8765`. It runs independently of the MCP server.
 
-To keep the UI available after the terminal closes, start the optional managed
-background process. It remains independent of MCP until you stop it or the
-Windows session ends:
+For a persistent background UI:
 
 ```powershell
 subagent-harness-mcp ui --background
-subagent-harness-mcp ui --status
 subagent-harness-mcp ui --open
-subagent-harness-mcp ui --stop
 ```
 
-Use `--background --no-open` when you want the service available without
-opening a browser tab. Run `ui --open` whenever you want a fresh authorized
-tab for an already-running background UI; the single-use bootstrap token is
-passed directly to the browser and is never printed. Subagent MCP does not add
-itself to Windows login or startup automatically.
+`ui --open` creates a fresh authorized tab using a single-use bootstrap token
+that is passed directly to the browser and never printed.
 
-Choose another fixed port, or ask the OS for a temporary one, when needed:
+### 3. Delegate
 
-```powershell
-subagent-harness-mcp ui --port 9123
-subagent-harness-mcp ui --port 0
-```
-
-Background mode requires a fixed port so status and graceful stop target the
-same loopback service.
-
-## Update or roll back on Windows
-
-If an older MCP entry runs `subagent-harness-mcp serve` directly, close every
-Codex window once before this first migration. That legacy process uses the
-same persistent tool environment and can hold its executable open.
-
-Stop the UI, install the exact version you want, and replace the MCP entry with
-the pinned uvx command:
-
-```powershell
-subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a24
-codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
-subagent-harness-mcp ui --background
-```
-
-For rollback, run the same commands with the previous exact version. Then
-restart Codex or start a new task. Subagent MCP never edits Codex configuration
-or clears uv caches automatically.
-
-## Use it from Codex
-
-After registering the server and configuring a runtime, start a new Codex task
-and delegate in natural language. For example:
+Ask Codex in plain language:
 
 > Use Subagent MCP to ask an external agent to review this change, then
 > evaluate its findings independently.
 
-Codex decides what to delegate, observes the result, and keeps the final
-judgment. Underneath, each adapter maps the same lifecycle to its native
-harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
+Codex chooses what to delegate, observes the result, and keeps the final
+judgment. Lifecycle responses are compact by default; full redacted reports
+remain in local product state and can be read or relayed later by hash-bound
+reference.
 
-### Run independent writers in one workspace
+## Models and fallback order
 
-For a write task, Codex can declare up to 32 repository-relative directory or
-file roots in `write_set`. Two external agents may run at the same time when
-their canonical absolute sets are disjoint, including when their declared
-workspace roots differ or nest. Equal paths and parent/child paths conflict;
-the task or lane name has no effect on locking. Omitting `write_set` keeps the
-safe backwards-compatible behavior: that execution owns its whole workspace.
+Each native harness publishes its own model choices. The UI shows friendly names
+and an ordered priority stack; exact provider IDs remain available for advanced
+routes.
 
-The lease is only one part of the contract. Each adapter must attest and enforce
-the same normalized paths through its native harness boundary. Claude Code can
-guard multiple roots. The DeepSeek Harness preview currently supports one
-existing directory tree per write-capable session and returns a capability gap
-instead of silently widening a multi-root request. These leases coordinate
-Subagent MCP executions; they cannot stop an unrelated local process from
-editing the same files.
+When a provider explicitly reports exhausted quota or credit
+(`QUOTA_PAUSED`), Subagent MCP moves that exact model to the bottom for future
+tasks. It does not retry the failed task. Ambiguous failures, crashes, and
+timeouts do not reorder models or trigger another paid request.
 
-### Configure DeepSeek Harness (development)
+DeepSeek routes may use an existing subscription, unlimited offer, or funded
+balance that the user authorizes. Subagent MCP never purchases, reloads, or
+increases that balance.
 
-Install and configure DeepSeek Harness normally, then open the Subagent MCP UI
-and enable **DeepSeek Harness**. Subagent MCP reads the model catalog published
-by the installed native harness, so its official DeepSeek routes and configured
-custom providers appear by name; typing an ID is needed only for an advanced
-custom route. The adapter uses DeepSeek Harness's native ACP transport, not its
-web UI.
+## Concurrent writers
 
-Open **Model priority** to see the complete ordered model stack. Drag rows, or
-use the accessible up/down controls, to choose which model Codex should prefer.
-When the current provider explicitly reports exhausted quota or credit
-(`QUOTA_PAUSED`), Subagent MCP persistently moves that exact model to the bottom
-so the next configured model becomes first for future tasks. It does not retry
-the failed task, and ambiguous failures, timeouts, and crashes do not change the
-order. Public installs keep the runtime disabled until the user reviews and
-saves this configuration.
+A write task can declare up to 32 repository-relative file or directory roots
+in `write_set`. External writers may run concurrently when their canonical
+absolute sets are disjoint. Equal paths and parent/child paths conflict; task
+and lane names do not affect locking.
 
-Enabling this runtime authorizes the selected route to consume quota from an
-existing subscription or unlimited offer, or an already funded provider
-balance. Subagent MCP does not purchase, reload, or increase that balance and
-cannot verify a promotion or price that the native harness does not expose.
-
-On Windows, the adapter discovers Node from `PATH` or the standard Program
-Files installation and follows the native `~/.dsh` profile link to the source
-checkout. Non-standard installations can set `SUBAGENT_MCP_DSH_NODE` and
-`SUBAGENT_MCP_DSH_SOURCE_ROOT` before starting the MCP or UI.
-
-If the MCP controller exits during a DeepSeek turn, restart recovery changes
-the execution only after read-only process inspection proves that the exact
-conversation-bound ACP process is gone. It never kills an unverified process.
-
-To keep Codex supervision lean without discarding detail, leave lifecycle
-responses in their default `compact` mode and use one `agent_wait` call with its
-five-minute default. The MCP waits locally and wakes Codex only for completion,
-required input, or a timeout. A completed agent keeps its full redacted report
-in local product state, bounded at 65,536 characters. Compact status returns a
-short capsule or preview plus its SHA-256 and character count; Codex can use
-`agent_result_read` to pull only the hash-bound 4,096-character slices it needs.
-For cross-agent review, `agent_send` can relay one successful result by its
-conversation, execution, and SHA-256 reference. The service verifies both
-agents used the same workspace and expands the complete report only in memory;
-durable request state keeps the small reference, not another copy of the text.
-Transport compression such as gzip can reduce network bytes but does not reduce
-model tokens after decompression, so Subagent MCP avoids opaque compressed text.
+Omitting `write_set` gives the execution the whole workspace for backwards
+compatibility. Each adapter also enforces the normalized paths at its native
+harness boundary. These leases coordinate Subagent MCP executions; they are not
+an operating-system sandbox for unrelated local processes.
 
 ## How it fits together
 
@@ -198,13 +116,13 @@ flowchart LR
     M["Subagent MCP<br/>Gateway"]
     UI["Localhost UI<br/>Settings & activity"]
 
-    C -->|"stdio MCP<br/>delegate · steer · observe"| M
+    C -->|"delegate · steer · observe"| M
     UI --> M
 
     subgraph E["External agent runtimes — adapter-driven"]
         R1["Model<br/>+<br/>native harness"]
         R2["Model<br/>+<br/>native harness"]
-        RN["More runtimes<br/>via future adapters"]
+        RN["Future runtimes<br/>via adapters"]
     end
 
     M -->|"normalized lifecycle"| R1
@@ -212,84 +130,49 @@ flowchart LR
     M -->|"normalized lifecycle"| RN
 ```
 
-A runtime may be Claude with Claude Code, a Cursor-supported model with
-Cursor's harness, Qwen with its native harness, or another adapter. These are
-examples of the adapter shape, not special cases in the architecture.
+Subagent MCP owns lifecycle normalization, status, redaction, leases, and
+circuits. Each adapter translates that contract to its native harness. See
+[Architecture](docs/architecture.md) for the full contract.
 
-Subagent MCP owns the normalized lifecycle, status, redaction, leases, and
-circuits. Each adapter translates that contract to its native harness without
-writing shared state directly. See [the architecture](docs/architecture.md)
-for details.
+## Update or roll back on Windows
 
-## What works in this preview
+If an older MCP entry launches `subagent-harness-mcp serve` directly, close
+every Codex window once before this first migration; that legacy process shares
+the persistent tool environment and may hold its executable open.
 
-| Capability | Status |
-|---|---|
-| 14-tool normalized lifecycle over stdio | Works |
-| Deterministic adapter for integration testing | Works without provider quota |
-| Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
-| Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a24` |
-| Claude Code native adapter | Ready in the Windows preview |
-| Provider model selection | Native catalog names with a user-ordered priority stack; exact IDs remain available under Advanced |
-
-Live provider availability still depends on the user's installed native
-harness, authentication, selected model, and current provider limits.
-
-## Other MCP clients
-
-Point any stdio-compatible MCP client at the installed command:
-
-```json
-{
-  "command": "uvx",
-  "args": [
-    "--from",
-    "subagent-harness-mcp==0.1.0a24",
-    "subagent-harness-mcp",
-    "serve"
-  ]
-}
+```powershell
+subagent-harness-mcp ui --stop
+uv tool install --reinstall subagent-harness-mcp==0.1.0a24
+codex mcp remove subagent-mcp
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
+subagent-harness-mcp ui --background
 ```
 
-The MCP exposes versioned runtime, project-trust, agent-lifecycle, and workspace
-tools. Public schemas live in [`schemas/`](schemas/).
+Use the same commands with the previous exact version to roll back. Subagent MCP
+does not edit Codex configuration or clear uv caches on its own.
 
 ## Safety and billing
 
 - Subagent MCP never enables usage credits or changes billing settings.
-- Each Claude task validates the bound CLI, subscription auth, credential
-  precedence, and control connection before sending its one useful query. It
-  then requires exact typed stream initialization and safe rate-limit evidence
-  from that same response before accepting output. Explicit unsafe evidence
-  interrupts the request and discards its output; no second paid status query
-  is made.
-- Claude task requests can consume included subscription quota. The status-only
-  probe does not submit a model prompt, and Subagent MCP never uses that probe to
-  manufacture an availability answer when native evidence is missing.
-- The adapter cannot inspect or change Claude's account-level usage-credit
-  toggle; subscription-only users must keep usage credits disabled in Claude.
-  Subagent MCP never turns them on.
-- Missing local model, workspace, or session configuration blocks launch. Live
-  identity or rate mismatches interrupt before output is accepted. A configured
-  fallback is selected only after an explicit `QUOTA_PAUSED` result; ambiguous
-  failures never trigger another paid request.
-- Provider Refresh is a no-model initialization check. The current Claude SDK
-  publishes exact rate status only with a provider response, so Refresh reports
-  `Unknown` when no pre-response event exists. No reset clock or cached
-  checkpoint can block a requested task; its own safe response can reopen only
-  the exact paused model variant.
-- Provider model IDs and reasoning settings remain native, opaque values.
-- Product data stays in explicit local config, state, and data roots. Optional
-  client registration uses the client's official command and verifies the exact
-  entry instead of directly rewriting unrelated configuration.
-- Native transcripts remain owned by the native harness. Treat agent output as
-  untrusted advice and verify it before applying changes.
+- Claude tasks can consume included subscription quota. Each task validates the
+  bound CLI, subscription authentication, credential precedence, and control
+  connection, then requires safe rate evidence from the same response before
+  accepting its output.
+- Provider Refresh sends no model prompt. If the native harness cannot expose
+  exact rate evidence before a response, status remains unknown rather than
+  inventing a quota result or using a reset clock.
+- Fallback occurs only after explicit quota exhaustion. Unsafe or ambiguous
+  evidence never triggers another paid request.
+- Native transcripts remain owned by the native harness. Product state stays in
+  explicit local roots, and agent output must be treated as untrusted advice.
 
-Read the full [threat model](docs/threat-model.md) and report vulnerabilities
-privately as described in [SECURITY.md](SECURITY.md).
+Read [Security](SECURITY.md) and the
+[Threat model](docs/threat-model.md) before enabling write access.
 
-## Development
+## Project
 
-[CONTRIBUTING.md](CONTRIBUTING.md) contains the deterministic test workflow and
-adapter guidelines. Subagent MCP is released under the [MIT License](LICENSE).
+- [Architecture](docs/architecture.md)
+- [Adapter authoring](docs/adapter-authoring.md)
+- [Contributing](CONTRIBUTING.md)
+- [Changelog](CHANGELOG.md)
+- [MIT License](LICENSE)
