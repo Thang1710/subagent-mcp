@@ -319,6 +319,7 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
                 "mode": "implement",
                 "transport": "managed-sdk",
                 "required_capabilities": ["repo_read", "workspace_write"],
+                "write_set": ["src/context", "docs/status.md"],
                 "context_policy_id": "declared-native",
                 "permission_policy_id": "bounded-writer",
                 "workspace": "current",
@@ -339,6 +340,7 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
     assert request.cwd == cwd
     assert request.transport == "managed-sdk"
     assert request.permissions == ("repo_read", "workspace_write")
+    assert request.write_set == ("src/context", "docs/status.md")
 
 
 def test_invalid_version_request_id_and_workspace_fail_before_service_call(

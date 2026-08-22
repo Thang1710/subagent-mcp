@@ -73,6 +73,18 @@ runtimes are immutable and selected through an atomic pointer. Conservative
 uninstall removes only byte/identity-matching owned resources and preserves
 user config, state, sessions, and worktrees.
 
+A write-capable execution declares canonical repository-relative tree roots in
+`write_set`. Lease acquisition resolves and compares canonical absolute roots
+atomically across all declared workspaces: equal paths and ancestor/descendant
+paths conflict, while disjoint paths may run concurrently. Lane names and task
+labels never participate in locking. Terminal idempotent replay recognizes its
+released deterministic lease rows without reacquiring or duplicating them.
+Omitting `write_set` keeps the backwards-compatible exclusive whole-workspace
+scope. Each adapter attests the normalized set and must enforce it through its
+native harness boundary or return `CAPABILITY_MISSING`; the lease is
+coordination between Subagent MCP executions, not an OS sandbox against other
+same-user processes.
+
 The UI is foreground by default. `ui --background` starts one detached local
 process on a fixed loopback port; `ui --status` identifies whether it is the
 managed process, `ui --open` requests a fresh single-use browser bootstrap, and
@@ -107,18 +119,25 @@ only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
 
-The native SDK emits its rate-limit attestation only after a turn starts, not
-during `connect(None)`. The provider Refresh path therefore performs only a
-connection-level probe and reports `Unknown` when no pre-turn rate evidence is
-available; it never launches a canary or provider task. Before any turn, the
-adapter rejects documented non-subscription credential routes. The native
-`system/init` event must attest OAuth/none as the active API-key source, and a
-live rate event must report `isUsingOverage=false` with overage rejected before
-output is accepted. Missing or ambiguous evidence leaves the runtime gated.
-Canary and ordinary turns also disable 1M context, fast mode, and the
-usage-credits command per process. Any later unsafe rate event interrupts and
-pauses the circuit. The requested effort is pinned through both the SDK option
-and provider-native process environment because `system.init` does not publish
-an effort field. Complete redacted final text is bounded to 65,536 characters
-in local state; compact controller responses carry only artifact metadata and
-on-demand reads are limited to 8,192 characters per call.
+Claude's public Agent SDK publishes typed initialization and rate-limit events.
+An explicit provider Refresh opens a connect-only session and validates native
+initialization without submitting a model query. The current SDK publishes
+exact rate status only with a provider response, so a Refresh that receives no
+pre-response rate event reports `Unknown` immediately instead of waiting or
+inventing availability. Every Claude execution validates the bound CLI,
+subscription auth, credential precedence, and control connection, sends its
+one useful task query, then requires exact typed stream identity plus a safe
+rate event from that same response before accepting the result. A rate event
+may arrive before or after stream initialization; explicit
+quota exhaustion or forbidden-credit evidence discards output and auto-pauses
+only the affected variant. A later requested task may test that exact variant,
+and a safe response reopens it. No reset clock, cached checkpoint, elapsed-time
+guess, or separate paid status query controls availability. Canary and ordinary
+turns disable 1M context, fast mode, and the usage-credits command per process.
+The requested effort is pinned through both the SDK option and provider-native
+process environment because `system.init` does not publish an effort field.
+Ordinary Claude managed and DeepSeek ACP turns have no product-imposed elapsed
+completion deadline; initialization, query submission, cancellation, and
+connection cleanup remain bounded. Complete redacted final text is bounded to
+65,536 characters in local state; compact controller responses carry only
+artifact metadata and on-demand reads are limited to 8,192 characters per call.

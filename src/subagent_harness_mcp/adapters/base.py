@@ -26,6 +26,7 @@ class AdapterContextRequest:
     permissions: tuple[str, ...]
     context_policy_id: str
     permission_policy_id: str
+    write_set: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)

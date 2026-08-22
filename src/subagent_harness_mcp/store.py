@@ -746,6 +746,61 @@ class StateStore:
                 raise StateError("CIRCUIT_CONFLICT", "runtime quota pause is stale")
         return self.load_circuit(runtime_id, variant_id)
 
+    def resume_paused_circuit(
+        self,
+        *,
+        runtime_id: str,
+        variant_id: str,
+        pair_key: str,
+        expected_revision: int,
+        details: Mapping[str, Any],
+    ) -> CircuitRecord:
+        _require_id(runtime_id, "runtime_id", 128)
+        _require_id(variant_id, "variant_id", 128)
+        _require_id(pair_key, "pair_key", 128)
+        with self.transaction(write=True) as database:
+            row = database.execute(
+                """
+                SELECT state, revision, details_json FROM circuits
+                WHERE runtime_id = ? AND variant_id = ?
+                """,
+                (runtime_id, variant_id),
+            ).fetchone()
+            if row is None:
+                raise StateError("CIRCUIT_NOT_FOUND", "runtime circuit does not exist")
+            existing = _decode_object(row[2], "circuit details")
+            if existing.get("pair_key") != pair_key:
+                raise StateError("IDENTITY_CONFLICT", "runtime adapter pair changed")
+            if row[0] == "ready":
+                return _circuit_record(
+                    (runtime_id, variant_id, row[0], row[1], row[2])
+                )
+            if row[0] != "auto_paused" or int(row[1]) != expected_revision:
+                raise StateError("CIRCUIT_CONFLICT", "runtime quota recovery is stale")
+            safe_details = dict(existing)
+            safe_details.pop("error_code", None)
+            safe_details.update(details)
+            safe_details["pair_key"] = pair_key
+            database.execute(
+                """
+                UPDATE circuits SET state = 'ready', category = NULL,
+                    retry_after_utc = NULL, revision = revision + 1,
+                    details_json = ?, updated_at_utc = ?
+                WHERE runtime_id = ? AND variant_id = ?
+                  AND state = 'auto_paused' AND revision = ?
+                """,
+                (
+                    _canonical_json_text(safe_details),
+                    _utc_now(),
+                    runtime_id,
+                    variant_id,
+                    expected_revision,
+                ),
+            )
+            if database.execute("SELECT changes()").fetchone()[0] != 1:
+                raise StateError("CIRCUIT_CONFLICT", "runtime quota recovery is stale")
+        return self.load_circuit(runtime_id, variant_id)
+
     def require_ready_circuit_recovery(
         self,
         *,
@@ -907,6 +962,103 @@ class StateStore:
                 """,
                 (lease_id, resource_key, execution_id, _utc_now()),
             )
+
+    def acquire_writer_scope_leases(
+        self,
+        *,
+        workspace_key: str,
+        write_set: tuple[str, ...],
+        execution_id: str,
+    ) -> None:
+        """Atomically acquire non-overlapping tree scopes for one execution."""
+
+        _require_id(workspace_key, "workspace_key", 4096)
+        _require_id(execution_id, "execution_id", 128)
+        if not write_set:
+            raise StateError("REQUEST_INVALID", "writer write_set must not be empty")
+        for scope in write_set:
+            _require_id(scope, "write_set", 2048)
+        prefix = _WRITER_SCOPE_PREFIX
+        requested = tuple(
+            dict.fromkeys(
+                _writer_scope_key(workspace_key, scope) for scope in write_set
+            )
+        )
+        with self.transaction(write=True) as database:
+            if database.execute(
+                "SELECT 1 FROM executions WHERE execution_id = ?",
+                (execution_id,),
+            ).fetchone() is None:
+                raise StateError("EXECUTION_NOT_FOUND", "execution does not exist")
+            legacy = database.execute(
+                """
+                SELECT execution_id FROM leases
+                WHERE kind = 'writer' AND released_at_utc IS NULL
+                  AND resource_key LIKE ?
+                """,
+                (_LEGACY_WRITER_SCOPE_PREFIX + "%",),
+            ).fetchall()
+            if any(
+                owner_execution_id != execution_id
+                for (owner_execution_id,) in legacy
+            ):
+                raise StateError(
+                    "WRITE_SET_BUSY",
+                    "an active legacy writer must finish before scoped writers continue",
+                )
+            active = database.execute(
+                """
+                SELECT resource_key, execution_id FROM leases
+                WHERE kind = 'writer' AND released_at_utc IS NULL
+                  AND resource_key LIKE ?
+                """,
+                (prefix + "%",),
+            ).fetchall()
+            for resource_key, owner_execution_id in active:
+                if owner_execution_id == execution_id:
+                    continue
+                existing_scope = str(resource_key)[len(prefix) :]
+                if any(
+                    _writer_scopes_overlap(scope, existing_scope)
+                    for scope in requested
+                ):
+                    raise StateError(
+                        "WRITE_SET_BUSY",
+                        "declared write set overlaps an active writer",
+                    )
+            existing_keys = {
+                str(resource_key)
+                for resource_key, owner_execution_id in active
+                if owner_execution_id == execution_id
+            }
+            for scope in requested:
+                resource_key = prefix + scope
+                if resource_key in existing_keys:
+                    continue
+                lease_id = "writer-" + hashlib.sha256(
+                    f"{execution_id}\0{resource_key}".encode("utf-8")
+                ).hexdigest()
+                previous = database.execute(
+                    "SELECT resource_key, execution_id, kind"
+                    " FROM leases WHERE lease_id = ?",
+                    (lease_id,),
+                ).fetchone()
+                if previous is not None:
+                    if previous != (resource_key, execution_id, "writer"):
+                        raise StateError(
+                            "DATABASE_CORRUPT",
+                            "writer lease identity conflicts with durable state",
+                        )
+                    continue
+                database.execute(
+                    """
+                    INSERT INTO leases(
+                        lease_id, resource_key, execution_id, kind,
+                        acquired_at_utc, expires_at_utc, released_at_utc
+                    ) VALUES (?, ?, ?, 'writer', ?, NULL, NULL)
+                    """,
+                    (lease_id, resource_key, execution_id, _utc_now()),
+                )
 
     def release_execution_leases(self, execution_id: str) -> None:
         _require_id(execution_id, "execution_id", 128)
@@ -1670,6 +1822,31 @@ def _require_id(value: object, label: str, max_bytes: int) -> None:
         raise StateError("REQUEST_INVALID", f"{label} is too long")
     if any(unicodedata.category(character) == "Cc" for character in value):
         raise StateError("REQUEST_INVALID", f"{label} contains a control character")
+
+
+_WRITER_SCOPE_PREFIX = "writer-scope-v3:"
+_LEGACY_WRITER_SCOPE_PREFIX = "writer-scope-v2:"
+
+
+def _writer_scope_key(workspace_key: str, scope: str) -> str:
+    normalized = scope.replace("\\", "/").strip("/")
+    candidate = workspace_key
+    if normalized not in {"", "."}:
+        candidate = os.path.join(workspace_key, *normalized.split("/"))
+    result = os.path.normpath(candidate).replace("\\", "/")
+    return result.casefold() if os.name == "nt" else result
+
+
+def _writer_scopes_overlap(left: str, right: str) -> bool:
+    if os.name == "nt":
+        left = left.casefold()
+        right = right.casefold()
+    if left == "." or right == ".":
+        return True
+    left_parts = tuple(part for part in left.split("/") if part)
+    right_parts = tuple(part for part in right.split("/") if part)
+    common = min(len(left_parts), len(right_parts))
+    return left_parts[:common] == right_parts[:common]
 
 
 def _is_recovery_required(result_json: object) -> bool:

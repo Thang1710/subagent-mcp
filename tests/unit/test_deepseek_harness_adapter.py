@@ -16,6 +16,7 @@ from subagent_harness_mcp.adapters import (
 )
 from subagent_harness_mcp.adapters.deepseek_harness import (
     CONTROLLER_RESULT_MAX_CHARS,
+    DEFAULT_TURN_TIMEOUT_SECONDS,
     DeepSeekHarnessAdapter,
     DshBinding,
     DshLaunch,
@@ -38,6 +39,17 @@ def test_durable_result_has_large_bound_and_explicit_truncation() -> None:
     assert result.endswith("\n[truncated by Subagent MCP]")
 
 
+def test_product_default_has_no_elapsed_turn_deadline(tmp_path: Path) -> None:
+    adapter = DeepSeekHarnessAdapter(
+        binding_locator=lambda: _binding(tmp_path),
+        client_factory=lambda launch: _FakeAcpClient(launch),
+        data_root=tmp_path / "data",
+    )
+
+    assert DEFAULT_TURN_TIMEOUT_SECONDS is None
+    assert adapter._turn_timeout is None
+
+
 class _FakeAcpClient:
     def __init__(self, launch: DshLaunch) -> None:
         self.launch = launch
@@ -46,13 +58,15 @@ class _FakeAcpClient:
         self.cancelled: list[str] = []
         self.prompts: list[tuple[str, str]] = []
         self.responses: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
+        self.session_cwd: str | None = None
 
     async def start(self) -> None:
         self.started = True
 
     async def new_session(self, cwd: str) -> str:
         assert self.started
-        assert cwd == self.launch.workspace_path
+        self.session_cwd = cwd
+        assert cwd == (self.launch.write_root_path or self.launch.workspace_path)
         return "dsh-session-1"
 
     async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
@@ -112,6 +126,7 @@ def _context_request(workspace: Path, **overrides: object) -> AdapterContextRequ
         "permissions": ("repo_read", "git_read", "run_tests", "workspace_write"),
         "context_policy_id": "declared-native",
         "permission_policy_id": "default",
+        "write_set": (".",),
     }
     values.update(overrides)
     return AdapterContextRequest(**values)  # type: ignore[arg-type]
@@ -148,6 +163,55 @@ def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None
     assert context.attestation["permission_mode"] == "workspace-write"
     assert "resume_after_restart" in context.capability_gaps
     assert "provider_quota_evidence" in context.capability_gaps
+
+
+def test_write_scope_becomes_native_session_cwd_and_multi_root_fails_closed(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        write_root = workspace / "src" / "context"
+        write_root.mkdir(parents=True)
+        clients: list[_FakeAcpClient] = []
+
+        def factory(launch: DshLaunch) -> _FakeAcpClient:
+            client = _FakeAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(
+            _context_request(workspace, write_set=("src/context",))
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-scope",
+                "execution-scope",
+                TaskPacket("Implement", "Change context.", ("Done",), "writer"),
+                context,
+            )
+        )
+        await asyncio.sleep(0)
+
+        assert clients[0].launch.write_root_path == str(write_root.resolve())
+        assert clients[0].session_cwd == str(write_root.resolve())
+        assert str(workspace.resolve()) in clients[0].prompts[0][1]
+        with pytest.raises(ServiceError) as captured:
+            await adapter.resolve_context(
+                _context_request(
+                    workspace,
+                    write_set=("src/context", "docs/status"),
+                )
+            )
+        assert captured.value.code == "CAPABILITY_MISSING"
+
+    asyncio.run(scenario())
 
 
 def test_native_model_catalog_is_cached_by_binding_and_settings_identity(

@@ -60,8 +60,8 @@ PROVIDER_SAFETY_ENV = {
     "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
     "DISABLE_EXTRA_USAGE_COMMAND": "1",
 }
-QUOTA_EVIDENCE_GRACE_SECONDS = 0.5
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 180.0
+DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
 DURABLE_RESULT_MAX_CHARS = 65_536
 CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 _CONTROLLER_TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
@@ -119,6 +119,7 @@ class ClaudeCodeAdapter:
         sdk_version: str | None = None,
         bundled_cli_paths: Sequence[Path] | None = None,
         canary_timeout_seconds: float = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
+        turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self._cli_path = cli_path
         self._command_runner = command_runner or _run_command
@@ -126,6 +127,7 @@ class ClaudeCodeAdapter:
         self._sdk_version = sdk_version
         self._bundled_cli_paths = bundled_cli_paths
         self._canary_timeout = canary_timeout_seconds
+        self._turn_timeout = turn_timeout_seconds
         self._last_probe_pair: str | None = None
         self._sessions: dict[str, _ManagedSession] = {}
         self._active_clients: dict[str, tuple[Any, ResolvedContext, str]] = {}
@@ -341,65 +343,18 @@ class ClaudeCodeAdapter:
         request: CanaryRequest,
         effort: str,
     ) -> CanaryResult:
-        from claude_agent_sdk import (
-            AssistantMessage,
-            RateLimitEvent,
-            ResultMessage,
-            SystemMessage,
-        )
-
+        del effort
         await asyncio.wait_for(client.connect(None), timeout=self._canary_timeout)
-        messages = client.receive_messages().__aiter__()
-        while True:
-            message = await asyncio.wait_for(
-                messages.__anext__(),
-                timeout=min(self._canary_timeout, QUOTA_EVIDENCE_GRACE_SECONDS),
-            )
-            if isinstance(message, (AssistantMessage, ResultMessage)):
-                return await self._interrupt_for_guard_failure(
-                    client,
-                    request.pair_key,
-                    AdapterFailure(
-                        "USAGE_CREDITS_FORBIDDEN",
-                        "quota",
-                        False,
-                        "Claude produced model output before quota evidence",
-                    ),
-                )
-            if isinstance(message, SystemMessage) and message.subtype == "init":
-                data = message.data
-                if (
-                    data.get("model") != request.model
-                    or data.get("mcp_servers") != []
-                    or not _subscription_oauth_source(data)
-                    or not isinstance(data.get("session_id"), str)
-                    or not data["session_id"]
-                ):
-                    return _failure(
-                        request.pair_key,
-                        AdapterFailure(
-                            "CONTEXT_DRIFT",
-                            "adapter",
-                            False,
-                            "Claude quota probe init identity did not match",
-                        ),
-                        {},
-                    )
-            elif isinstance(message, RateLimitEvent):
-                unsafe = _unsafe_rate(message.rate_limit_info)
-                if unsafe is not None:
-                    return _failure(request.pair_key, unsafe, {})
-                return CanaryResult(
-                    True,
-                    request.pair_key,
-                    {
-                        "model": request.model,
-                        "effort": effort,
-                        "rate_evidence_seen": True,
-                        "is_using_overage": False,
-                        "overage_blocked": True,
-                    },
-                )
+        return _failure(
+            request.pair_key,
+            AdapterFailure(
+                "CAPABILITY_MISSING",
+                "provider",
+                False,
+                "Claude SDK exposes exact rate status only on a provider response",
+            ),
+            {},
+        )
 
     async def _run_guarded_canary(
         self,
@@ -425,7 +380,7 @@ class ClaudeCodeAdapter:
         init_session: str | None = None
         init_seen = False
         rate_seen = False
-        while not (init_seen and rate_seen):
+        while not init_seen:
             message = await asyncio.wait_for(
                 messages.__anext__(), timeout=self._canary_timeout
             )
@@ -434,10 +389,10 @@ class ClaudeCodeAdapter:
                     client,
                     request.pair_key,
                     AdapterFailure(
-                        "USAGE_CREDITS_FORBIDDEN",
-                        "quota",
+                        "CONTEXT_DRIFT",
+                        "adapter",
                         False,
-                        "Claude produced model output before the no-overage guard",
+                        "Claude emitted output before startup status completed",
                     ),
                 )
             if isinstance(message, SystemMessage) and message.subtype == "init":
@@ -512,6 +467,7 @@ class ClaudeCodeAdapter:
                     message.is_error is not False
                     or message.session_id != init_session
                     or not assistant_seen
+                    or not rate_seen
                     or message.terminal_reason in {"aborted_streaming", "aborted_tools"}
                 ):
                     return _failure(
@@ -566,10 +522,14 @@ class ClaudeCodeAdapter:
         if self._last_probe_pair != bound.pair_key:
             raise ServiceError("CONTEXT_DRIFT", "Claude runtime identity changed after readiness check")
         effort = _validate_reasoning(request.model, request.reasoning)
+        write_set = request.write_set or (
+            (".",) if "workspace_write" in request.permissions else ()
+        )
         attestation = {
             "source": "claude-code-managed-sdk",
             "variant_id": request.variant_id,
             "permissions": list(request.permissions),
+            "write_set": list(write_set),
             "context_policy_id": request.context_policy_id,
             "permission_policy_id": request.permission_policy_id,
         }
@@ -583,6 +543,7 @@ class ClaudeCodeAdapter:
             workspace_key=request.workspace_key,
             transport=request.transport,
             permissions=request.permissions,
+            write_set=write_set,
             context_policy_id=request.context_policy_id,
             permission_policy_id=request.permission_policy_id,
         )
@@ -724,7 +685,7 @@ class ClaudeCodeAdapter:
             await asyncio.wait_for(client.connect(None), timeout=self._canary_timeout)
             messages = client.receive_messages().__aiter__()
             await asyncio.wait_for(client.query(prompt), timeout=self._canary_timeout)
-            session_id = await self._await_lifecycle_guard(
+            session_id, rate_seen = await self._await_lifecycle_guard(
                 client,
                 messages,
                 context=context,
@@ -737,6 +698,7 @@ class ClaudeCodeAdapter:
                 context=context,
                 session_id=session_id,
                 external_execution_id=external_execution_id,
+                rate_seen=rate_seen,
             )
         except (TimeoutError, asyncio.TimeoutError) as exc:
             failure = ServiceError("RECOVERY_REQUIRED", "Claude terminal turn timed out", category="adapter")
@@ -772,28 +734,19 @@ class ClaudeCodeAdapter:
         *,
         context: ResolvedContext,
         expected_session_id: str | None,
-    ) -> str:
+    ) -> tuple[str, bool]:
         from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, SystemMessage
 
         session_id: str | None = None
         rate_seen = False
-        while session_id is None or not rate_seen:
+        while session_id is None:
             message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
             if isinstance(message, (AssistantMessage, ResultMessage)):
-                failure = (
-                    AdapterFailure(
-                        "USAGE_CREDITS_FORBIDDEN",
-                        "quota",
-                        False,
-                        "Claude produced model output before safe rate evidence",
-                    )
-                    if session_id is not None
-                    else AdapterFailure(
-                        "CONTEXT_DRIFT",
-                        "adapter",
-                        False,
-                        "Claude produced model output before init identity",
-                    )
+                failure = AdapterFailure(
+                    "CONTEXT_DRIFT",
+                    "adapter",
+                    False,
+                    "Claude emitted output before startup status completed",
                 )
                 await _interrupt_or_recovery(
                     client,
@@ -830,7 +783,7 @@ class ClaudeCodeAdapter:
                         client, unsafe, self._canary_timeout
                     )
                 rate_seen = True
-        return session_id
+        return session_id, rate_seen
 
     async def _receive_terminal_result(
         self,
@@ -840,6 +793,7 @@ class ClaudeCodeAdapter:
         context: ResolvedContext,
         session_id: str,
         external_execution_id: str,
+        rate_seen: bool,
     ) -> AdapterSnapshot:
         from claude_agent_sdk import (
             AssistantMessage,
@@ -852,11 +806,17 @@ class ClaudeCodeAdapter:
         text_parts: list[str] = []
         captured_chars = 0
         while True:
-            message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
+            pending = messages.__anext__()
+            message = (
+                await pending
+                if self._turn_timeout is None
+                else await asyncio.wait_for(pending, timeout=self._turn_timeout)
+            )
             if isinstance(message, RateLimitEvent):
                 unsafe = _unsafe_rate(message.rate_limit_info)
                 if unsafe is not None:
                     await _interrupt_or_recovery(client, unsafe, self._canary_timeout)
+                rate_seen = True
                 continue
             if isinstance(message, AssistantMessage):
                 if message.model != context.effective_model or (
@@ -881,6 +841,12 @@ class ClaudeCodeAdapter:
             elif isinstance(message, ResultMessage):
                 if message.session_id != session_id:
                     raise ServiceError("CONTEXT_DRIFT", "Claude terminal session changed")
+                if not rate_seen:
+                    raise ServiceError(
+                        "CAPABILITY_MISSING",
+                        "Claude task response did not publish exact rate status",
+                        category="provider",
+                    )
                 if (
                     message.is_error is not False
                     or not assistant_seen
@@ -1044,6 +1010,7 @@ def _lifecycle_context_hash(
     workspace_key: str,
     transport: str,
     permissions: Sequence[str],
+    write_set: Sequence[str],
     context_policy_id: str,
     permission_policy_id: str,
 ) -> str:
@@ -1058,6 +1025,7 @@ def _lifecycle_context_hash(
         "workspace_key": workspace_key,
         "transport": transport,
         "permissions": list(permissions),
+        "write_set": list(write_set),
         "context_policy_id": context_policy_id,
         "permission_policy_id": permission_policy_id,
     }
@@ -1080,7 +1048,7 @@ def _build_lifecycle_options(
     *,
     resume: str | None,
 ):
-    from claude_agent_sdk import ClaudeAgentOptions
+    from claude_agent_sdk import ClaudeAgentOptions, HookMatcher
 
     if context.runtime_id != "claude-code" or context.transport != "managed-sdk":
         raise ServiceError("CONTEXT_DRIFT", "Claude managed context changed")
@@ -1093,6 +1061,7 @@ def _build_lifecycle_options(
     attestation = context.attestation
     variant_id = attestation.get("variant_id")
     permissions = attestation.get("permissions")
+    write_set = attestation.get("write_set")
     context_policy_id = attestation.get("context_policy_id")
     permission_policy_id = attestation.get("permission_policy_id")
     if (
@@ -1100,6 +1069,8 @@ def _build_lifecycle_options(
         or not isinstance(variant_id, str)
         or not isinstance(permissions, list)
         or not all(isinstance(item, str) for item in permissions)
+        or not isinstance(write_set, list)
+        or not all(isinstance(item, str) for item in write_set)
         or not isinstance(context_policy_id, str)
         or not isinstance(permission_policy_id, str)
     ):
@@ -1117,24 +1088,40 @@ def _build_lifecycle_options(
         workspace_key=context.workspace_key,
         transport=context.transport,
         permissions=tuple(permissions),
+        write_set=tuple(write_set),
         context_policy_id=context_policy_id,
         permission_policy_id=permission_policy_id,
     )
     if expected_hash != context.context_hash:
         raise ServiceError("CONTEXT_DRIFT", "Claude runtime/model/workspace context changed")
     tools = ["Read", "Glob", "Grep"]
+    hooks = None
     if "workspace_write" in permissions:
         tools.extend(["Edit", "Write"])
+        hooks = {
+            "PreToolUse": [
+                HookMatcher(
+                    matcher="Edit|Write",
+                    hooks=[_claude_write_scope_hook(context.workspace_path, tuple(write_set))],
+                    timeout=5.0,
+                )
+            ]
+        }
     return ClaudeAgentOptions(
         cli_path=bound.cli_path,
         system_prompt={"type": "preset", "preset": "claude_code"},
-        setting_sources=["user"],
+        setting_sources=(
+            []
+            if "workspace_write" in permissions and tuple(write_set) != (".",)
+            else ["user"]
+        ),
         skills="all",
         strict_mcp_config=True,
         mcp_servers={},
         tools=tools,
         allowed_tools=list(tools),
         disallowed_tools=list(RECURSION_DENIES),
+        hooks=hooks,
         permission_mode="dontAsk",
         cwd=Path(context.workspace_path),
         model=context.effective_model,
@@ -1151,6 +1138,50 @@ def _build_lifecycle_options(
     )
 
 
+def _claude_write_scope_hook(workspace_path: str, write_set: tuple[str, ...]):
+    workspace = Path(workspace_path).resolve(strict=True)
+    roots = tuple(
+        workspace if scope == "." else (workspace / Path(*scope.split("/"))).resolve(strict=False)
+        for scope in write_set
+    )
+
+    async def guard(tool_input: Any, _tool_use_id: Any, _context: Any) -> dict[str, Any]:
+        payload = tool_input.get("tool_input") if isinstance(tool_input, Mapping) else None
+        raw_path = payload.get("file_path") if isinstance(payload, Mapping) else None
+        allowed = False
+        if isinstance(raw_path, str) and raw_path:
+            candidate = Path(raw_path)
+            if not candidate.is_absolute():
+                candidate = workspace / candidate
+            candidate = candidate.resolve(strict=False)
+            allowed = any(_path_is_within(candidate, root) for root in roots)
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "allow" if allowed else "deny",
+                "permissionDecisionReason": (
+                    "path is inside the attested write set"
+                    if allowed
+                    else "path is outside the attested write set"
+                ),
+            }
+        }
+
+    return guard
+
+
+def _path_is_within(candidate: Path, root: Path) -> bool:
+    candidate_key = os.path.normcase(str(candidate))
+    root_key = os.path.normcase(str(root))
+    if os.name == "nt":
+        candidate_key = candidate_key.casefold()
+        root_key = root_key.casefold()
+    try:
+        return os.path.commonpath((candidate_key, root_key)) == root_key
+    except ValueError:
+        return False
+
+
 def _spawn_prompt(request: AdapterSpawnRequest) -> str:
     task = request.task
     lines = [
@@ -1161,6 +1192,17 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
         "Acceptance criteria:",
         *(f"- {item}" for item in task.acceptance_criteria),
     ]
+    context = getattr(request, "context", None)
+    attestation = getattr(context, "attestation", {})
+    write_set = attestation.get("write_set", ()) if isinstance(attestation, Mapping) else ()
+    if write_set:
+        lines.extend(
+            (
+                f"Verified repository root: {context.workspace_path}",
+                "Write only within these repository-relative paths:",
+                *(f"- {item}" for item in write_set),
+            )
+        )
     if task.authority:
         lines.extend(("Authority:", *(f"- {item}" for item in task.authority)))
     return "\n".join(lines)
@@ -1211,7 +1253,11 @@ def _terminal_snapshot(
         evidence={
             "source": "claude-code-managed-sdk",
             "terminal_synchronous": True,
-            "quota_guard": "subscription-hard-stop-and-live-monitor",
+            "quota_guard": "exact-task-response-and-live-monitor",
+            "rate_evidence_seen": True,
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": True,
         },
     )
 

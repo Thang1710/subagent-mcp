@@ -51,9 +51,16 @@ The provider result remains capped by the existing adapter bound and is not summ
 
 ## UI and quota separation
 
-The localhost UI talks directly to the local MCP backend. Refreshing quota/runtime status must not create a Codex model turn. Provider quota probing is a separate adapter capability: if a provider cannot confirm entitlement/remaining quota safely, the UI reports unknown and managed spawn fails closed.
+The localhost UI talks directly to the local MCP backend. Refreshing
+quota/runtime status must not create a Codex or provider model turn. If a
+provider cannot confirm entitlement safely without a response, the UI reports
+unknown. A managed task validates exact native identity before its useful query
+only where the native control surface publishes it. Claude binds its CLI,
+subscription auth, credentials, and requested options first, then accepts output
+only after exact stream identity and safe rate evidence from that same response.
 
-No reset clock is hard-coded. Refresh and pre-spawn checks use current provider evidence, so plan upgrades become visible on the next probe.
+No reset clock is hard-coded. A later requested task checks current provider
+evidence, so plan upgrades become visible on its next native response.
 
 ## Measurement
 

@@ -14,7 +14,7 @@ Codex's native subagent pool and can use provider quota under an explicit
 runtime billing policy. Subagent MCP never enables, purchases, auto-reloads, or
 silently opts into usage credits or paid overage.
 
-> **Preview:** `0.1.0a23` targets Windows. The local MCP, deterministic adapter,
+> **Preview:** `0.1.0a24` targets Windows. The local MCP, deterministic adapter,
 > package, localhost UI, and Claude Code native-harness integration are ready.
 
 ### Runtime status
@@ -43,8 +43,8 @@ winget install --id=astral-sh.uv -e
 Then install the pinned preview and connect it to Codex:
 
 ```powershell
-uv tool install subagent-harness-mcp==0.1.0a23
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a23 subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==0.1.0a24
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
 ```
 
 The installed tool provides the CLI and localhost UI. Codex runs the stdio MCP
@@ -105,9 +105,9 @@ the pinned uvx command:
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a23
+uv tool install --reinstall subagent-harness-mcp==0.1.0a24
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a23 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a24 subagent-harness-mcp serve
 subagent-harness-mcp ui --background
 ```
 
@@ -126,6 +126,23 @@ and delegate in natural language. For example:
 Codex decides what to delegate, observes the result, and keeps the final
 judgment. Underneath, each adapter maps the same lifecycle to its native
 harness: spawn, inspect or wait, send follow-up input or interrupt, then close.
+
+### Run independent writers in one workspace
+
+For a write task, Codex can declare up to 32 repository-relative directory or
+file roots in `write_set`. Two external agents may run at the same time when
+their canonical absolute sets are disjoint, including when their declared
+workspace roots differ or nest. Equal paths and parent/child paths conflict;
+the task or lane name has no effect on locking. Omitting `write_set` keeps the
+safe backwards-compatible behavior: that execution owns its whole workspace.
+
+The lease is only one part of the contract. Each adapter must attest and enforce
+the same normalized paths through its native harness boundary. Claude Code can
+guard multiple roots. The DeepSeek Harness preview currently supports one
+existing directory tree per write-capable session and returns a capability gap
+instead of silently widening a multi-root request. These leases coordinate
+Subagent MCP executions; they cannot stop an unrelated local process from
+editing the same files.
 
 ### Configure DeepSeek Harness (development)
 
@@ -212,7 +229,7 @@ for details.
 | Deterministic adapter for integration testing | Works without provider quota |
 | Separately packaged sample adapter and public conformance runner | Works from an installed wheel |
 | Localhost settings and activity UI | Works |
-| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a23` |
+| Windows install, update, rollback, registration, and conservative uninstall | Artifact install acceptance targets `0.1.0a24` |
 | Claude Code native adapter | Ready in the Windows preview |
 | Provider model selection | Native catalog names with a user-ordered priority stack; exact IDs remain available under Advanced |
 
@@ -228,7 +245,7 @@ Point any stdio-compatible MCP client at the installed command:
   "command": "uvx",
   "args": [
     "--from",
-    "subagent-harness-mcp==0.1.0a23",
+    "subagent-harness-mcp==0.1.0a24",
     "subagent-harness-mcp",
     "serve"
   ]
@@ -241,21 +258,27 @@ tools. Public schemas live in [`schemas/`](schemas/).
 ## Safety and billing
 
 - Subagent MCP never enables usage credits or changes billing settings.
-- Each Claude turn is a bounded live native-harness request. The adapter accepts
-  its output only after `claude auth status`, the live OAuth init event, and a
-  safe no-overage rate event agree. Missing or unsafe evidence interrupts the
-  request and discards its output.
-- Claude exposes that rate evidence only on the live stream, so this guard can
-  consume included subscription quota. It cannot inspect or change Claude's
-  account-level usage-credit toggle; subscription-only users must keep usage
-  credits disabled in Claude. Subagent MCP never turns them on.
+- Each Claude task validates the bound CLI, subscription auth, credential
+  precedence, and control connection before sending its one useful query. It
+  then requires exact typed stream initialization and safe rate-limit evidence
+  from that same response before accepting output. Explicit unsafe evidence
+  interrupts the request and discards its output; no second paid status query
+  is made.
+- Claude task requests can consume included subscription quota. The status-only
+  probe does not submit a model prompt, and Subagent MCP never uses that probe to
+  manufacture an availability answer when native evidence is missing.
+- The adapter cannot inspect or change Claude's account-level usage-credit
+  toggle; subscription-only users must keep usage credits disabled in Claude.
+  Subagent MCP never turns them on.
 - Missing local model, workspace, or session configuration blocks launch. Live
   identity or rate mismatches interrupt before output is accepted. A configured
   fallback is selected only after an explicit `QUOTA_PAUSED` result; ambiguous
   failures never trigger another paid request.
-- Provider Refresh is a no-model preflight. It never launches a canary or task;
-  when a native harness cannot expose pre-turn quota evidence, the UI reports
-  `Unknown` instead of spending provider quota to manufacture an answer.
+- Provider Refresh is a no-model initialization check. The current Claude SDK
+  publishes exact rate status only with a provider response, so Refresh reports
+  `Unknown` when no pre-response event exists. No reset clock or cached
+  checkpoint can block a requested task; its own safe response can reopen only
+  the exact paused model variant.
 - Provider model IDs and reasoning settings remain native, opaque values.
 - Product data stays in explicit local config, state, and data roots. Optional
   client registration uses the client's official command and verifies the exact

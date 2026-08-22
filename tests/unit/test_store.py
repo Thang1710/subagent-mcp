@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sqlite3
 import threading
@@ -415,7 +416,7 @@ def test_lifecycle_identity_events_and_terminal_result_are_atomic_and_deduplicat
     assert [event.kind for event in events] == ["started", "completed"]
 
 
-def test_writer_lease_helpers_fail_closed_and_release_on_owner_request(
+def test_scoped_writer_leases_allow_disjoint_roots_and_block_real_overlap(
     tmp_path: Path,
 ) -> None:
     store = StateStore.open(_paths(tmp_path))
@@ -427,25 +428,96 @@ def test_writer_lease_helpers_fail_closed_and_release_on_owner_request(
         execution_id="execution-2",
     ).execution_id
 
-    store.acquire_writer_lease(
-        lease_id="lease-1",
-        resource_key="workspace:one",
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("src/context",),
         execution_id=first_execution,
     )
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("src/context",),
+        execution_id=first_execution,
+    )
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("docs/status",),
+        execution_id=second_execution,
+    )
     with pytest.raises(StateError) as captured:
-        store.acquire_writer_lease(
-            lease_id="lease-2",
-            resource_key="workspace:one",
+        store.acquire_writer_scope_leases(
+            workspace_key="workspace:one",
+            write_set=("src",),
             execution_id=second_execution,
         )
     store.release_execution_leases(first_execution)
-    store.acquire_writer_lease(
-        lease_id="lease-2",
-        resource_key="workspace:one",
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("src/context",),
+        execution_id=first_execution,
+    )
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("src",),
         execution_id=second_execution,
     )
 
-    assert captured.value.code == "WORKSPACE_BUSY"
+    assert captured.value.code == "WRITE_SET_BUSY"
+    with store.transaction() as database:
+        active = database.execute(
+            "SELECT COUNT(*) FROM leases WHERE released_at_utc IS NULL"
+        ).fetchone()[0]
+    assert active == 2
+
+
+def test_scoped_writer_lease_ignores_legacy_workspace_mutex_row(tmp_path: Path) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    first_execution = _claim(store).execution_id
+    second_execution = _claim(
+        store,
+        request_id="request-2",
+        conversation_id="conversation-2",
+        execution_id="execution-2",
+    ).execution_id
+    store.acquire_writer_lease(
+        lease_id="legacy-lease",
+        resource_key="workspace:workspace:one",
+        execution_id=first_execution,
+    )
+
+    store.acquire_writer_scope_leases(
+        workspace_key="workspace:one",
+        write_set=("docs/status",),
+        execution_id=second_execution,
+    )
+
+
+def test_active_v2_scope_blocks_new_scoped_writers_during_upgrade(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    first_execution = _claim(store).execution_id
+    second_execution = _claim(
+        store,
+        request_id="request-2",
+        conversation_id="conversation-2",
+        execution_id="execution-2",
+    ).execution_id
+    workspace_key = "workspace:one"
+    digest = hashlib.sha256(workspace_key.encode("utf-8")).hexdigest()
+    store.acquire_writer_lease(
+        lease_id="legacy-v2-lease",
+        resource_key=f"writer-scope-v2:{digest}:src/context",
+        execution_id=first_execution,
+    )
+
+    with pytest.raises(StateError) as captured:
+        store.acquire_writer_scope_leases(
+            workspace_key=workspace_key,
+            write_set=("docs/status",),
+            execution_id=second_execution,
+        )
+
+    assert captured.value.code == "WRITE_SET_BUSY"
 
 
 def test_action_request_response_is_replayed_without_repeating_side_effect(
@@ -568,6 +640,57 @@ def test_ready_circuit_pauses_with_cas_and_only_fresh_canary_can_probe(
     assert replay.created is False
     assert recovery.created is True
     assert recovery.state == "probing"
+
+
+def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="opus",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    claimed = store.claim_canary_request(
+        request_id="canary-initial",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="opus",
+        pair_key="a" * 64,
+    )
+    ready = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="opus",
+        pair_key="a" * 64,
+        expected_revision=claimed.revision,
+        state="ready",
+        details={"model": "claude-opus-5", "cleanup_confirmed": True},
+    )
+    paused = store.pause_ready_circuit(
+        runtime_id="claude-code",
+        variant_id="opus",
+        pair_key=ready.pair_key,
+        expected_revision=ready.revision,
+        error_code="QUOTA_PAUSED",
+    )
+
+    recovered = store.resume_paused_circuit(
+        runtime_id="claude-code",
+        variant_id="opus",
+        pair_key=paused.pair_key,
+        expected_revision=paused.revision,
+        details={
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": True,
+        },
+    )
+
+    assert recovered.state == "ready"
+    assert recovered.details["model"] == "claude-opus-5"
+    assert recovered.details["is_using_overage"] is False
+    assert "error_code" not in recovered.details
 
 
 def test_ready_circuit_requires_verified_cleanup_after_ambiguous_probe(

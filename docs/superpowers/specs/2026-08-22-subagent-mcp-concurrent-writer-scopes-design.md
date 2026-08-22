@@ -21,11 +21,15 @@ parent traversal, empty/NUL values, and paths that resolve outside the verified
 workspace. Nested entries in one request collapse to the least redundant set.
 Windows comparison is case-insensitive; POSIX comparison is case-sensitive.
 
-Within one canonical workspace, two active writers conflict only when a root is
-equal to, an ancestor of, or a descendant of a root in the other set. Acquisition
-of the entire set occurs in one SQLite write transaction. Every execution keeps
-its own lease rows for ownership, terminal release, and recovery. Pre-scoped
-legacy workspace rows remain evidence but do not block a new scoped lease.
+The store resolves each declared root to a canonical absolute comparison key.
+Two active writers conflict only when a root is equal to, an ancestor of, or a
+descendant of a root in the other set, even when callers declare different or
+nested workspace roots. Acquisition of the entire set occurs in one SQLite
+write transaction. Every execution keeps its own lease rows for ownership,
+terminal release, and recovery. Terminal idempotent replay treats its matching
+released deterministic row as a no-op. Pre-scoped whole-workspace rows remain
+evidence but do not block a new scoped lease; an active v2 scoped row blocks new
+scoped writers conservatively until its owning execution finishes.
 
 `write_set` is persisted in the idempotency digest, requested metadata, and
 adapter context attestation. `agent_send` reuses the original set. A display lane
@@ -68,5 +72,5 @@ writer scheduling.
 4. Idempotent replay does not duplicate leases or model work.
 5. Claude path gating and DeepSeek single-root native cwd are covered by
    deterministic adapter tests.
-6. Existing terminal release/recovery tests remain green.
-
+6. Nested workspace roots cannot bypass equal/ancestor/descendant conflicts.
+7. Existing terminal release/recovery tests remain green.

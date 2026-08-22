@@ -2,6 +2,28 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a24 - 2026-08-22
+
+- Allow write-capable external agents to work concurrently when their canonical
+  absolute write roots are disjoint, even when callers use different or nested
+  workspace roots; equal and ancestor/descendant scopes remain atomically
+  exclusive. Terminal spawn/send replay reuses released lease identity without
+  duplicating rows or model work.
+- Attest and enforce each write set at the native adapter boundary. Claude
+  guards `Edit` and `Write` paths; DeepSeek ACP narrows the native session to
+  one declared directory tree and rejects unsupported multi-root scopes.
+- Validate Claude's bound CLI, subscription auth, credential precedence, and
+  control connection before a useful query, then require exact typed stream
+  identity plus safe rate evidence from that same response before accepting
+  output. Connect-only UI Refresh reports `Unknown`; explicit quota or
+  forbidden-credit evidence pauses only the affected model, while a later safe
+  task response reopens it without a reset-time checkpoint or status query.
+- Remove product-imposed completion deadlines from ordinary Claude managed and
+  DeepSeek ACP turns while retaining bounded initialization, query submission,
+  cancellation, and connection cleanup.
+- Preserve the last verified conversation context when a provider response is
+  rejected so a later safe response can resume that session.
+
 ## 0.1.0a23 - 2026-08-22
 
 - Register Codex's stdio MCP through a pinned `uvx --from` environment that is

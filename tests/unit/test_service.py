@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -109,6 +110,19 @@ class _QuotaFakeAdapter(FakeAdapter):
             },
         )
 
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            evidence={
+                **dict(snapshot.evidence),
+                "rate_evidence_seen": True,
+                "is_using_overage": False,
+                "overage_blocked": True,
+                "cleanup_confirmed": True,
+            },
+        )
+
 
 class _CatalogFakeAdapter(FakeAdapter):
     async def model_catalog(self) -> tuple[dict[str, str], ...]:
@@ -195,6 +209,30 @@ def _spawn_request(
         mode="implement" if write else "review",
         transport="managed-sdk",
         permissions=("repo_read", "workspace_write") if write else ("repo_read",),
+    )
+
+
+def _scoped_spawn_request(
+    workspace: Path,
+    *,
+    request_id: str,
+    write_set: tuple[str, ...],
+) -> SpawnRequest:
+    return SpawnRequest(
+        request_id=request_id,
+        runtime_id="fake",
+        variant_id="future-deep",
+        task=TaskPacket(
+            title="Bounded implementation",
+            prompt="Implement only the declared write set.",
+            acceptance_criteria=("Return one normalized result.",),
+            role="sub-agent",
+        ),
+        cwd=str(workspace),
+        mode="implement",
+        transport="managed-sdk",
+        permissions=("repo_read", "workspace_write"),
+        write_set=write_set,
     )
 
 
@@ -410,8 +448,8 @@ def test_runtime_check_gates_ready_circuit_without_claiming_quota_is_exhausted(
             }
         ],
     }
-    assert refreshed["state"] == "auto_paused"
-    assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+    assert refreshed["state"] == "ready"
+    assert store.load_circuit("fake", "future-deep").state == "ready"
     assert adapter.canary_calls == adapter.quota_calls == 1
 
 
@@ -474,16 +512,83 @@ def test_runtime_check_fails_closed_on_ambiguous_quota_evidence(tmp_path: Path) 
             {
                 "variant_id": "future-deep",
                 "state": "unknown",
-                "error_code": "USAGE_CREDITS_FORBIDDEN",
+                "error_code": "CAPABILITY_MISSING",
             }
         ],
     }
     circuit = store.load_circuit("fake", "future-deep")
-    assert circuit.state == "auto_paused"
-    assert circuit.details["error_code"] == "USAGE_CREDITS_FORBIDDEN"
+    assert circuit.state == "ready"
+    assert "error_code" not in circuit.details
     variants = config.load()["runtimes"]["fake"]["variants"]
     assert [item["id"] for item in variants] == ["future-deep"]
     assert "availability" not in variants[0]
+
+
+def test_safe_task_response_reopens_an_explicit_quota_pause_without_extra_probe(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def run():
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+        adapter.quota_error_code = "QUOTA_PAUSED"
+        paused = await service.runtime_check("fake", refresh_quota=True)
+        adapter.quota_error_code = None
+        harness.enqueue("done", result="recovered task")
+        task = await service.agent_spawn(_spawn_request(workspace, request_id="spawn-recovered"))
+        return paused, task
+
+    paused, task = asyncio.run(run())
+
+    assert paused["state"] == "auto_paused"
+    assert task.execution_state == "succeeded"
+    assert store.load_circuit("fake", "future-deep").state == "ready"
+    assert adapter.quota_calls == 1
+
+
+def test_ready_runtime_does_not_spend_a_separate_provider_status_request(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def run():
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+        adapter.quota_error_code = "QUOTA_PAUSED"
+        harness.enqueue("done", result="one useful task request")
+        return await service.agent_spawn(
+            _spawn_request(workspace, request_id="spawn-no-extra-status")
+        )
+
+    task = asyncio.run(run())
+
+    assert task.execution_state == "succeeded"
+    assert adapter.quota_calls == 0
+    assert harness.call_count("spawn") == 1
+    assert store.load_circuit("fake", "future-deep").state == "ready"
 
 
 def test_runtime_check_explains_unknown_no_model_quota_failure(tmp_path: Path) -> None:
@@ -597,6 +702,58 @@ def test_concurrent_idempotent_spawn_calls_adapter_exactly_once(tmp_path: Path) 
         assert database.execute("SELECT COUNT(*) FROM executions").fetchone()[0] == 1
 
 
+def test_terminal_writer_spawn_replay_does_not_reacquire_released_lease(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src").mkdir()
+    harness = FakeHarness()
+    harness.enqueue("done", result="implemented")
+    service, _ = _service(tmp_path, harness)
+    request = _scoped_spawn_request(
+        workspace,
+        request_id="writer-replay",
+        write_set=("src",),
+    )
+
+    first = asyncio.run(service.agent_spawn(request))
+    replay = asyncio.run(service.agent_spawn(request))
+
+    assert replay.execution_id == first.execution_id
+    assert replay.execution_state == "succeeded"
+    assert harness.call_count("spawn") == 1
+
+
+def test_terminal_writer_send_replay_does_not_reacquire_released_lease(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src").mkdir()
+    harness = FakeHarness()
+    harness.enqueue("done", result="spawned")
+    harness.enqueue("done", result="continued")
+    service, _ = _service(tmp_path, harness)
+    spawned = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace,
+                request_id="writer-send-spawn",
+                write_set=("src",),
+            )
+        )
+    )
+    request = SendRequest("writer-send-replay", spawned.conversation_id, "Continue.")
+
+    first = asyncio.run(service.agent_send(request))
+    replay = asyncio.run(service.agent_send(request))
+
+    assert replay.execution_id == first.execution_id
+    assert replay.execution_state == "succeeded"
+    assert harness.call_count("send") == 1
+
+
 def test_request_id_conflict_and_attestation_mismatch_fail_closed(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -617,26 +774,101 @@ def test_request_id_conflict_and_attestation_mismatch_fail_closed(tmp_path: Path
     assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
 
 
-def test_writer_lease_blocks_second_execution_before_adapter_launch(tmp_path: Path) -> None:
+def test_writer_scopes_allow_disjoint_executions_in_same_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    (workspace / "src" / "context").mkdir(parents=True)
+    (workspace / "docs" / "status").mkdir(parents=True)
     harness = FakeHarness()
     harness.enqueue("running")
     harness.enqueue("done")
     service, _ = _service(tmp_path, harness)
 
     first = asyncio.run(
-        service.agent_spawn(_spawn_request(workspace, request_id="writer-1", write=True))
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace, request_id="writer-1", write_set=("src/context",)
+            )
+        )
+    )
+    second = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace, request_id="writer-2", write_set=("docs/status",)
+            )
+        )
+    )
+
+    assert first.execution_state == "running"
+    assert second.execution_state == "succeeded"
+    assert harness.call_count("spawn") == 2
+
+
+def test_writer_scopes_block_parent_child_overlap_before_adapter_launch(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src" / "context").mkdir(parents=True)
+    harness = FakeHarness()
+    harness.enqueue("running")
+    harness.enqueue("done")
+    service, _ = _service(tmp_path, harness)
+
+    first = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace, request_id="writer-1", write_set=("src/context",)
+            )
+        )
     )
     with pytest.raises(ServiceError) as captured:
         asyncio.run(
             service.agent_spawn(
-                _spawn_request(workspace, request_id="writer-2", write=True)
+                _scoped_spawn_request(
+                    workspace, request_id="writer-2", write_set=("src",)
+                )
             )
         )
 
     assert first.execution_state == "running"
-    assert captured.value.code == "WORKSPACE_BUSY"
+    assert captured.value.code == "WRITE_SET_BUSY"
+    assert harness.call_count("spawn") == 1
+
+
+def test_writer_scopes_block_overlap_across_nested_workspace_roots(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    nested = workspace / "src"
+    nested.mkdir(parents=True)
+    harness = FakeHarness()
+    harness.enqueue("running")
+    harness.enqueue("done")
+    service, _ = _service(tmp_path, harness)
+
+    first = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace,
+                request_id="writer-root",
+                write_set=("src",),
+            )
+        )
+    )
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    nested,
+                    request_id="writer-nested",
+                    write_set=(".",),
+                )
+            )
+        )
+
+    assert first.execution_state == "running"
+    assert captured.value.code == "WRITE_SET_BUSY"
     assert harness.call_count("spawn") == 1
 
 

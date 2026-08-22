@@ -11,7 +11,7 @@ import shutil
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError
 from .base import (
@@ -29,7 +29,7 @@ from .base import (
 RUNTIME_ID = "deepseek-harness"
 TRANSPORT = "native-acp"
 DEFAULT_TIMEOUT_SECONDS = 300.0
-DEFAULT_TURN_TIMEOUT_SECONDS = 900.0
+DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
 DURABLE_RESULT_MAX_CHARS = 65_536
 CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 MAX_WIRE_LINE_BYTES = 1024 * 1024
@@ -82,6 +82,7 @@ class DshLaunch:
     permission_mode: str
     persistence_root: Path
     config_path: Path
+    write_root_path: str | None = None
 
 
 class _AcpClient(Protocol):
@@ -145,7 +146,7 @@ class DeepSeekHarnessAdapter:
         settings_path_locator: SettingsPathLocator | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-        turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self._binding_locator = binding_locator or locate_dsh_binding
         self._timeout = timeout_seconds
@@ -252,6 +253,18 @@ class DeepSeekHarnessAdapter:
         permission_mode = (
             "workspace-write" if "workspace_write" in request.permissions else "read-only"
         )
+        write_set = request.write_set or (
+            (".",) if permission_mode == "workspace-write" else ()
+        )
+        if permission_mode == "workspace-write" and len(write_set) != 1:
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                "DeepSeek Harness currently enforces one write tree per session",
+            )
+        write_root_path = _deepseek_write_root(
+            request.workspace_path,
+            write_set if permission_mode == "workspace-write" else (".",),
+        )
         binding = self._binding_locator()
         if binding is None:
             raise ServiceError("INSTALL_REQUIRED", "DeepSeek Harness ACP is not installed")
@@ -266,6 +279,8 @@ class DeepSeekHarnessAdapter:
             "model": model,
             "permission_mode": permission_mode,
             "permissions": list(request.permissions),
+            "write_set": list(write_set),
+            "write_root_path": write_root_path,
             "context_policy_id": request.context_policy_id,
             "permission_policy_id": request.permission_policy_id,
             "pair_key": binding.pair_key,
@@ -281,6 +296,8 @@ class DeepSeekHarnessAdapter:
             "workspace_key": request.workspace_key,
             "transport": request.transport,
             "permissions": list(request.permissions),
+            "write_set": list(write_set),
+            "write_root_path": write_root_path,
             "context_policy_id": request.context_policy_id,
             "permission_policy_id": request.permission_policy_id,
             "pair_key": binding.pair_key,
@@ -309,6 +326,9 @@ class DeepSeekHarnessAdapter:
 
     async def spawn(self, request: AdapterSpawnRequest) -> AdapterSnapshot:
         binding, provider, model, permission_mode = self._bound_context(request.context)
+        write_root_path = request.context.attestation.get("write_root_path")
+        if not isinstance(write_root_path, str):
+            raise ServiceError("CONTEXT_DRIFT", "DeepSeek write root attestation is missing")
         root = self._data_root / request.conversation_id
         persistence_root = root / "sessions"
         config_path = root / "cordis.yml"
@@ -319,7 +339,7 @@ class DeepSeekHarnessAdapter:
                 binding,
                 provider=provider,
                 model=model,
-                workspace_path=request.context.workspace_path,
+                workspace_path=write_root_path,
                 persistence_root=persistence_root,
                 permission_mode=permission_mode,
             ).encode("utf-8"),
@@ -332,12 +352,13 @@ class DeepSeekHarnessAdapter:
             permission_mode=permission_mode,
             persistence_root=persistence_root,
             config_path=config_path,
+            write_root_path=write_root_path,
         )
         client = self._client_factory(launch)
         try:
             await asyncio.wait_for(client.start(), timeout=self._timeout)
             session_id = await asyncio.wait_for(
-                client.new_session(request.context.workspace_path), timeout=self._timeout
+                client.new_session(write_root_path), timeout=self._timeout
             )
         except BaseException:
             await _best_effort_close(client, self._timeout)
@@ -550,9 +571,11 @@ class DeepSeekHarnessAdapter:
         failure: BaseException | None = None
         timeout_cleanup_confirmed: bool | None = None
         try:
-            result = await asyncio.wait_for(
-                session.client.prompt(session.snapshot.external_session_id, prompt),
-                timeout=self._turn_timeout,
+            pending = session.client.prompt(session.snapshot.external_session_id, prompt)
+            result = (
+                await pending
+                if self._turn_timeout is None
+                else await asyncio.wait_for(pending, timeout=self._turn_timeout)
             )
         except BaseException as exc:
             failure = exc
@@ -670,7 +693,7 @@ class _StdioAcpClient:
         launch: DshLaunch,
         *,
         timeout_seconds: float,
-        turn_timeout_seconds: float = DEFAULT_TURN_TIMEOUT_SECONDS,
+        turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self._launch = launch
         self._timeout = timeout_seconds
@@ -708,7 +731,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a23"},
+                    "clientInfo": {"name": "subagent-mcp", "version": "0.1.0a24"},
                 },
             ),
             timeout=self._timeout,
@@ -727,15 +750,17 @@ class _StdioAcpClient:
 
     async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
         self._buffers[session_id] = []
-        result = await asyncio.wait_for(
-            self._request(
-                "session/prompt",
-                {
-                    "sessionId": session_id,
-                    "prompt": [{"type": "text", "text": prompt}],
-                },
-            ),
-            timeout=self._turn_timeout,
+        pending = self._request(
+            "session/prompt",
+            {
+                "sessionId": session_id,
+                "prompt": [{"type": "text", "text": prompt}],
+            },
+        )
+        result = (
+            await pending
+            if self._turn_timeout is None
+            else await asyncio.wait_for(pending, timeout=self._turn_timeout)
         )
         if not isinstance(result, Mapping) or not isinstance(result.get("stopReason"), str):
             raise RuntimeError("ACP prompt response is invalid")
@@ -1205,9 +1230,38 @@ def _provider_model(model: str, reasoning: Mapping[str, Any]) -> tuple[str, str]
     return provider, native_model
 
 
+def _deepseek_write_root(workspace_path: str, write_set: Sequence[str]) -> str:
+    if len(write_set) != 1:
+        raise ServiceError(
+            "CAPABILITY_MISSING",
+            "DeepSeek Harness currently enforces one write tree per session",
+        )
+    workspace = Path(workspace_path).resolve(strict=True)
+    scope = write_set[0]
+    root = (
+        workspace
+        if scope == "."
+        else (workspace / Path(*scope.split("/"))).resolve(strict=False)
+    )
+    if not root.is_dir():
+        raise ServiceError(
+            "CAPABILITY_MISSING",
+            "DeepSeek Harness write scope must be an existing directory",
+        )
+    try:
+        root.relative_to(workspace)
+    except ValueError as exc:
+        raise ServiceError(
+            "CONTEXT_DRIFT", "DeepSeek write scope escaped the workspace"
+        ) from exc
+    return str(root)
+
+
 def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> bool:
     attestation = context.attestation
     permissions = attestation.get("permissions")
+    write_set = attestation.get("write_set")
+    write_root_path = attestation.get("write_root_path")
     variant_id = attestation.get("variant_id")
     context_policy_id = attestation.get("context_policy_id")
     permission_policy_id = attestation.get("permission_policy_id")
@@ -1229,6 +1283,17 @@ def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> b
     permission_mode = (
         "workspace-write" if "workspace_write" in permissions else "read-only"
     )
+    if write_set is None:
+        write_set = (".",) if permission_mode == "workspace-write" else ()
+    if not (
+        isinstance(write_set, (list, tuple))
+        and all(isinstance(scope, str) for scope in write_set)
+    ):
+        return False
+    if write_root_path is None:
+        write_root_path = context.workspace_path
+    if not isinstance(write_root_path, str):
+        return False
     payload = {
         "runtime_id": context.runtime_id,
         "variant_id": variant_id,
@@ -1240,6 +1305,8 @@ def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> b
         "workspace_key": context.workspace_key,
         "transport": context.transport,
         "permissions": list(permissions),
+        "write_set": list(write_set),
+        "write_root_path": write_root_path,
         "context_policy_id": context_policy_id,
         "permission_policy_id": permission_policy_id,
         "pair_key": binding.pair_key,
@@ -1247,7 +1314,15 @@ def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> b
     expected_hash = hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
-    return expected_hash == context.context_hash
+    if expected_hash == context.context_hash:
+        return True
+    legacy_payload = dict(payload)
+    legacy_payload.pop("write_set", None)
+    legacy_payload.pop("write_root_path", None)
+    legacy_hash = hashlib.sha256(
+        json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return legacy_hash == context.context_hash
 
 
 def _dsh_env(permission_mode: str) -> dict[str, str]:
@@ -1301,6 +1376,15 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
         "Acceptance criteria:",
         *(f"- {item}" for item in task.acceptance_criteria),
     ]
+    write_set = request.context.attestation.get("write_set", ())
+    if write_set:
+        lines.extend(
+            (
+                f"Verified repository root: {request.context.workspace_path}",
+                "Write only within these repository-relative paths:",
+                *(f"- {item}" for item in write_set),
+            )
+        )
     if task.authority:
         lines.extend(("Authority:", *(f"- {item}" for item in task.authority)))
     lines.append(

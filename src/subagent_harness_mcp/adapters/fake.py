@@ -140,6 +140,7 @@ class FakeAdapter:
             "permissions": list(request.permissions),
             "context_policy_id": request.context_policy_id,
             "permission_policy_id": request.permission_policy_id,
+            "write_set": list(request.write_set),
         }
         context_hash = hashlib.sha256(
             json.dumps(
@@ -160,7 +161,10 @@ class FakeAdapter:
             workspace_key=workspace_key,
             transport=request.transport,
             context_hash=context_hash,
-            attestation={"source": "deterministic-fake"},
+            attestation={
+                "source": "deterministic-fake",
+                "write_set": list(request.write_set),
+            },
         )
 
     async def spawn(self, request: AdapterSpawnRequest) -> AdapterSnapshot:

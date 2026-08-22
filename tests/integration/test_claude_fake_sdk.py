@@ -81,8 +81,6 @@ class _PassingClient:
         assert prompt is None
 
     async def receive_messages(self):
-        while not self.queried:
-            await asyncio.sleep(0)
         yield SystemMessage(
             subtype="init",
             data={
@@ -104,6 +102,8 @@ class _PassingClient:
             uuid="rate-1",
             session_id=self.session_id,
         )
+        while not self.queried:
+            await asyncio.sleep(0)
         yield AssistantMessage(
             content=[
                 ThinkingBlock("must never persist", "signature"),
@@ -141,8 +141,6 @@ class _QuotaClient(_PassingClient):
         self.interrupt_calls = 0
 
     async def receive_messages(self):
-        while not self.queried:
-            await asyncio.sleep(0)
         yield SystemMessage(
             subtype="init",
             data={
@@ -164,6 +162,8 @@ class _QuotaClient(_PassingClient):
             uuid="rate-safe",
             session_id=self.session_id,
         )
+        while not self.queried:
+            await asyncio.sleep(0)
         yield RateLimitEvent(
             rate_limit_info=RateLimitInfo(
                 status="allowed_warning",
@@ -176,6 +176,30 @@ class _QuotaClient(_PassingClient):
 
     async def interrupt(self) -> None:
         self.interrupt_calls += 1
+
+
+class _QuotaStatusClient(_PassingClient):
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": self.session_id,
+                "cwd": None if self.options.cwd is None else str(self.options.cwd),
+            },
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="rejected",
+                overage_status="rejected",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="rate-quota-status",
+            session_id=self.session_id,
+        )
 
 
 def test_canary_is_single_launch_idempotent_and_gates_spawn(tmp_path: Path) -> None:
@@ -607,7 +631,7 @@ def test_orphan_probing_requires_verified_cleanup_receipt_before_reset(
     assert store.load_circuit("claude-code", "future-deep").state == "needs_canary"
 
 
-def test_spawn_and_send_quota_pause_until_fresh_explicit_canary(
+def test_spawn_and_send_auto_resume_only_after_safe_task_response(
     tmp_path: Path,
 ) -> None:
     paths = resolve_paths({"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt")
@@ -637,11 +661,26 @@ def test_spawn_and_send_quota_pause_until_fresh_explicit_canary(
     cli.write_bytes(b"standalone-cli")
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    modes = iter(("pass", "quota", "pass", "pass", "quota", "pass"))
+    modes = iter(
+        (
+            "pass",
+            "quota_turn",
+            "pass",
+            "quota_turn",
+            "pass",
+        )
+    )
     clients: list[_PassingClient] = []
 
     def factory(options):
-        client = _QuotaClient(options) if next(modes) == "quota" else _PassingClient(options)
+        mode = next(modes)
+        client = (
+            _QuotaStatusClient(options)
+            if mode == "quota_status"
+            else _QuotaClient(options)
+            if mode == "quota_turn"
+            else _PassingClient(options)
+        )
         clients.append(client)
         return client
 
@@ -685,20 +724,13 @@ def test_spawn_and_send_quota_pause_until_fresh_explicit_canary(
         asyncio.run(spawn("spawn-quota"))
     assert spawn_quota.value.code == "QUOTA_PAUSED"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
-    assert isinstance(clients[-1], _QuotaClient) and clients[-1].interrupt_calls == 1
+    assert isinstance(clients[-1], _QuotaClient)
     assert len(clients) == 2
 
-    with pytest.raises(ServiceError) as spawn_blocked:
-        asyncio.run(spawn("spawn-blocked"))
-    assert spawn_blocked.value.code == "QUOTA_PAUSED"
-    assert len(clients) == 2
-
-    recovered_spawn = asyncio.run(
-        service.runtime_canary(canary | {"request_id": "canary-recover-spawn"})
-    )
-    assert recovered_spawn["state"] == "ready"
-    started = asyncio.run(spawn("spawn-success"))
+    started = asyncio.run(spawn("spawn-auto-resume"))
     assert started.execution_state == "succeeded"
+    assert store.load_circuit("claude-code", "future-deep").state == "ready"
+    assert len(clients) == 3
 
     with pytest.raises(ServiceError) as send_quota:
         asyncio.run(
@@ -709,20 +741,13 @@ def test_spawn_and_send_quota_pause_until_fresh_explicit_canary(
     assert send_quota.value.code == "QUOTA_PAUSED"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
     assert isinstance(clients[-1], _QuotaClient) and clients[-1].interrupt_calls == 1
-    assert len(clients) == 5
+    assert len(clients) == 4
 
-    with pytest.raises(ServiceError) as send_blocked:
-        asyncio.run(
-            service.agent_send(
-                SendRequest("send-blocked", started.conversation_id, "Do not launch.")
-            )
+    resumed_send = asyncio.run(
+        service.agent_send(
+            SendRequest("send-auto-resume", started.conversation_id, "Continue after status.")
         )
-    assert send_blocked.value.code == "QUOTA_PAUSED"
-    assert len(clients) == 5
-
-    recovered_send = asyncio.run(
-        service.runtime_canary(canary | {"request_id": "canary-recover-send"})
     )
-    assert recovered_send["state"] == "ready"
+    assert resumed_send.execution_state == "succeeded"
     assert store.load_circuit("claude-code", "future-deep").state == "ready"
-    assert len(clients) == 6
+    assert len(clients) == 5

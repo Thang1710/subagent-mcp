@@ -184,6 +184,7 @@ def create_server(service: object) -> MCPServer:
         variant_id: str,
         transport: str = "auto",
         required_capabilities: list[str] | None = None,
+        write_set: list[str] | None = None,
         context_policy_id: str = "declared-native",
         permission_policy_id: str = "default",
         workspace: str | dict[str, Any] = _CURRENT_WORKSPACE,
@@ -207,6 +208,7 @@ def create_server(service: object) -> MCPServer:
                     variant_id=variant_id,
                     transport=transport,
                     required_capabilities=required_capabilities,
+                    write_set=write_set,
                     context_policy_id=context_policy_id,
                     permission_policy_id=permission_policy_id,
                     workspace=workspace,
@@ -524,6 +526,7 @@ def _spawn_request(
     variant_id: str,
     transport: str,
     required_capabilities: Sequence[str] | None,
+    write_set: Sequence[str] | None,
     context_policy_id: str,
     permission_policy_id: str,
     workspace: str | Mapping[str, Any],
@@ -532,6 +535,7 @@ def _spawn_request(
     _require_current_workspace(workspace)
     packet = _task_packet(task)
     permissions = () if required_capabilities is None else tuple(required_capabilities)
+    declared_write_set = () if write_set is None else tuple(write_set)
     return SpawnRequest(
         request_id=request_id,
         runtime_id=runtime_id,
@@ -541,6 +545,7 @@ def _spawn_request(
         mode=mode,
         transport=transport,
         permissions=permissions,
+        write_set=declared_write_set,
         context_policy_id=context_policy_id,
         permission_policy_id=permission_policy_id,
     )

@@ -1,5 +1,11 @@
 # Provider Quota Refresh Implementation Plan
 
+> **Measured amendment (2026-08-22):** the current Claude SDK does not
+> reliably emit exact rate evidence during connect-only Refresh. Refresh now
+> returns `Unknown` after initialization when no such event exists; task output
+> is authorized by safe typed evidence from its own useful response. The older
+> pre-output-probe steps below record the original implementation plan.
+
 > Execute test-first in `phase0a-contract-hardening`. This is a billing-safety feature: ambiguous provider evidence must fail closed.
 
 **Goal:** Add explicit quota refresh without clocks, scraping, API credentials, usage-credit consent, or a model invocation from the UI.

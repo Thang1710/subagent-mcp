@@ -20,9 +20,17 @@ Runtime availability comes from a fresh native provider surface, never a
 hard-coded reset hour, elapsed-time guess, cached browser value, or event-order
 assumption.
 
-For Claude Code 2.1.224 with the pinned Agent SDK, the provider surface is the
-typed `RateLimitEvent` delivered after a managed SDK connection. A safe start
-requires all of the following before the model query is sent:
+For Claude Code 2.1.224 with the pinned Agent SDK, `connect()` completes the
+control-protocol initialization, while exact stream `system/init` identity and
+typed `RateLimitEvent` evidence are delivered only with a provider response.
+Subagent MCP therefore separates no-model launch authorization from response
+authorization instead of waiting for response-only events or treating silence
+as quota exhaustion.
+
+Before a model query, the adapter binds the standalone CLI/SDK pair, rejects
+non-subscription credential routes, validates `claude.ai` auth, and constructs
+the exact model/workspace/tool options. Before accepting the response, it
+requires all of the following on that same connection:
 
 - exact init identity for model, workspace, OAuth source, session, and empty
   MCP configuration;
@@ -30,28 +38,37 @@ requires all of the following before the model query is sent:
 - `isUsingOverage=false`; and
 - `overageStatus=rejected`.
 
-The startup loop accepts init and rate events in either order. It sends no
-query while evidence is absent or unsafe. A bounded connection/cleanup timeout
-remains an operational safety limit, not a quota checkpoint.
+After control initialization, the lifecycle sends the one useful query. The
+response loop accepts a rate event before or after stream initialization and
+never accepts assistant output or a result until exact identity and safe rate
+evidence have both been observed. Unsafe evidence interrupts the request and
+discards its output. A bounded connection/cleanup timeout remains an operational
+safety limit, not a quota checkpoint.
 
-Every Claude task performs this startup preflight on the same native
-connection immediately before its query. The localhost Refresh action performs
-the existing connect-only probe and never sends a model query. Later rate
-events update or stop the active turn when the provider explicitly reports an
-unsafe condition; valid output is not rejected merely because an informational
-event is delivered later in the stream.
+Every Claude task uses one native connection and one useful model query; there
+is no second model request for status. The localhost Refresh action remains
+connect-only and never sends a model query. It returns **Unknown** immediately
+after successful control initialization because the current SDK has no exact
+pre-response quota surface. This absence does not pause a circuit.
+
+An ordinary Claude turn has no product-imposed elapsed completion deadline.
+Connection, initialization, query submission, interrupt, and disconnect remain
+bounded, but silence while the native model is doing useful work is not a quota
+or failure signal. Tests may inject a short turn timeout for cleanup paths.
 
 ## Circuit behavior
 
 The durable circuit represents adapter compatibility and explicit provider
 results, not a time schedule.
 
-- A fresh safe provider probe reopens an `auto_paused` variant immediately.
+- A requested task is allowed to test an `auto_paused` exact variant. A safe
+  task response reopens that variant immediately.
 - Explicit terminal quota or overage evidence pauses only that variant.
 - Missing, malformed, or unavailable status evidence reports **Unknown** for
   the current check and does not rewrite a ready circuit as exhausted.
-- A later user request or Refresh always probes again; no reset timestamp or
-  five-hour/weekly checkpoint is synthesized.
+- A later user request tries the exact requested variant again; Refresh checks
+  initialization and reports `Unknown` when no pre-response rate event exists.
+  No reset timestamp or five-hour/weekly checkpoint is synthesized.
 - Existing model-priority demotion still occurs only after explicit terminal
   quota or credit exhaustion, never after an ambiguous transport failure.
 
@@ -78,12 +95,13 @@ at a fixed minute boundary.
 ## Release boundary
 
 This is a Critical stability fix limited to Claude status authorization,
-circuit recovery, and DeepSeek turn liveness. It does not add providers,
-change billing policy, enable overage, change global configuration, or claim
-new native capabilities.
+circuit recovery, Claude/DeepSeek turn liveness, and scoped writer ownership.
+It does not add providers, change billing policy, enable overage, change global
+configuration, or claim new native capabilities.
 
-Deterministic tests must prove event-order independence, no query before safe
-provider evidence, safe recovery from a prior pause, ambiguous-status
+Deterministic tests must prove event-order independence, no query before control
+initialization, no accepted output before exact stream identity plus safe rate
+evidence, safe task-response recovery from a prior pause, ambiguous Refresh
 non-persistence, explicit-quota persistence, and a DeepSeek turn completing
 after the former deadline. Full safe and artifact suites run before release.
 Live provider proof is a separate post-build gate and must not be replaced by

@@ -357,6 +357,7 @@ class SpawnRequest:
     permissions: tuple[str, ...] = ()
     context_policy_id: str = "declared-native"
     permission_policy_id: str = "default"
+    write_set: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         validate_identifier(self.request_id, "request_id", 256)
@@ -375,6 +376,37 @@ class SpawnRequest:
         validate_identifier(self.context_policy_id, "context_policy_id")
         validate_identifier(self.permission_policy_id, "permission_policy_id")
         _validate_text_collection(self.permissions, "permissions", max_items=32, allow_empty=True)
+        _validate_text_collection(self.write_set, "write_set", max_items=32, allow_empty=True)
+        if self.write_set and "workspace_write" not in self.permissions:
+            raise ContractError(
+                "REQUEST_INVALID", "write_set requires the workspace_write capability"
+            )
+        for value in self.write_set:
+            validate_bounded_text(value, "write_set", 2048, strip=True)
+            normalized = value.replace("\\", "/")
+            parts = normalized.split("/")
+            if (
+                normalized.startswith("/")
+                or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
+                or ".." in parts
+                or any(_unsafe_write_set_component(part) for part in parts)
+            ):
+                raise ContractError(
+                    "REQUEST_INVALID", "write_set entries must be repository-relative"
+                )
+
+
+def _unsafe_write_set_component(component: str) -> bool:
+    if component == ".":
+        return False
+    if not component or ":" in component or component.endswith((".", " ")):
+        return True
+    stem = component.split(".", 1)[0].casefold()
+    return stem in {"con", "prn", "aux", "nul", "clock$"} or (
+        len(stem) == 4
+        and stem[:3] in {"com", "lpt"}
+        and stem[3] in "123456789"
+    )
 
 
 def rough_token_estimate(utf8_bytes: int) -> int:

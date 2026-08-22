@@ -91,7 +91,7 @@ Standalone installation/login and the already approved probes do not authorize a
 | Claude session mapping | One external Claude session per Codex task |
 | Worktree ownership | Codex/Subagent MCP may create one, or use an existing one |
 | Write authority | Codex may decide autonomously; Subagent MCP enforces declared policy and leases |
-| Writer concurrency | One writer per canonical worktree/realpath |
+| Writer concurrency | Concurrent writers per canonical worktree when their canonical repository-relative write sets do not overlap; omitted/whole-workspace scopes remain exclusive |
 | MCP restart behavior | Managed run may stop but must resume; visible run may survive under Claude's supervisor |
 | Main-context detail | Native-subagent-like status and distilled result, not raw trace |
 | Codex UI integration | Semantic parity through MCP; no private native-panel injection |
@@ -745,14 +745,14 @@ Managed Preview plan.
 This amendment does not turn unknown evidence into PASS. Before its exact live
 canary, the Claude managed adapter reports `needs_canary` and cannot launch; the
 only exception is the separately approved/bound `runtime_canary` bootstrap after
-no-model identity/auth/credential/no-overage preflight. Ordinary `agent_spawn`
-and `agent_send` remain blocked until that canary terminally attests
-`isUsingOverage=false`, exact model/session/context, and cleanup for the exact
-adapter pair. The visible-background/promotion modes remain unavailable. Publication may include
-those explicit gaps, but it may claim Claude-ready or Windows release support only
-after the installed-artifact real gates pass. Usage credits remain forbidden,
-model IDs remain opaque and exact with no fallback, and existing Codex/Claude/
-AgentBridge state remains outside the product's write set.
+no-model identity/auth/credential preflight. The canary's own provider response
+must terminally attest `isUsingOverage=false`, exact model/session/context, and
+cleanup for the exact adapter pair. The visible-background/promotion modes
+remain unavailable. Publication may include those explicit gaps, but it may
+claim Claude-ready or Windows release support only after the installed-artifact
+real gates pass. Usage credits remain forbidden, model IDs remain opaque and
+exact with no fallback, and existing unrelated user-owned orchestration state
+remains outside the product's write set.
 
 ### 19.3 Phase 1a: common core, MCP, and Claude adapter
 
@@ -800,7 +800,9 @@ Release requires all of the following:
 - A read-only independent review succeeds through Claude subscription auth.
 - A write-capable implementation succeeds in a worktree and Codex verifies its diff/tests independently.
 - Claude Agent View or exact resume command opens the intended conversation without Subagent MCP metadata injected into chat content.
-- One writer per worktree is enforced, including nested-agent attempts.
+- Concurrent writers with disjoint attested write sets succeed in one worktree;
+  equal, ancestor, descendant, omitted, and whole-workspace scopes remain
+  exclusive, including nested-agent attempts.
 - Project MCP/hooks/imports cannot execute before their gate.
 - MCP restart and update tests create no duplicate/corrupt/lost session.
 - Stable launcher update and rollback pass on the real machine.

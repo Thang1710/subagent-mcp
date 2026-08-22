@@ -293,18 +293,13 @@ class SubagentMcpService:
                         )
                     results.append({"variant_id": variant_id, "state": "unknown"})
                     continue
-                ready_was_paused = circuit.state == "ready"
-                if ready_was_paused:
+                if code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"} and circuit.state == "ready":
                     self._store.pause_ready_circuit(
                         runtime_id=runtime_id,
                         variant_id=variant_id,
                         pair_key=circuit.pair_key,
                         expected_revision=circuit.revision,
-                        error_code=(
-                            code
-                            if code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
-                            else "USAGE_CREDITS_FORBIDDEN"
-                        ),
+                        error_code=code,
                     )
                 state = "quota_paused" if code == "QUOTA_PAUSED" else "unknown"
                 item = {"variant_id": variant_id, "state": state}
@@ -320,6 +315,15 @@ class SubagentMcpService:
                     )
                 continue
             if _safe_quota_evidence(evidence):
+                current = self._store.load_circuit(runtime_id, variant_id)
+                if current.state == "auto_paused":
+                    self._store.resume_paused_circuit(
+                        runtime_id=runtime_id,
+                        variant_id=variant_id,
+                        pair_key=current.pair_key,
+                        expected_revision=current.revision,
+                        details=dict(_redact(evidence)),
+                    )
                 results.append(
                     {
                         "variant_id": variant_id,
@@ -333,20 +337,11 @@ class SubagentMcpService:
                     paused=False,
                 )
             else:
-                current = self._store.load_circuit(runtime_id, variant_id)
-                if current.state == "ready":
-                    self._store.pause_ready_circuit(
-                        runtime_id=runtime_id,
-                        variant_id=variant_id,
-                        pair_key=current.pair_key,
-                        expected_revision=current.revision,
-                        error_code="USAGE_CREDITS_FORBIDDEN",
-                    )
                 results.append(
                     {
                         "variant_id": variant_id,
                         "state": "unknown",
-                        "error_code": "USAGE_CREDITS_FORBIDDEN",
+                        "error_code": "CAPABILITY_MISSING",
                     }
                 )
         states = {item["state"] for item in results}
@@ -368,11 +363,18 @@ class SubagentMcpService:
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
         try:
+            workspace_path, workspace_key = _workspace(request.cwd)
+            write_set = _normalize_write_set(
+                workspace_path,
+                request.permissions,
+                request.write_set,
+            )
             adapter, variant, transport = self._selection(
                 request.runtime_id,
                 request.variant_id,
                 request.transport,
                 request.permissions,
+                allow_quota_paused=True,
             )
             ready_circuit = await self._require_runtime_ready(
                 adapter,
@@ -380,18 +382,18 @@ class SubagentMcpService:
                 variant,
                 transport,
             )
-            workspace_path, workspace_key = _workspace(request.cwd)
             requested = _requested_metadata(
                 request,
                 variant=variant,
                 transport=transport,
                 workspace_path=workspace_path,
                 workspace_key=workspace_key,
+                write_set=write_set,
             )
             claim = self._store.claim_execution_request(
                 tool="agent_spawn",
                 request_id=request.request_id,
-                request_payload=_spawn_digest_payload(request),
+                request_payload=_spawn_digest_payload(request, write_set),
                 conversation_id=conversation_id,
                 execution_id=execution_id,
                 runtime_id=request.runtime_id,
@@ -400,9 +402,9 @@ class SubagentMcpService:
             conversation_id = claim.conversation_id
             execution_id = claim.execution_id
             if "workspace_write" in request.permissions:
-                self._store.acquire_writer_lease(
-                    lease_id=f"writer-{execution_id}",
-                    resource_key=f"workspace:{workspace_key}",
+                self._store.acquire_writer_scope_leases(
+                    workspace_key=workspace_key,
+                    write_set=write_set,
                     execution_id=execution_id,
                 )
             launch = self._store.claim_execution_start(execution_id)
@@ -420,6 +422,7 @@ class SubagentMcpService:
                     permissions=request.permissions,
                     context_policy_id=request.context_policy_id,
                     permission_policy_id=request.permission_policy_id,
+                    write_set=write_set,
                 )
             )
             _require_context(context, requested)
@@ -432,6 +435,7 @@ class SubagentMcpService:
                 context=context,
                 snapshot=snapshot,
             )
+            self._resume_after_safe_result(ready_circuit, snapshot)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
                 tool="agent_spawn",
@@ -572,6 +576,7 @@ class SubagentMcpService:
     async def agent_send(self, request: SendRequest) -> AgentStatus:
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
+        previous: ExecutionRecord | None = None
         try:
             previous = self._store.load_latest_execution(request.conversation_id)
             if (
@@ -602,6 +607,7 @@ class SubagentMcpService:
                 str(previous.requested["variant_id"]),
                 str(previous.requested["transport"]),
                 tuple(previous.requested.get("permissions", ())),
+                allow_quota_paused=True,
             )
             ready_circuit = await self._require_runtime_ready(
                 adapter,
@@ -629,9 +635,9 @@ class SubagentMcpService:
             )
             execution_id = claim.execution_id
             if "workspace_write" in requested.get("permissions", ()):
-                self._store.acquire_writer_lease(
-                    lease_id=f"writer-{execution_id}",
-                    resource_key=f"workspace:{requested['workspace_key']}",
+                self._store.acquire_writer_scope_leases(
+                    workspace_key=str(requested["workspace_key"]),
+                    write_set=tuple(requested.get("write_set", (".",))),
                     execution_id=execution_id,
                 )
             launch = self._store.claim_execution_start(execution_id)
@@ -657,6 +663,7 @@ class SubagentMcpService:
                 context=context,
                 snapshot=snapshot,
             )
+            self._resume_after_safe_result(ready_circuit, snapshot)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
                 tool="agent_send",
@@ -666,11 +673,19 @@ class SubagentMcpService:
             return status
         except ServiceError as exc:
             public = self._pause_after_quota_error(ready_circuit, exc)
-            self._record_failure(execution_id, public)
+            self._record_failure(
+                execution_id,
+                public,
+                observed=None if previous is None else previous.observed,
+            )
             raise public
         except (StateError, RegistryError, ConfigError) as exc:
             public = _public_error(exc)
-            self._record_failure(execution_id, public)
+            self._record_failure(
+                execution_id,
+                public,
+                observed=None if previous is None else previous.observed,
+            )
             raise public from exc
         except BaseException as exc:
             public = ServiceError(
@@ -679,7 +694,12 @@ class SubagentMcpService:
                 category="adapter",
                 next_action="inspect_status",
             )
-            self._record_failure(execution_id, public, release_leases=False)
+            self._record_failure(
+                execution_id,
+                public,
+                release_leases=False,
+                observed=None if previous is None else previous.observed,
+            )
             raise public from exc
 
     def _resolve_artifact_relay(
@@ -1108,18 +1128,21 @@ class SubagentMcpService:
         )
         if variant is None:
             raise ServiceError("POLICY_REJECTED", "variant is outside runtime policy")
+        adapter = self._registry.get(runtime_id)
         availability = variant.get("availability")
         if (
             isinstance(availability, Mapping)
             and availability.get("state") == "quota_paused"
-            and not allow_quota_paused
+            and (
+                not allow_quota_paused
+                or not isinstance(adapter, QuotaProbeAdapter)
+            )
         ):
             raise ServiceError(
                 "QUOTA_PAUSED",
                 "selected model is paused after explicit quota evidence",
                 category="quota",
             )
-        adapter = self._registry.get(runtime_id)
         unsupported = set(permissions) - set(adapter.manifest.semantic_permissions)
         if unsupported:
             raise ServiceError(
@@ -1170,25 +1193,18 @@ class SubagentMcpService:
                 effort = variant.get("reasoning", {}).get("effort")
                 if not (
                     details.get("cleanup_confirmed") is True
-                    and details.get("is_using_overage") is False
-                    and details.get("overage_blocked") is True
                     and details.get("model") == variant.get("model")
                     and details.get("effort") == effort
                 ):
-                    self._store.pause_ready_circuit(
-                        runtime_id=circuit.runtime_id,
-                        variant_id=circuit.variant_id,
-                        pair_key=circuit.pair_key,
-                        expected_revision=circuit.revision,
-                        error_code="USAGE_CREDITS_FORBIDDEN",
-                    )
                     raise ServiceError(
-                        "USAGE_CREDITS_FORBIDDEN",
-                        "runtime no-overage attestation is incomplete",
-                        category="quota",
+                        "CAPABILITY_MISSING",
+                        "runtime compatibility attestation is incomplete",
+                        category="adapter",
                     )
-                return circuit
-            raise _runtime_state_error(adapter.manifest.runtime_id, circuit.state)
+            elif circuit.state != "auto_paused":
+                raise _runtime_state_error(adapter.manifest.runtime_id, circuit.state)
+
+            return circuit
         if probe.state != "ready":
             raise _runtime_state_error(adapter.manifest.runtime_id, probe.state)
         return None
@@ -1297,6 +1313,7 @@ class SubagentMcpService:
         error: ServiceError,
         *,
         release_leases: bool = True,
+        observed: Mapping[str, Any] | None = None,
     ) -> None:
         try:
             record = self._store.load_execution(execution_id)
@@ -1306,7 +1323,7 @@ class SubagentMcpService:
                 execution_id=execution_id,
                 execution_state="failed",
                 conversation_state="idle",
-                observed=record.observed or {},
+                observed=dict(observed or record.observed or {}),
                 result={"error": _redact(error.to_dict())},
                 event_kind="failed",
                 event_payload={"error": {"code": error.code}},
@@ -1325,11 +1342,24 @@ class SubagentMcpService:
         if circuit is None:
             return error
         try:
+            current = self._store.load_circuit(circuit.runtime_id, circuit.variant_id)
+            if current.pair_key != circuit.pair_key:
+                raise StateError("IDENTITY_CONFLICT", "runtime adapter pair changed")
+            if current.state == "auto_paused":
+                self._set_variant_quota_state(
+                    current.runtime_id,
+                    current.variant_id,
+                    paused=True,
+                    reason_code=error.code,
+                )
+                return error
+            if current.state != "ready":
+                raise StateError("CIRCUIT_CONFLICT", "runtime quota state changed")
             paused = self._store.pause_ready_circuit(
-                runtime_id=circuit.runtime_id,
-                variant_id=circuit.variant_id,
-                pair_key=circuit.pair_key,
-                expected_revision=circuit.revision,
+                runtime_id=current.runtime_id,
+                variant_id=current.variant_id,
+                pair_key=current.pair_key,
+                expected_revision=current.revision,
                 error_code=error.code,
             )
         except BaseException:
@@ -1353,6 +1383,39 @@ class SubagentMcpService:
             reason_code=error.code,
         )
         return error
+
+    def _resume_after_safe_result(
+        self,
+        circuit: CircuitRecord | None,
+        snapshot: AdapterSnapshot,
+    ) -> None:
+        if (
+            circuit is None
+            or circuit.state != "auto_paused"
+            or snapshot.execution_state != "succeeded"
+            or not _safe_quota_evidence(snapshot.evidence)
+        ):
+            return
+        try:
+            current = self._store.load_circuit(circuit.runtime_id, circuit.variant_id)
+            if current.pair_key != circuit.pair_key:
+                return
+            if current.state == "auto_paused":
+                current = self._store.resume_paused_circuit(
+                    runtime_id=current.runtime_id,
+                    variant_id=current.variant_id,
+                    pair_key=current.pair_key,
+                    expected_revision=current.revision,
+                    details=dict(_redact(snapshot.evidence)),
+                )
+            if current.state == "ready":
+                self._set_variant_quota_state(
+                    current.runtime_id,
+                    current.variant_id,
+                    paused=False,
+                )
+        except (StateError, ConfigError):
+            return
 
     def _set_variant_quota_state(
         self,
@@ -1448,6 +1511,64 @@ def _workspace(raw: str) -> tuple[str, str]:
     return display, key
 
 
+def _normalize_write_set(
+    workspace_path: str,
+    permissions: tuple[str, ...],
+    declared: tuple[str, ...],
+) -> tuple[str, ...]:
+    if "workspace_write" not in permissions:
+        if declared:
+            raise ServiceError(
+                "REQUEST_INVALID", "write_set requires the workspace_write capability"
+            )
+        return ()
+    workspace = Path(workspace_path).resolve(strict=True)
+    roots = declared or (".",)
+    normalized: list[str] = []
+    for raw in roots:
+        value = raw.replace("\\", "/")
+        parts = tuple(part for part in value.split("/") if part not in {"", "."})
+        if (
+            value.startswith("/")
+            or (len(value) >= 2 and value[0].isalpha() and value[1] == ":")
+            or ".." in parts
+        ):
+            raise ServiceError(
+                "REQUEST_INVALID", "write_set entries must stay inside the workspace"
+            )
+        candidate = (workspace.joinpath(*parts)).resolve(strict=False)
+        workspace_key = os.path.normcase(str(workspace))
+        candidate_key = os.path.normcase(str(candidate))
+        if os.name == "nt":
+            workspace_key = workspace_key.casefold()
+            candidate_key = candidate_key.casefold()
+        try:
+            contained = os.path.commonpath((workspace_key, candidate_key)) == workspace_key
+        except ValueError:
+            contained = False
+        if not contained:
+            raise ServiceError(
+                "REQUEST_INVALID", "write_set entry resolves outside the workspace"
+            )
+        relative = os.path.relpath(candidate, workspace).replace("\\", "/")
+        normalized.append("." if relative == "." else relative.strip("/"))
+
+    def comparison(scope: str) -> tuple[str, ...]:
+        parts = tuple(scope.split("/")) if scope != "." else ()
+        return tuple(part.casefold() for part in parts) if os.name == "nt" else parts
+
+    result: list[str] = []
+    for scope in sorted(normalized, key=lambda item: (len(comparison(item)), comparison(item))):
+        scope_parts = comparison(scope)
+        if any(
+            not parent_parts or scope_parts[: len(parent_parts)] == parent_parts
+            for parent_parts in (comparison(parent) for parent in result)
+        ):
+            continue
+        result.append(scope)
+    return tuple(result)
+
+
 def _requested_metadata(
     request: SpawnRequest,
     *,
@@ -1455,6 +1576,7 @@ def _requested_metadata(
     transport: str,
     workspace_path: str,
     workspace_key: str,
+    write_set: tuple[str, ...],
 ) -> dict[str, Any]:
     return {
         "runtime_id": request.runtime_id,
@@ -1467,11 +1589,15 @@ def _requested_metadata(
         "permissions": list(request.permissions),
         "context_policy_id": request.context_policy_id,
         "permission_policy_id": request.permission_policy_id,
+        "write_set": list(write_set),
         "mode": request.mode,
     }
 
 
-def _spawn_digest_payload(request: SpawnRequest) -> dict[str, Any]:
+def _spawn_digest_payload(
+    request: SpawnRequest,
+    write_set: tuple[str, ...],
+) -> dict[str, Any]:
     return {
         "runtime_id": request.runtime_id,
         "variant_id": request.variant_id,
@@ -1490,6 +1616,7 @@ def _spawn_digest_payload(request: SpawnRequest) -> dict[str, Any]:
         "permissions": list(request.permissions),
         "context_policy_id": request.context_policy_id,
         "permission_policy_id": request.permission_policy_id,
+        "write_set": list(write_set),
     }
 
 
@@ -1503,6 +1630,7 @@ def _require_context(context: ResolvedContext, requested: Mapping[str, Any]) -> 
         or context.workspace_path != requested["workspace_path"]
         or context.workspace_key != requested["workspace_key"]
         or context.transport != requested["transport"]
+        or list(context.attestation.get("write_set", ())) != requested["write_set"]
     ):
         raise ServiceError("CONTEXT_DRIFT", "adapter context attestation does not match request")
 
@@ -1542,6 +1670,8 @@ def _snapshot_observation(
             "permissions",
             "context_policy_id",
             "permission_policy_id",
+            "write_set",
+            "write_root_path",
         )
         if key in context.attestation
     }
@@ -1678,7 +1808,12 @@ def _public_error(error: BaseException) -> ServiceError:
     category = "state" if isinstance(error, StateError) else "configuration"
     if isinstance(error, RegistryError):
         category = "adapter"
-    retryable = code in {"WORKSPACE_BUSY", "SESSION_BUSY", "CONFIG_LOCK_TIMEOUT"}
+    retryable = code in {
+        "WORKSPACE_BUSY",
+        "WRITE_SET_BUSY",
+        "SESSION_BUSY",
+        "CONFIG_LOCK_TIMEOUT",
+    }
     return ServiceError(code, str(error), category=category, retryable=retryable)
 
 

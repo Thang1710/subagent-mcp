@@ -77,6 +77,54 @@ def test_execution_transition_rejects_terminal_revival() -> None:
     assert captured.value.code == "STATE_CONFLICT"
 
 
+def test_spawn_write_set_is_relative_bounded_and_requires_workspace_write() -> None:
+    task = TaskPacket("Implement", "Change one lane.", ("Done",), "writer")
+    valid = SpawnRequest(
+        "request-1",
+        "future-harness",
+        "future",
+        task,
+        ".",
+        "implement",
+        permissions=("repo_read", "workspace_write"),
+        write_set=("src/context", "docs/status.md"),
+    )
+
+    assert valid.write_set == ("src/context", "docs/status.md")
+    for invalid in (
+        r"C:\outside",
+        "../outside",
+        "/outside",
+        "src/../../outside",
+        "src/file.txt:stream",
+        "src/CON",
+        "src/trailing.",
+        "src/trailing ",
+    ):
+        with pytest.raises(ContractError, match="write_set"):
+            SpawnRequest(
+                "request-2",
+                "future-harness",
+                "future",
+                task,
+                ".",
+                "implement",
+                permissions=("repo_read", "workspace_write"),
+                write_set=(invalid,),
+            )
+    with pytest.raises(ContractError, match="workspace_write"):
+        SpawnRequest(
+            "request-3",
+            "future-harness",
+            "future",
+            task,
+            ".",
+            "review",
+            permissions=("repo_read",),
+            write_set=("src",),
+        )
+
+
 def test_descriptor_shape_is_provider_neutral_and_model_agnostic() -> None:
     descriptor = AgentDescriptor.from_manifest(
         _manifest(),

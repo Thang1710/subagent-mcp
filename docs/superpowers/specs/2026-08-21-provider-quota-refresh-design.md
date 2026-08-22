@@ -3,6 +3,13 @@
 **Date:** 2026-08-21
 **Status:** Approved by the user's explicit refresh and no-credit requirements
 
+> **2026-08-22 measured amendment:** Claude Code 2.1.224 with Agent SDK
+> 0.2.142 does not reliably publish exact rate evidence on a connect-only
+> session. Refresh therefore reports `Unknown` after verified initialization
+> when no pre-response event exists. A task uses its own useful provider
+> response as the no-overage authority; it does not make a separate status
+> request.
+
 ## Goal
 
 Let a user explicitly refresh current provider availability from the localhost UI or `runtime_check`, while every managed spawn still rechecks the provider before accepting model output. Never infer availability from a fixed five-hour or weekly clock, and never continue through usage credits or API billing.
@@ -13,14 +20,18 @@ Claude documents interactive allocation views but does not publish a stable mach
 
 Subscription identity requires `claude auth status` to report `claude.ai`, no documented higher-precedence credential route to be present, and `system/init.apiKeySource` to be `none` or `oauth`.
 
-Claude Agent SDK's live `RateLimitEvent` is the no-overage control contract. A safe event must arrive before assistant output and attest all of the following:
+Claude Agent SDK's live `RateLimitEvent` is the no-overage control contract. A
+safe event must arrive before the task result is accepted and attest all of the
+following:
 
 - primary status is `allowed` or `allowed_warning`;
 - `raw.isUsingOverage` is exactly `false`;
 - overage status is exactly `rejected`;
 - no billing, credit, or rate error is reported.
 
-Missing or ambiguous identity/rate evidence fails closed before output. An absent rate event is reported as absent, not fabricated, and leaves the runtime gated. Any unsafe event fails closed as `QUOTA_PAUSED`.
+Missing or ambiguous identity/rate evidence never authorizes output. An absent
+rate event on Refresh is reported as `Unknown`, not fabricated, and does not
+rewrite the circuit. Any unsafe task event fails closed as `QUOTA_PAUSED`.
 
 ## Explicit refresh flow
 
@@ -28,18 +39,28 @@ Missing or ambiguous identity/rate evidence fails closed before output. An absen
 - Clicking **Refresh status** sends an authenticated, same-origin, CSRF-protected `POST /api/v1/refresh` with no body.
 - The backend checks every configured runtime through `runtime_check(refresh_quota=True)`.
 - The Claude adapter performs a bounded connect-only check with no query and no model invocation. If the native harness publishes no structured pre-request quota evidence, Refresh reports **Unknown**.
-- A paused runtime is not restored by a live canary from the UI. It can recover only if a future documented connect-only surface supplies fresh safe evidence, or through the separately guarded runtime canary path.
+- A paused runtime is not restored by UI Refresh. A later explicitly requested
+  task may test only its exact variant; its safe typed response restores that
+  variant, while unsafe evidence leaves it paused.
 - The response returns a new sanitized UI snapshot. It contains availability and action text, never credentials, raw provider events, prompts, output, or account identifiers.
 
 Refreshing after a plan upgrade therefore uses current provider evidence rather than the previous plan's reset time.
 
 ## Spawn flow
 
-UI evidence is advisory and may become stale immediately. `agent_spawn` and `agent_send` recheck credential precedence and require fresh subscription init identity plus a safe live rate event before accepting output. They interrupt immediately on unsafe evidence. A UI refresh never grants durable permission to spend.
+UI evidence is advisory and may become stale immediately. `agent_spawn` and
+`agent_send` recheck credential precedence and subscription auth before their
+useful query, then require exact stream init identity plus a safe live rate
+event from the same response before accepting output. They interrupt
+immediately on unsafe evidence. A UI refresh never grants durable permission to
+spend.
 
 ## Billing boundary
 
-The Claude adapter may consume only provider-included allowance available to the authenticated subscription. It never opts into, purchases, reloads, or consents to usage credits. If authoritative no-overage evidence is unavailable, the runtime stays unavailable.
+The Claude adapter may consume only provider-included allowance available to
+the authenticated subscription. It never opts into, purchases, reloads, or
+consents to usage credits. If authoritative no-overage evidence is unavailable,
+the task output is rejected; connect-only Refresh remains `Unknown`.
 
 ## UI states
 
@@ -55,8 +76,11 @@ No countdown or reset timestamp is shown unless a future adapter publishes a doc
 
 - Page boot causes zero provider client creation.
 - One Refresh click causes at most one bounded connect-only check per configured variant and zero model queries.
-- Safe refresh output contains `overage_blocked=true` and no provider output.
+- Refresh contains no provider output; it reports `Unknown` when the native
+  connect-only surface supplies no exact rate event.
 - Unsafe or ambiguous hard-stop/identity evidence blocks output; any unsafe rate event interrupts and reports quota paused.
-- A paused circuit can recover only from fresh safe provider evidence.
-- Spawn/send still recheck quota even after a successful refresh.
+- A paused exact variant can recover only from fresh safe evidence on its own
+  requested task response.
+- Spawn/send require task-response quota evidence independently of Refresh and
+  make no separate paid status request.
 - UI refresh endpoint enforces loopback, host, origin, session, CSRF, empty body, response redaction, and size limits.
