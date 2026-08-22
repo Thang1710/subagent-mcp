@@ -6,6 +6,8 @@ import json
 import sys
 import uuid
 from collections.abc import Awaitable, Callable, Mapping, Sequence
+from hashlib import sha256
+from pathlib import Path
 from typing import Annotated, Any
 
 from mcp.server import MCPServer
@@ -35,6 +37,14 @@ from .contracts import (
 SERVER_NAME = "Subagent MCP"
 TOOL_API_VERSION = 1
 _CURRENT_WORKSPACE = "current"
+_PACKAGE_IDENTITY_FILE = Path(__file__).with_name("__init__.py")
+
+
+def _current_package_identity() -> bytes:
+    return sha256(_PACKAGE_IDENTITY_FILE.read_bytes()).digest()
+
+
+_RUNNING_PACKAGE_IDENTITY = _current_package_identity()
 
 
 def create_server(service: object) -> MCPServer:
@@ -123,7 +133,12 @@ def create_server(service: object) -> MCPServer:
             }
             if cleanup_receipt is not None:
                 payload["cleanup_receipt"] = cleanup_receipt
-            return await _call_payload(service, "runtime_canary", payload)
+            return await _call_payload(
+                service,
+                "runtime_canary",
+                payload,
+                require_current_runtime=True,
+            )
 
         return await _invoke(
             "runtime_canary",
@@ -213,6 +228,7 @@ def create_server(service: object) -> MCPServer:
                     permission_policy_id=permission_policy_id,
                     workspace=workspace,
                 ),
+                require_current_runtime=True,
             ),
             response_mode=response_mode,
         )
@@ -293,6 +309,7 @@ def create_server(service: object) -> MCPServer:
                     answers,
                     artifact,
                 ),
+                require_current_runtime=True,
             ),
             response_mode=response_mode,
         )
@@ -471,6 +488,8 @@ async def _call_runtime_check(
     checked_runtime = validate_identifier(runtime_id, "runtime_id")
     if type(refresh_quota) is not bool:
         raise ContractError("REQUEST_INVALID", "refresh_quota must be a boolean")
+    if refresh_quota:
+        _require_current_runtime()
     return await getattr(service, "runtime_check")(
         checked_runtime,
         refresh_quota=refresh_quota,
@@ -481,7 +500,11 @@ async def _call_payload(
     service: object,
     method: str,
     payload: Mapping[str, Any],
+    *,
+    require_current_runtime: bool = False,
 ) -> object:
+    if require_current_runtime:
+        _require_current_runtime()
     return await getattr(service, method)(dict(payload))
 
 
@@ -489,8 +512,33 @@ async def _call_request(
     service: object,
     method: str,
     request: object,
+    *,
+    require_current_runtime: bool = False,
 ) -> object:
+    if require_current_runtime:
+        _require_current_runtime()
     return await getattr(service, method)(request)
+
+
+def _require_current_runtime() -> None:
+    try:
+        current = _current_package_identity()
+    except OSError as exc:
+        raise ServiceError(
+            "UPDATE_QUARANTINED",
+            "Subagent MCP package identity cannot be verified.",
+            category="update",
+            retryable=False,
+            next_action="Start a fresh Codex task before delegating provider work.",
+        ) from exc
+    if current != _RUNNING_PACKAGE_IDENTITY:
+        raise ServiceError(
+            "UPDATE_QUARANTINED",
+            "Subagent MCP was updated while this MCP server was running.",
+            category="update",
+            retryable=False,
+            next_action="Start a fresh Codex task so it loads the installed Subagent MCP version.",
+        )
 
 
 def _api_version(value: int) -> int:

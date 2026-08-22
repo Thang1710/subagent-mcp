@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 0.1.0a29 - 2026-08-22
+
+- Quarantine provider calls when an installed package changes underneath a
+  resident MCP process. Local status remains readable, while Codex is directed
+  to start a fresh task instead of risking stale lifecycle or quota behavior.
+- Present each runtime's existing enable control as an accessible on/off switch
+  in the localhost settings UI.
+
 ## 0.1.0a28 - 2026-08-22
 
 - Accept normal multiline formatting in spawn and follow-up prompts. Newlines,

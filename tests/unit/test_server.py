@@ -8,6 +8,7 @@ from typing import Any
 from mcp.types import CallToolResult, TextContent
 
 from subagent_harness_mcp import __version__
+from subagent_harness_mcp import server as server_module
 from subagent_harness_mcp.contracts import (
     ADAPTER_API_VERSION,
     AdapterManifest,
@@ -247,6 +248,52 @@ def test_runtime_check_refresh_quota_is_explicit_and_defaults_local() -> None:
         ("runtime_check", ("future-runtime", False)),
         ("runtime_check", ("future-runtime", True)),
     ]
+
+
+def test_changed_runtime_files_block_provider_calls_but_keep_local_status(
+    monkeypatch,
+) -> None:
+    service = _RecordingService()
+    server = create_server(service)
+    monkeypatch.setattr(server_module, "_current_package_identity", lambda: b"changed")
+
+    local = _metadata(_run(server.call_tool("runtime_list", {})))
+    blocked_refresh = _metadata(
+        _run(
+            server.call_tool(
+                "runtime_check",
+                {"runtime_id": "future-runtime", "refresh_quota": True},
+            )
+        )
+    )
+    blocked_spawn = _metadata(
+        _run(
+            server.call_tool(
+                "agent_spawn",
+                {
+                    "request_id": "stale-runtime-spawn",
+                    "runtime_id": "future-runtime",
+                    "variant_id": "future-variant",
+                    "transport": "managed-sdk",
+                    "cwd": str(Path.cwd()),
+                    "mode": "review",
+                    "required_capabilities": ["repo_read"],
+                    "task": {
+                        "title": "Read-only check",
+                        "prompt": "Return one status line.",
+                        "acceptance_criteria": ["No writes."],
+                        "role": "reviewer",
+                    },
+                },
+            )
+        )
+    )
+
+    assert local["ok"] is True
+    assert blocked_refresh["error"]["code"] == "UPDATE_QUARANTINED"
+    assert blocked_spawn["error"]["code"] == "UPDATE_QUARANTINED"
+    assert "fresh Codex task" in blocked_spawn["error"]["next_action"]
+    assert service.calls == [("runtime_list", None)]
 
 
 def test_success_and_service_error_are_text_only_with_final_metadata() -> None:

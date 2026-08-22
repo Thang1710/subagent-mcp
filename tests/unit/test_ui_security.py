@@ -399,6 +399,8 @@ def test_static_ui_exposes_only_plain_runtime_controls() -> None:
 
     assert "Refresh status" in html
     assert "Available to Codex" in html
+    assert 'type="checkbox" role="switch" data-enabled' in html
+    assert 'class="switch-track" data-switch-track' in html
     assert "What this runtime supports" in html
     assert "Automatic safety stops" in html
     assert 'id="circuits-section" hidden' in html
