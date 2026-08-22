@@ -91,7 +91,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "0.1.0a22",
+            "adapter_version": "1.0.0",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -137,7 +137,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="0.1.0a22",
+            adapter_version="1.0.0",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -904,7 +904,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "0.1.0a22",
+            "adapter_version": "1.0.0",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],

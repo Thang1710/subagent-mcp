@@ -47,7 +47,7 @@ def resolve_paths(
     if platform != "nt":
         raise PathResolutionError(
             "PLATFORM_UNSUPPORTED",
-            "Windows Managed Preview requires SUBAGENT_MCP_HOME off Windows",
+            "The Windows release requires SUBAGENT_MCP_HOME off Windows",
         )
     try:
         app_data = source["APPDATA"]

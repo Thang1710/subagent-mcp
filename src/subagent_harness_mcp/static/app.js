@@ -1,4 +1,4 @@
-/* Subagent MCP — Windows Managed Preview UI behaviour.
+/* Subagent MCP — Windows Stable UI behaviour.
  *
  * Contract:
  *   - The bootstrap token arrives only in location.hash and is erased with

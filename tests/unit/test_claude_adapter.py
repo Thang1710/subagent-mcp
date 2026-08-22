@@ -111,10 +111,10 @@ def test_docs_only_release_keeps_claude_adapter_compatibility_identity(
 
     probe = asyncio.run(adapter.probe())
 
-    assert adapter.manifest.adapter_version == "0.1.0a22"
-    assert probe.details["adapter_version"] == "0.1.0a22"
+    assert adapter.manifest.adapter_version == "1.0.0"
+    assert probe.details["adapter_version"] == "1.0.0"
     pair_payload = {
-        "adapter_version": "0.1.0a22",
+        "adapter_version": "1.0.0",
         "sdk_version": probe.details["sdk_version"],
         "cli_path": os.path.normcase(probe.details["cli_path"]),
         "cli_version": probe.details["cli_version"],

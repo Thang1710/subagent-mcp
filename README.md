@@ -20,17 +20,18 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Preview:** `0.1.0a29` targets Windows. The MCP, package, localhost UI, and
-> Claude Code native-harness integration are ready.
+> **Stable:** `1.0.0` targets Windows. The MCP, package, localhost UI, and
+> Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
 
 - **Claude Code — Ready.** Uses the native Claude Code harness, provider-native
   model and reasoning settings, subscription OAuth identity, and live
   no-overage evidence before accepting its output.
-- **DeepSeek Harness — In development.** A native ACP vertical slice and model
-  catalog integration are present; broader provider and lifecycle coverage is
-  still being built.
+- **DeepSeek Harness — Ready.** Uses its native ACP transport and
+  harness-published model catalog for bounded tasks. Resume after an MCP restart,
+  exact provider quota evidence, interactive input, and declared MCP remain
+  explicit capability gaps.
 
 No other runtime is supported yet. Future runtimes use adapters rather than
 provider-specific branches in the core.
@@ -40,12 +41,12 @@ provider-specific branches in the core.
 ### 1. Install
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed,
-then install the pinned preview and register it with Codex:
+then install the stable release and register it with Codex:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-uv tool install subagent-harness-mcp==0.1.0a29
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a29 subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==1.0.0
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.0 subagent-harness-mcp serve
 ```
 
 Start a new Codex task after registration.
@@ -142,9 +143,9 @@ the persistent tool environment and may hold its executable open.
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==0.1.0a29
+uv tool install --reinstall subagent-harness-mcp==1.0.0
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==0.1.0a29 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.0 subagent-harness-mcp serve
 subagent-harness-mcp ui --background
 ```
 

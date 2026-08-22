@@ -1,10 +1,10 @@
-name: publish-preview
+name: publish-release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Existing signed-off tag, for example v0.1.0a13
+        description: Existing signed-off tag, for example v1.0.0
         required: true
         type: string
 
@@ -99,7 +99,7 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/packages/
-      - name: Publish matching GitHub prerelease
+      - name: Publish matching GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -107,4 +107,4 @@ jobs:
         run: >-
           gh release create "$RELEASE_TAG"
           dist/packages/* dist/release-manifest.json dist/SHA256SUMS.txt
-          --verify-tag --prerelease --generate-notes --title "Subagent MCP $RELEASE_TAG"
+          --verify-tag --generate-notes --title "Subagent MCP $RELEASE_TAG"

@@ -23,7 +23,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "0.1.0a29"
+VERSION = "1.0.0"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -107,6 +107,8 @@ def test_pyproject_declares_publishable_package_contract() -> None:
     assert project["requires-python"] == ">=3.10"
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
+    assert "Development Status :: 5 - Production/Stable" in project["classifiers"]
+    assert "Development Status :: 2 - Pre-Alpha" not in project["classifiers"]
     assert project["dependencies"] == [
         "mcp>=2.0.0,<2.1",
         "claude-agent-sdk==0.2.142",
@@ -175,7 +177,8 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert DIST_NAME in readme
     assert "```mermaid" in readme
     assert "**Claude Code — Ready.**" in readme
-    assert "**DeepSeek Harness — In development.**" in readme
+    assert "**DeepSeek Harness — Ready.**" in readme
+    assert "**Stable:** `1.0.0`" in readme
     assert "fail-closed" not in readme
     assert "subscription-only policy before starting work" not in readme_flat
     assert "no provider task starts" not in readme_flat
@@ -184,6 +187,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert VERSION in changelog
     assert "MIT License" in license_text
     assert "usage credits" in security.lower()
+    assert "Stable boundary" in security
     for relative in (
         "CONTRIBUTING.md",
         "CODE_OF_CONDUCT.md",
@@ -201,6 +205,10 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
         (ROOT / "docs/threat-model.md").read_text(encoding="utf-8"),
     ):
         assert "AgentBridge" not in content
+
+    workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    assert workflow.startswith("name: publish-release")
+    assert "--prerelease" not in workflow
 
 
 def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:

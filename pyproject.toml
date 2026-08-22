@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "subagent-harness-mcp"
-version = "0.1.0a29"
+version = "1.0.0"
 description = "Subagent MCP gateway for Codex to orchestrate external coding agents through native harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -25,7 +25,7 @@ keywords = [
     "subagent",
 ]
 classifiers = [
-    "Development Status :: 2 - Pre-Alpha",
+    "Development Status :: 5 - Production/Stable",
     "Environment :: Console",
     "Intended Audience :: Developers",
     "Operating System :: Microsoft :: Windows",

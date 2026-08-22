@@ -733,7 +733,7 @@ def _require_current_workspace(value: str | Mapping[str, Any]) -> None:
         return
     raise ServiceError(
         "CAPABILITY_MISSING",
-        "Windows Managed Preview currently supports workspace='current' only.",
+        "The current Windows release supports workspace='current' only.",
         category="capability",
         retryable=False,
         next_action="Use the declared current workspace.",

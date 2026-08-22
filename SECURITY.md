@@ -8,13 +8,14 @@ or raw provider output in an issue. If no private channel is visible, open a
 minimal issue asking the maintainers for a private contact without including
 the sensitive details.
 
-## Preview boundary
+## Stable boundary
 
-The Windows Managed Preview must fail closed when model, harness, workspace,
+The Windows stable release must fail closed when model, harness, workspace,
 authentication source, terminal lifecycle, or no-overage evidence is missing.
 Subagent MCP never enables usage credits or modifies billing settings. Existing
 client and native-harness configuration, authentication, caches, transcripts,
 state, and processes are outside its ownership boundary.
 
 Only a release installed from published artifacts and passing its documented
-real-host gates may be treated as provider-ready.
+real-host gates may be treated as provider-ready. Adapter-specific capability
+gaps remain explicit even when the shared lifecycle contract is stable.

@@ -2,6 +2,16 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.0 - 2026-08-23
+
+- Stabilize the public MCP/API contract and Windows package, CLI, localhost UI,
+  release workflow, and registry metadata.
+- Mark Claude Code and DeepSeek Harness ready after fresh read-only native
+  harness smoke tasks completed and their sessions closed cleanly. Adapter
+  capability gaps remain explicit and do not change the normalized lifecycle.
+- Keep provider billing safety unchanged: Subagent MCP never enables, buys,
+  reloads, or opts into usage credits or paid overage.
+
 ## 0.1.0a29 - 2026-08-22
 
 - Quarantine provider calls when an installed package changes underneath a

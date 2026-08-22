@@ -181,7 +181,7 @@ class LocalUiBackend:
             health_state = "ready"
         return {
             "distribution": "subagent-harness-mcp",
-            "channel": "Windows Managed Preview",
+            "channel": "Windows Stable",
             "version": __version__,
             "revision": document["revision"],
             "health": {
