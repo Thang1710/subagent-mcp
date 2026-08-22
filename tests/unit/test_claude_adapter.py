@@ -28,6 +28,7 @@ from subagent_harness_mcp.adapters.claude_code import (
     ClaudeCodeAdapter,
     CommandResult,
     _bounded_controller_result,
+    _result_error,
     _spawn_prompt,
     _subscription_oauth_source,
 )
@@ -492,9 +493,24 @@ def test_lifecycle_queries_after_control_connect_and_uses_response_attestation(
     assert snapshot.result_text == "provider-authorized result"
     assert clients[0].query_started_before_init is True
     assert clients[0].query_calls == 1
+    assert clients[0].options.max_turns is None
     assert snapshot.evidence["rate_evidence_seen"] is True
     assert snapshot.evidence["is_using_overage"] is False
     assert snapshot.evidence["cleanup_confirmed"] is True
+
+
+def test_max_turn_result_keeps_the_terminal_reason_and_count() -> None:
+    failure = _result_error(
+        SimpleNamespace(
+            api_error_status=None,
+            subtype="error_max_turns",
+            terminal_reason="max_turns",
+            num_turns=32,
+        )
+    )
+
+    assert failure.code == "CAPABILITY_MISSING"
+    assert failure.message == "Claude task reached its turn limit after 32 turns"
 
 
 def test_terminal_turn_has_no_product_completion_deadline(tmp_path: Path) -> None:

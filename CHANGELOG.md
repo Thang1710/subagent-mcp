@@ -9,6 +9,10 @@ All notable changes to Subagent MCP are documented here.
   to start a fresh task instead of risking stale lifecycle or quota behavior.
 - Present each runtime's existing enable control as an accessible on/off switch
   in the localhost settings UI.
+- Remove the hidden 32-turn cap from production Claude tasks so long native
+  harness work can reach its own terminal result. If an upstream turn cap is
+  still reported, preserve its reason and turn count instead of labelling it
+  as an unsafe canary result. The one-turn safety canary remains bounded.
 
 ## 0.1.0a28 - 2026-08-22
 

@@ -1128,7 +1128,7 @@ def _build_lifecycle_options(
         effort=effort,
         thinking={"type": "adaptive", "display": "omitted"},
         fallback_model=None,
-        max_turns=32,
+        max_turns=None,
         include_partial_messages=False,
         forward_subagent_text=False,
         resume=resume,
@@ -1397,6 +1397,22 @@ def _result_error(message: Any) -> AdapterFailure:
     status = getattr(message, "api_error_status", None)
     if status == 429:
         return AdapterFailure("QUOTA_PAUSED", "quota", False, "Claude quota paused")
+    if (
+        getattr(message, "subtype", None) == "error_max_turns"
+        or getattr(message, "terminal_reason", None) == "max_turns"
+    ):
+        turns = getattr(message, "num_turns", None)
+        suffix = (
+            f" after {turns} turns"
+            if isinstance(turns, int) and not isinstance(turns, bool) and turns >= 0
+            else ""
+        )
+        return AdapterFailure(
+            "CAPABILITY_MISSING",
+            "adapter",
+            False,
+            f"Claude task reached its turn limit{suffix}",
+        )
     return AdapterFailure(
         "CAPABILITY_MISSING", "adapter", False, "Claude terminal canary result was unsafe"
     )
