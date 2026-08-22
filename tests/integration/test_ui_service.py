@@ -5,7 +5,6 @@ import json
 import os
 from http.cookies import SimpleCookie
 from pathlib import Path
-from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -51,15 +50,11 @@ def _request(
 
 
 def _session(server: LoopbackUiServer) -> tuple[str, str]:
-    token = parse_qs(urlsplit(server.bootstrap_url).fragment)["token"][0]
     status, headers, body = _request(
         server,
         "POST",
         "/api/v1/session",
-        headers={
-            "Origin": server.origin,
-            "X-Subagent-MCP-Token": token,
-        },
+        headers={"Origin": server.origin},
     )
     assert status == 200
     parsed = SimpleCookie()

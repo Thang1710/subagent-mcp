@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -302,7 +302,6 @@ def test_installed_artifact_runs_entrypoint_resources_fake_stdio_and_ui(
 import http.client
 import json
 from importlib.resources import files
-from urllib.parse import parse_qs, urlsplit
 from subagent_harness_mcp.ui import LoopbackUiServer
 
 root = files({PACKAGE_NAME!r})
@@ -319,9 +318,8 @@ try:
     body = response.read()
     assert response.status == 200 and b'Subagent MCP' in body
     connection.close()
-    token = parse_qs(urlsplit(server.bootstrap_url).fragment)['token'][0]
     connection = http.client.HTTPConnection(server.bound_host, server.bound_port, timeout=3)
-    connection.request('POST', '/api/v1/session', headers={{'Host': server.host_header, 'Origin': server.origin, 'X-Subagent-MCP-Token': token}})
+    connection.request('POST', '/api/v1/session', headers={{'Host': server.host_header, 'Origin': server.origin}})
     response = connection.getresponse()
     payload = json.loads(response.read())
     assert response.status == 200 and payload['csrf_token']

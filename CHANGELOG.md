@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.2 - 2026-08-23
+
+- Let an exact same-origin localhost page create an in-memory browser session,
+  so the fixed settings port opens directly without a one-time URL token.
+- Keep loopback binding, exact Host and Origin checks, HttpOnly/SameSite cookies,
+  per-session CSRF, no CORS, and single-use rejection for supplied bootstrap
+  tokens unchanged.
+
 ## 1.0.1 - 2026-08-23
 
 - Accept Claude Code's documented optional omission of `overageStatus` when the

@@ -445,6 +445,26 @@ def test_host_origin_and_path_traversal_are_rejected() -> None:
                 "X-Subagent-MCP-Token": _bootstrap_token(server),
             },
         )
+        missing_origin, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+        )
+        direct_bad_origin, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={"Origin": "https://attacker.invalid"},
+        )
+        invalid_supplied_token, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={
+                "Origin": server.origin,
+                "X-Subagent-MCP-Token": "invalid-but-explicit-token",
+            },
+        )
         traversal, _, traversal_body = _request(
             server,
             "GET",
@@ -455,6 +475,9 @@ def test_host_origin_and_path_traversal_are_rejected() -> None:
 
     assert bad_host == 403
     assert bad_origin == 403
+    assert missing_origin == 403
+    assert direct_bad_origin == 403
+    assert invalid_supplied_token == 401
     assert traversal == 404
     assert b"build-system" not in traversal_body
 
@@ -524,20 +547,25 @@ def test_bootstrap_is_single_use_and_api_requires_cookie_and_csrf() -> None:
     assert patch_calls == [({"runtimes": {"fake": {"enabled": False}}}, 7)]
 
 
-def test_managed_ui_requires_bootstrap_for_its_first_browser_session() -> None:
+def test_managed_ui_direct_url_creates_its_first_browser_session() -> None:
     server = _server(control_token="managed-control-token-with-enough-entropy")
     server.start()
     try:
-        status, _, _ = _request(
+        status, headers, body = _request(
             server,
             "POST",
             "/api/v1/session",
             headers={"Origin": server.origin},
         )
+        cookie = SimpleCookie()
+        cookie.load(headers.get("set-cookie", ""))
     finally:
         server.close()
 
-    assert status == 401
+    assert status == 200
+    assert json.loads(body)["csrf_token"]
+    assert cookie["smcp_session"]["httponly"] is True
+    assert cookie["smcp_session"]["samesite"].casefold() == "strict"
 
 
 def test_authorized_managed_tab_restores_its_existing_session() -> None:
@@ -567,20 +595,25 @@ def test_authorized_managed_tab_restores_its_existing_session() -> None:
     assert snapshot == 200
 
 
-def test_foreground_ui_still_requires_bootstrap_for_its_first_session() -> None:
+def test_foreground_ui_direct_url_creates_its_first_session() -> None:
     server = _server()
     server.start()
     try:
-        status, _, _ = _request(
+        status, headers, body = _request(
             server,
             "POST",
             "/api/v1/session",
             headers={"Origin": server.origin},
         )
+        cookie = SimpleCookie()
+        cookie.load(headers.get("set-cookie", ""))
     finally:
         server.close()
 
-    assert status == 401
+    assert status == 200
+    assert json.loads(body)["csrf_token"]
+    assert cookie["smcp_session"]["httponly"] is True
+    assert cookie["smcp_session"]["samesite"].casefold() == "strict"
 
 
 def test_authorized_foreground_tab_restores_its_existing_session() -> None:

@@ -315,6 +315,13 @@ class _UiState:
             self.sessions[session_id] = csrf
             return session_id, csrf
 
+    def create_session(self) -> tuple[str, str]:
+        with self.lock:
+            session_id = secrets.token_urlsafe(32)
+            csrf = secrets.token_urlsafe(32)
+            self.sessions[session_id] = csrf
+            return session_id, csrf
+
     def csrf_for(self, session_id: str) -> str | None:
         with self.lock:
             return self.sessions.get(session_id)
@@ -360,7 +367,7 @@ class _Ipv4ThreadingHttpServer(ThreadingHTTPServer):
 
 
 class LoopbackUiServer:
-    """Bound loopback HTTP server with an in-memory, single-use bootstrap."""
+    """Bound loopback HTTP server with in-memory browser sessions."""
 
     def __init__(
         self,
@@ -674,15 +681,14 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                     return
             else:
                 session_id = self._session(require_csrf=False, reject_missing=False)
-                if session_id is None:
-                    self._json_error(HTTPStatus.UNAUTHORIZED, "BOOTSTRAP_REJECTED")
+                if session_id is not None:
+                    csrf = state.csrf_for(session_id)
+                    if csrf is None:
+                        self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                        return
+                    self._send_json(HTTPStatus.OK, {"csrf_token": csrf})
                     return
-                csrf = state.csrf_for(session_id)
-                if csrf is None:
-                    self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
-                    return
-                self._send_json(HTTPStatus.OK, {"csrf_token": csrf})
-                return
+                exchanged = state.create_session()
             session_id, csrf = exchanged
             cookie = (
                 f"{_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; "

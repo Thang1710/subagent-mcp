@@ -1,9 +1,10 @@
 /* Subagent MCP — Windows Stable UI behaviour.
  *
  * Contract:
- *   - The bootstrap token arrives only in location.hash and is erased with
- *     history.replaceState before anything else runs.
- *   - POST /api/v1/session exchanges it for a CSRF token kept in memory only.
+ *   - An optional bootstrap token arrives only in location.hash and is erased
+ *     with history.replaceState before anything else runs.
+ *   - POST /api/v1/session opens or restores a loopback-bound browser session
+ *     and returns a CSRF token kept in memory only.
  *   - GET /api/v1/snapshot renders local state; POST /api/v1/refresh checks providers.
  *   - PATCH /api/v1/config saves.
  *
@@ -1646,7 +1647,7 @@
       setBusy(false);
       fatal(error instanceof ApiError && error.status
         ? error.message
-        : 'The bootstrap token was rejected or has already been used.');
+        : 'The local UI session could not be opened.');
       return;
     }
 

@@ -2,6 +2,8 @@
 
 **Release target:** `0.1.0a21`
 
+**Direct-port amendment target:** `1.0.2`
+
 ## Problem
 
 The managed localhost UI can remain healthy on fixed port `8765` after its
@@ -28,14 +30,15 @@ UI, browser refusal, malformed response, or port mismatch fails closed.
 
 ## Direct managed URL amendment
 
-The fixed-port managed UI must also be usable by opening or reloading
-`http://127.0.0.1:8765/` directly after that browser profile has been
-authorized. On boot, the package-owned page posts to the session endpoint
-without a token; the server may only restore a valid HttpOnly session cookie.
-Missing or stale cookies remain rejected, so another local process cannot mint
-a session by spoofing HTTP headers. The POST still requires an exact loopback
-Host and same-origin Origin. A new browser profile receives its one-time token
-from the background launch or `ui --open`; the control token is never sent to
+The fixed-port UI must be usable by opening or reloading
+`http://127.0.0.1:8765/` directly in any local browser profile. On boot, the
+package-owned page sends an empty POST to the session endpoint. With exact
+loopback peer, Host, and same-origin Origin validation, the server may restore
+a valid HttpOnly session cookie or mint a new in-memory session and CSRF token.
+Configuration writes still require that cookie and CSRF token. Missing or
+invalid Origin remains rejected. If a bootstrap header is supplied, its token
+must remain valid and single-use; an invalid or replayed supplied token never
+falls back to automatic session creation. The control token is never sent to
 the browser.
 
 ## Non-goals
@@ -53,5 +56,6 @@ the browser.
 - Foreground/unmanaged/mismatched/malformed cases fail before browser open.
 - Existing `--background`, `--status`, `--stop`, and bare foreground behavior
   stay compatible.
-- An authorized browser profile opens and reloads the bare managed URL without
-  another CLI command; every new profile still requires one bootstrap.
+- Any local browser profile opens and reloads the bare fixed-port URL without
+  another CLI command; wrong Host/Origin, missing write CSRF, and replayed
+  supplied bootstrap tokens remain rejected.
