@@ -2,6 +2,22 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.5 - 2026-08-23
+
+- Expose a generic `max_write_roots_per_session` adapter manifest bound
+  (default 1, maximum 32; Claude and the deterministic fake advertise 32,
+  DeepSeek Harness stays at its native one root) in `runtime_list`.
+- Reject a writable multi-root request before readiness probing, idempotency,
+  execution creation, leases, or provider work with a machine-readable repair
+  directive capped at three attempts instead of an unexplained terminal error.
+- Publish capped controller instructions: inspect every error's `retryable`,
+  `next_action`, and `recovery`, never exceed three total retry/refresh/repair
+  actions per failed delegation, keep quota/billing/auth/safety/context-drift/
+  quarantine/ambiguous failures terminal, and never widen write authority.
+- Keep idempotent replays from reacquiring released writer leases. Explicitly
+  retryable pre-provider contention now carries a three-attempt retry directive;
+  each deliberate new execution uses a fresh request ID.
+
 ## 1.0.4 - 2026-08-23
 
 - Add a selectable localhost activity list and responsive detail panel for

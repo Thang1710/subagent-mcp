@@ -37,6 +37,7 @@ from .contracts import (
     AgentEvent,
     AgentStatus,
     ContractError,
+    RECOVERY_MAX_ATTEMPTS,
     ResultReadRequest,
     SendRequest,
     ServiceError,
@@ -379,6 +380,34 @@ class SubagentMcpService:
                 request.permissions,
                 allow_quota_paused=True,
             )
+            max_roots = adapter.manifest.max_write_roots_per_session
+            if (
+                "workspace_write" in request.permissions
+                and len(write_set) > max_roots
+            ):
+                raise ServiceError(
+                    "CAPABILITY_MISSING",
+                    (
+                        f"runtime {request.runtime_id!r} accepts at most "
+                        f"{max_roots} write root(s) per native session; the "
+                        f"normalized request declares {len(write_set)}."
+                    ),
+                    category="capability",
+                    retryable=False,
+                    next_action=(
+                        "Split the task into independent non-overlapping writer "
+                        "calls, each with a write set within the advertised limit, "
+                        "preserving the same acceptance criteria and shared map "
+                        "artifact; issue every repaired call with a new request_id "
+                        "because the payload changed."
+                    ),
+                    recovery={
+                        "action": "repair",
+                        "reason": "decompose_write_set",
+                        "max_attempts": RECOVERY_MAX_ATTEMPTS,
+                        "max_write_roots_per_session": max_roots,
+                    },
+                )
             ready_circuit = await self._require_runtime_ready(
                 adapter,
                 request.variant_id,
@@ -404,15 +433,15 @@ class SubagentMcpService:
             )
             conversation_id = claim.conversation_id
             execution_id = claim.execution_id
+            launch = self._store.claim_execution_start(execution_id)
+            if not launch.should_launch:
+                return self._status(self._store.load_execution(execution_id), after_cursor=0)
             if "workspace_write" in request.permissions:
                 self._store.acquire_writer_scope_leases(
                     workspace_key=workspace_key,
                     write_set=write_set,
                     execution_id=execution_id,
                 )
-            launch = self._store.claim_execution_start(execution_id)
-            if not launch.should_launch:
-                return self._status(self._store.load_execution(execution_id), after_cursor=0)
             context = await adapter.resolve_context(
                 AdapterContextRequest(
                     runtime_id=request.runtime_id,
@@ -733,15 +762,15 @@ class SubagentMcpService:
                 requested=requested,
             )
             execution_id = claim.execution_id
+            launch = self._store.claim_execution_start(execution_id)
+            if not launch.should_launch:
+                return self._status(self._store.load_execution(execution_id), after_cursor=0)
             if "workspace_write" in requested.get("permissions", ()):
                 self._store.acquire_writer_scope_leases(
                     workspace_key=str(requested["workspace_key"]),
                     write_set=tuple(requested.get("write_set", (".",))),
                     execution_id=execution_id,
                 )
-            launch = self._store.claim_execution_start(execution_id)
-            if not launch.should_launch:
-                return self._status(self._store.load_execution(execution_id), after_cursor=0)
             context = _context_from_record(previous)
             session = _session_request(previous)
             await adapter.open_session(session)
@@ -2161,7 +2190,28 @@ def _public_error(error: BaseException) -> ServiceError:
         "SESSION_BUSY",
         "CONFIG_LOCK_TIMEOUT",
     }
-    return ServiceError(code, str(error), category=category, retryable=retryable)
+    return ServiceError(
+        code,
+        str(error),
+        category=category,
+        retryable=retryable,
+        next_action=(
+            "Wait until the reported pre-provider condition clears, then start a "
+            "deliberate new execution with a new request_id. Do not reuse the "
+            "terminal execution's idempotency key."
+            if retryable
+            else None
+        ),
+        recovery=(
+            {
+                "action": "retry",
+                "reason": "transient_pre_provider",
+                "max_attempts": RECOVERY_MAX_ATTEMPTS,
+            }
+            if retryable
+            else None
+        ),
+    )
 
 
 def _pair_key(details: Mapping[str, Any]) -> str:

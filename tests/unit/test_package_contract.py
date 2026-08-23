@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -179,7 +179,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert "```mermaid" in readme
     assert "**Claude Code — Ready.**" in readme
     assert "**DeepSeek Harness — Ready.**" in readme
-    assert "**Stable:** `1.0.4`" in readme
+    assert f"**Stable:** `{VERSION}`" in readme
     assert "fail-closed" not in readme
     assert "subscription-only policy before starting work" not in readme_flat
     assert "no provider task starts" not in readme_flat

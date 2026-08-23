@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.4` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.5` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -45,8 +45,8 @@ then install the stable release and register it with Codex:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-uv tool install subagent-harness-mcp==1.0.4
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.4 subagent-harness-mcp serve
+uv tool install subagent-harness-mcp==1.0.5
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.5 subagent-harness-mcp serve
 ```
 
 Start a new Codex task after registration.
@@ -110,8 +110,13 @@ and lane names do not affect locking.
 
 Omitting `write_set` gives the execution the whole workspace for backwards
 compatibility. Each adapter also enforces the normalized paths at its native
-harness boundary. These leases coordinate Subagent MCP executions; they are not
-an operating-system sandbox for unrelated local processes.
+harness boundary. The current DeepSeek Harness native session accepts one
+writable root; a multi-root task is decomposed by the controller into several
+disjoint writer calls rather than widened. True single-session multi-root stays
+reserved for a future harness that advertises official ACP
+`additionalDirectories` and enforces it natively. These leases coordinate
+Subagent MCP executions; they are not an operating-system sandbox for unrelated
+local processes.
 
 ## How it fits together
 
@@ -147,9 +152,9 @@ the persistent tool environment and may hold its executable open.
 
 ```powershell
 subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==1.0.4
+uv tool install --reinstall subagent-harness-mcp==1.0.5
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.4 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.5 subagent-harness-mcp serve
 subagent-harness-mcp ui --background
 ```
 

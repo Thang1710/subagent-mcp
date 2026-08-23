@@ -151,6 +151,7 @@ def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None
     }
     assert adapter.manifest.runtime_id == "deepseek-harness"
     assert adapter.manifest.supported_transports == ("native-acp",)
+    assert adapter.manifest.max_write_roots_per_session == 1
     assert "prepaid balance" in adapter.manifest.model_schema["description"]
     assert "never buys or reloads credits" in adapter.manifest.model_schema["description"]
     assert adapter.manifest.capabilities == frozenset(

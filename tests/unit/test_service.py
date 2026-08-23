@@ -143,6 +143,14 @@ class _CatalogFakeAdapter(FakeAdapter):
         )
 
 
+class _OneRootFakeAdapter(FakeAdapter):
+    """Generic stand-in for a harness that natively enforces one write root."""
+
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self._manifest = replace(self._manifest, max_write_roots_per_session=1)
+
+
 class _RestartGapAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
@@ -998,7 +1006,7 @@ def test_terminal_writer_spawn_replay_does_not_reacquire_released_lease(
     (workspace / "src").mkdir()
     harness = FakeHarness()
     harness.enqueue("done", result="implemented")
-    service, _ = _service(tmp_path, harness)
+    service, store = _service(tmp_path, harness)
     request = _scoped_spawn_request(
         workspace,
         request_id="writer-replay",
@@ -1011,6 +1019,10 @@ def test_terminal_writer_spawn_replay_does_not_reacquire_released_lease(
     assert replay.execution_id == first.execution_id
     assert replay.execution_state == "succeeded"
     assert harness.call_count("spawn") == 1
+    with store.transaction() as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM leases WHERE released_at_utc IS NULL"
+        ).fetchone()[0] == 0
 
 
 def test_terminal_writer_send_replay_does_not_reacquire_released_lease(
@@ -1022,7 +1034,7 @@ def test_terminal_writer_send_replay_does_not_reacquire_released_lease(
     harness = FakeHarness()
     harness.enqueue("done", result="spawned")
     harness.enqueue("done", result="continued")
-    service, _ = _service(tmp_path, harness)
+    service, store = _service(tmp_path, harness)
     spawned = asyncio.run(
         service.agent_spawn(
             _scoped_spawn_request(
@@ -1040,6 +1052,10 @@ def test_terminal_writer_send_replay_does_not_reacquire_released_lease(
     assert replay.execution_id == first.execution_id
     assert replay.execution_state == "succeeded"
     assert harness.call_count("send") == 1
+    with store.transaction() as database:
+        assert database.execute(
+            "SELECT COUNT(*) FROM leases WHERE released_at_utc IS NULL"
+        ).fetchone()[0] == 0
 
 
 def test_request_id_conflict_and_attestation_mismatch_fail_closed(tmp_path: Path) -> None:
@@ -1121,6 +1137,14 @@ def test_writer_scopes_block_parent_child_overlap_before_adapter_launch(
 
     assert first.execution_state == "running"
     assert captured.value.code == "WRITE_SET_BUSY"
+    assert captured.value.retryable is True
+    assert captured.value.next_action is not None
+    assert "new request_id" in captured.value.next_action
+    assert captured.value.recovery == {
+        "action": "retry",
+        "reason": "transient_pre_provider",
+        "max_attempts": 3,
+    }
     assert harness.call_count("spawn") == 1
 
 
@@ -1158,6 +1182,91 @@ def test_writer_scopes_block_overlap_across_nested_workspace_roots(
     assert first.execution_state == "running"
     assert captured.value.code == "WRITE_SET_BUSY"
     assert harness.call_count("spawn") == 1
+
+
+def _store_row_counts(store: StateStore) -> tuple[int, int, int]:
+    with store.transaction() as connection:
+        conversations = connection.execute(
+            "SELECT COUNT(*) FROM conversations"
+        ).fetchone()[0]
+        executions = connection.execute(
+            "SELECT COUNT(*) FROM executions"
+        ).fetchone()[0]
+        leases = connection.execute("SELECT COUNT(*) FROM leases").fetchone()[0]
+    return conversations, executions, leases
+
+
+def test_multi_root_preflight_rejects_before_readiness_idempotency_leases_or_provider_work(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src" / "context").mkdir(parents=True)
+    (workspace / "docs" / "status").mkdir(parents=True)
+    harness = FakeHarness()
+    service, store = _service(tmp_path, harness, adapter=_OneRootFakeAdapter(harness))
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="multi-root-1",
+                    write_set=("src/context", "docs/status"),
+                )
+            )
+        )
+
+    error = captured.value
+    assert error.code == "CAPABILITY_MISSING"
+    assert error.category == "capability"
+    assert error.retryable is False
+    assert error.recovery == {
+        "action": "repair",
+        "reason": "decompose_write_set",
+        "max_attempts": 3,
+        "max_write_roots_per_session": 1,
+    }
+    assert "non-overlapping writer calls" in error.next_action
+    assert "new request_id" in error.next_action
+    public = error.to_dict()
+    assert public["recovery"]["max_attempts"] == 3
+    assert harness.call_count("probe") == 0
+    assert harness.call_count("resolve_context") == 0
+    assert harness.call_count("spawn") == 0
+    assert _store_row_counts(store) == (0, 0, 0)
+
+
+def test_one_root_limit_still_launches_single_and_disjoint_writers(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src" / "context").mkdir(parents=True)
+    (workspace / "docs" / "status").mkdir(parents=True)
+    harness = FakeHarness()
+    harness.enqueue("running")
+    harness.enqueue("done")
+    service, _ = _service(tmp_path, harness, adapter=_OneRootFakeAdapter(harness))
+
+    first = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace, request_id="single-root-1", write_set=("src/context",)
+            )
+        )
+    )
+    second = asyncio.run(
+        service.agent_spawn(
+            _scoped_spawn_request(
+                workspace, request_id="single-root-2", write_set=("docs/status",)
+            )
+        )
+    )
+
+    assert first.execution_state == "running"
+    assert second.execution_state == "succeeded"
+    assert harness.call_count("probe") == 2
+    assert harness.call_count("resolve_context") == 2
+    assert harness.call_count("spawn") == 2
 
 
 def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:

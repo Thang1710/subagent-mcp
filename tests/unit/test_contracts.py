@@ -21,6 +21,7 @@ from subagent_harness_mcp.contracts import (
     ResultReadRequest,
     ROUGH_TOKEN_ESTIMATE_BASIS,
     SendRequest,
+    ServiceError,
     SpawnRequest,
     TaskPacket,
     WaitRequest,
@@ -165,6 +166,99 @@ def test_adapter_manifest_serializes_optional_model_schema() -> None:
         "const": "vendor/model",
         "title": "Vendor model",
     }
+
+
+def test_manifest_exposes_bounded_write_root_limit_with_safe_default() -> None:
+    manifest = _manifest()
+
+    assert manifest.max_write_roots_per_session == 1
+    payload = manifest.to_dict()
+    assert payload["max_write_roots_per_session"] == 1
+
+    widest = dataclasses.replace(manifest, max_write_roots_per_session=32)
+    assert widest.max_write_roots_per_session == 32
+    assert widest.to_dict()["max_write_roots_per_session"] == 32
+
+    for invalid in (0, -1, 33, True, "2", 2.0, None):
+        with pytest.raises(ContractError):
+            dataclasses.replace(manifest, max_write_roots_per_session=invalid)
+
+
+def test_built_in_fake_adapter_advertises_full_multi_root_support() -> None:
+    from subagent_harness_mcp.adapters.fake import FakeAdapter
+
+    assert FakeAdapter().manifest.max_write_roots_per_session == 32
+
+
+def test_service_error_recovery_directive_is_fixed_omitted_or_exact() -> None:
+    plain = ServiceError("CAPABILITY_MISSING", "no recovery path")
+
+    assert plain.recovery is None
+    assert "recovery" not in plain.to_dict()
+
+    directive = {
+        "action": "repair",
+        "reason": "decompose_write_set",
+        "max_attempts": 3,
+        "max_write_roots_per_session": 1,
+    }
+    bounded = ServiceError(
+        "CAPABILITY_MISSING",
+        "too many write roots",
+        category="capability",
+        retryable=False,
+        recovery=dict(directive),
+    )
+
+    assert bounded.recovery == directive
+    assert bounded.retryable is False
+    assert bounded.to_dict()["recovery"] == directive
+
+    retry_directive = {
+        "action": "retry",
+        "reason": "transient_pre_provider",
+        "max_attempts": 3,
+    }
+    retryable = ServiceError(
+        "WRITE_SET_BUSY",
+        "writer scope is temporarily busy",
+        category="state",
+        retryable=True,
+        recovery=retry_directive,
+    )
+    assert retryable.to_dict()["recovery"] == retry_directive
+
+    for broken in (
+        {"action": "refresh", "reason": "decompose_write_set", "max_attempts": 3},
+        {"action": "retry", "reason": "decompose_write_set", "max_attempts": 3},
+        {"action": "repair", "reason": "transient_pre_provider", "max_attempts": 3},
+        {"action": "repair", "reason": "unknown_reason", "max_attempts": 3},
+        {"action": "repair", "reason": "decompose_write_set", "max_attempts": 4},
+        {"action": "repair", "reason": "decompose_write_set", "max_attempts": 0},
+        {"action": "repair", "reason": "decompose_write_set", "max_attempts": True},
+        {"action": "repair", "reason": "decompose_write_set"},
+        {
+            "action": "repair",
+            "reason": "decompose_write_set",
+            "max_attempts": 3,
+            "max_write_roots_per_session": 33,
+        },
+        {
+            "action": "repair",
+            "reason": "decompose_write_set",
+            "max_attempts": 3,
+            "max_write_roots_per_session": 0,
+        },
+        {
+            "action": "repair",
+            "reason": "decompose_write_set",
+            "max_attempts": 3,
+            "arbitrary_field": "must-not-passthrough",
+        },
+        "repair",
+    ):
+        with pytest.raises(ContractError):
+            ServiceError("CAPABILITY_MISSING", "bad directive", recovery=broken)
 
 
 def test_agent_status_compact_projection_uses_result_artifact_metadata() -> None:

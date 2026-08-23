@@ -45,6 +45,20 @@ or task title is never used as a path or collision key.
   supplies that exact directory as the native session `cwd`; multiple disjoint
   roots return `CAPABILITY_MISSING` instead of being widened. The repository root
   remains explicit in the task prompt for read/test context.
+- Every manifest publishes a generic `max_write_roots_per_session` bound
+  (positive, at most 32; safe default 1). The shared service rejects a writable
+  request whose normalized root count exceeds the selected adapter's bound
+  before readiness probing, idempotency, execution creation, leases, or provider
+  work. The rejection stays `CAPABILITY_MISSING`, non-retryable, category
+  `capability`, and carries a machine-readable recovery directive
+  (`action: repair`, `reason: decompose_write_set`, `max_attempts: 3`,
+  `max_write_roots_per_session`) so the controller decomposes the task into
+  multiple independent non-overlapping writer calls within the limit instead of
+  silently abandoning the error.
+- Today's DeepSeek native session remains one root. Multi-root work is expressed
+  as several disjoint writer calls. True single-session multi-root is reserved
+  for a future harness that advertises official ACP `additionalDirectories` and
+  enforces it natively.
 - Read-only executions have an empty write set and acquire no writer lease.
 
 Adapters may later publish a richer write-set capability, but the shared
@@ -53,6 +67,10 @@ collision semantics do not change.
 ## Failure and compatibility behavior
 
 - Actual overlap: `WRITE_SET_BUSY`, retryable.
+- Retryable pre-provider contention carries `action: retry`, reason
+  `transient_pre_provider`, and `max_attempts: 3`. An idempotent transport replay
+  keeps the original request ID and never reacquires a released lease; a
+  deliberate new execution after the blocker clears uses a new request ID.
 - Invalid or escaping path: `REQUEST_INVALID` before adapter launch.
 - Adapter cannot enforce the shape: `CAPABILITY_MISSING` before model query.
 - A legacy client omitting `write_set`: whole-workspace exclusivity.

@@ -609,3 +609,101 @@ def test_wait_returns_before_transport_deadline_without_model_polling() -> None:
     name, request = service.calls[-1]
     assert name == "agent_wait"
     assert request.timeout_seconds == 240.0
+
+
+def test_server_instructions_carry_the_capped_recovery_contract() -> None:
+    server = create_server(_RecordingService())
+    instructions = server.instructions
+
+    assert "inspect retryable, next_action, and recovery" in instructions
+    assert (
+        "never more than three total retry, refresh, or repair actions"
+        in instructions
+    )
+    assert "transport replay reuses request_id" in instructions
+    assert (
+        "deliberate retry starts a new execution with a new request_id"
+        in instructions
+    )
+    assert "failed delegation stays terminal" in instructions
+    assert "future delegations" in instructions
+    assert "select the next configured model" not in instructions
+    for terminal in (
+        "QUOTA_PAUSED",
+        "billing",
+        "authentication",
+        "safety",
+        "policy",
+        "context drift",
+        "update quarantine",
+        "ambiguous launch or cleanup",
+    ):
+        assert terminal in instructions
+    assert (
+        "Never run a live canary, switch models, enable credits, or widen "
+        "write authority automatically" in instructions
+    )
+
+
+def test_error_metadata_carries_recovery_directive_only_when_present(
+    tmp_path: Path,
+) -> None:
+    class _RecoveryService(_RecordingService):
+        async def agent_spawn(self, request):
+            self.calls.append(("agent_spawn", request))
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                "selected runtime accepts one write root per native session",
+                category="capability",
+                next_action="Split into disjoint writer calls with new request IDs.",
+                recovery={
+                    "action": "repair",
+                    "reason": "decompose_write_set",
+                    "max_attempts": 3,
+                    "max_write_roots_per_session": 1,
+                },
+            )
+
+    service = _RecoveryService()
+    server = create_server(service)
+    spawn_payload = {
+        "request_id": "multi-root-spawn",
+        "runtime_id": "future-runtime",
+        "variant_id": "future-variant",
+        "task": {
+            "title": "Bounded implementation",
+            "prompt": "Implement the declared lanes.",
+            "acceptance_criteria": ["Done."],
+            "role": "sub-agent",
+        },
+        "cwd": str(tmp_path.resolve()),
+        "mode": "implement",
+    }
+
+    failed = _run(server.call_tool("agent_spawn", spawn_payload))
+    plain = _run(
+        server.call_tool(
+            "runtime_canary",
+            {
+                "request_id": "canary-plain",
+                "runtime_id": "future-runtime",
+                "variant_id": "future-variant",
+            },
+        )
+    )
+
+    content = failed.content[0]
+    assert isinstance(content, TextContent)
+    assert failed.is_error is True
+    meta = _metadata(failed)
+    assert meta["error"]["code"] == "CAPABILITY_MISSING"
+    assert meta["error"]["category"] == "capability"
+    assert meta["error"]["retryable"] is False
+    assert meta["error"]["recovery"] == {
+        "action": "repair",
+        "reason": "decompose_write_set",
+        "max_attempts": 3,
+        "max_write_roots_per_session": 1,
+    }
+    assert "Split into disjoint writer calls" in content.text
+    assert "recovery" not in _metadata(plain)["error"]

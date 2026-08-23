@@ -105,6 +105,7 @@ class FakeAdapter:
                 }
             ),
             reasoning_schema={"type": "object", "additionalProperties": True},
+            max_write_roots_per_session=32,
         )
 
     @property

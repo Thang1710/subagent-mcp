@@ -133,6 +133,8 @@ def test_rate_guard_reports_missing_no_overage_boolean_as_unknown() -> None:
 def test_manifest_publishes_exact_model_suggestions_and_reasoning_efforts() -> None:
     manifest = ClaudeCodeAdapter().manifest
 
+    assert manifest.max_write_roots_per_session == 32
+
     choices = manifest.model_schema["anyOf"]
     assert [choice.get("const") for choice in choices[:-1]] == [
         "claude-opus-5",

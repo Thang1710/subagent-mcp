@@ -13,6 +13,15 @@ from typing import Any, Mapping, Sequence
 
 ADAPTER_API_VERSION = "1.0.0"
 CONTRACT_SCHEMA_VERSION = 1
+MAX_WRITE_ROOTS_PER_SESSION = 32
+DEFAULT_WRITE_ROOTS_PER_SESSION = 1
+RECOVERY_MAX_ATTEMPTS = 3
+_RECOVERY_PAIRS = frozenset(
+    {
+        ("repair", "decompose_write_set"),
+        ("retry", "transient_pre_provider"),
+    }
+)
 TERMINAL_EXECUTION_STATES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
 )
@@ -45,21 +54,71 @@ class ServiceError(RuntimeError):
         category: str = "request",
         retryable: bool = False,
         next_action: str | None = None,
+        recovery: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.category = category
         self.retryable = retryable
         self.next_action = next_action
+        self.recovery = _validated_recovery(recovery)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "code": self.code,
             "category": self.category,
             "retryable": self.retryable,
             "message": str(self),
             "next_action": self.next_action,
         }
+        if self.recovery is not None:
+            payload["recovery"] = dict(self.recovery)
+        return payload
+
+
+def _validated_recovery(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    """Validate the fixed machine-readable recovery vocabulary; never pass through."""
+
+    if value is None:
+        return None
+    required = {"action", "reason", "max_attempts"}
+    allowed = required | {"max_write_roots_per_session"}
+    if (
+        not isinstance(value, Mapping)
+        or not required <= set(value)
+        or not set(value) <= allowed
+    ):
+        raise ContractError("REQUEST_INVALID", "recovery directive fields are fixed")
+    action = value["action"]
+    reason = value["reason"]
+    attempts = value["max_attempts"]
+    roots = value.get("max_write_roots_per_session")
+    if (
+        not isinstance(action, str)
+        or not isinstance(reason, str)
+        or (action, reason) not in _RECOVERY_PAIRS
+    ):
+        raise ContractError("REQUEST_INVALID", "recovery action/reason is unsupported")
+    if (
+        isinstance(attempts, bool)
+        or not isinstance(attempts, int)
+        or not 1 <= attempts <= RECOVERY_MAX_ATTEMPTS
+    ):
+        raise ContractError(
+            "REQUEST_INVALID",
+            f"recovery max_attempts must be between 1 and {RECOVERY_MAX_ATTEMPTS}",
+        )
+    if roots is not None and (
+        isinstance(roots, bool)
+        or not isinstance(roots, int)
+        or not 1 <= roots <= MAX_WRITE_ROOTS_PER_SESSION
+    ):
+        raise ContractError(
+            "REQUEST_INVALID",
+            "recovery max_write_roots_per_session must be between 1 and "
+            f"{MAX_WRITE_ROOTS_PER_SESSION}",
+        )
+    return dict(value)
 
 
 class ConversationState(str, Enum):
@@ -214,6 +273,7 @@ class AdapterManifest:
     semantic_permissions: frozenset[str]
     reasoning_schema: Mapping[str, Any]
     model_schema: Mapping[str, Any] = field(default_factory=dict)
+    max_write_roots_per_session: int = DEFAULT_WRITE_ROOTS_PER_SESSION
 
     def __post_init__(self) -> None:
         if self.adapter_api_version != ADAPTER_API_VERSION:
@@ -233,6 +293,16 @@ class AdapterManifest:
         )
         validate_json_object(self.reasoning_schema, "reasoning_schema")
         validate_json_object(self.model_schema, "model_schema")
+        if (
+            isinstance(self.max_write_roots_per_session, bool)
+            or not isinstance(self.max_write_roots_per_session, int)
+            or not 1 <= self.max_write_roots_per_session <= MAX_WRITE_ROOTS_PER_SESSION
+        ):
+            raise ContractError(
+                "REQUEST_INVALID",
+                "max_write_roots_per_session must be an integer between 1 and "
+                f"{MAX_WRITE_ROOTS_PER_SESSION}",
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -248,6 +318,7 @@ class AdapterManifest:
             "semantic_permissions": sorted(self.semantic_permissions),
             "reasoning_schema": dict(self.reasoning_schema),
             "model_schema": dict(self.model_schema),
+            "max_write_roots_per_session": self.max_write_roots_per_session,
         }
 
 
