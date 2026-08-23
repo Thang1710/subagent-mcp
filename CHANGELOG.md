@@ -2,6 +2,21 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.7 - 2026-08-23
+
+- Preserve explicit Claude quota/no-overage failures when a concurrent MCP or
+  localhost UI process advances the circuit; a controller-local state race no
+  longer becomes synthetic cleanup ambiguity or retains writer leases.
+- Retry only the local idempotent circuit pause, at most three times, without
+  repeating the provider task. Exhausted local reconciliation reports the
+  original terminal provider code plus a sanitized state warning.
+- Keep connect-only Provider Refresh status-only when cleanup is unavailable:
+  it reports quota unknown, sends no model prompt, and cannot wedge a ready
+  circuit in unrecoverable state.
+- Clarify that a legacy `UPDATE_QUARANTINED` resident is terminal and cannot
+  hot-load replacement package files; exact isolated uvx registration prevents
+  recurrence for fresh tasks.
+
 ## 1.0.6 - 2026-08-23
 
 - Run the documented MCP, CLI, and fixed-port localhost UI through exact

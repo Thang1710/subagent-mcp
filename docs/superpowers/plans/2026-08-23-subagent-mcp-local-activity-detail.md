@@ -801,7 +801,7 @@ Expected: wheel and sdist are 1.0.4 and installed-artifact tests pass.
 Inspect tracked files, commits since `v1.0.3`, and built text metadata for:
 
 - credentials/tokens/private keys;
-- `C:\\Users\\Thang`, `D:\\ClaudeCode`, temporary attachment paths, and local session ids;
+- user-profile paths, local project roots, temporary attachment paths, and local session ids;
 - raw prompt/transcript/event fixtures outside explicitly synthetic tests;
 - ChatGPT/Codex/Claude internal author identity.
 

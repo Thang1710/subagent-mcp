@@ -462,6 +462,11 @@ class _SafeQuotaClient(_UnsafeClient):
         )
 
 
+class _QuotaDisconnectFailsClient(_UnsafeClient):
+    async def disconnect(self) -> None:
+        raise RuntimeError("control connection did not close")
+
+
 class _StartupUnsafeClient(_UnsafeClient):
     async def receive_messages(self):
         yield SystemMessage(
@@ -1570,6 +1575,51 @@ def test_quota_probe_reports_unknown_without_reading_response_only_status(
     assert clients[0].query_calls == 0
     assert clients[0].interrupt_calls == 0
     assert clients[0].disconnected is True
+
+
+def test_quota_probe_disconnect_failure_stays_unknown_without_model_task(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    clients: list[_QuotaDisconnectFailsClient] = []
+
+    def factory(options):
+        client = _QuotaDisconnectFailsClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+    probe = asyncio.run(adapter.probe())
+    base_pair_key = str(probe.details["pair_key"])
+
+    result = asyncio.run(
+        adapter.quota_probe(
+            CanaryRequest(
+                runtime_id="claude-code",
+                variant_id="future-deep",
+                model="vendor/future-model",
+                reasoning={"effort": "xhigh"},
+                transport="managed-sdk",
+                base_pair_key=base_pair_key,
+                pair_key=_pair(base_pair_key),
+            )
+        )
+    )
+
+    assert result.passed is False
+    assert result.error is not None
+    assert result.error.code == "CAPABILITY_MISSING"
+    assert "no model task was sent" in result.error.message
+    assert clients[0].query_calls == 0
+    assert clients[0].interrupt_calls == 0
 
 
 def test_quota_probe_never_waits_for_stream_init_or_queries(

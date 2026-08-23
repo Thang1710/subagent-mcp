@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.6` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.7` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -45,8 +45,8 @@ then register the exact isolated release and start its background UI:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.7 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.7 subagent-harness-mcp ui --background
 ```
 
 Start a new Codex task after registration.
@@ -57,7 +57,7 @@ Open `http://127.0.0.1:8765` in a browser. If the background UI was stopped,
 start the same exact release again:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
+uvx --isolated --from subagent-harness-mcp==1.0.7 subagent-harness-mcp ui --background
 ```
 
 The settings and read-only activity UI stays on the fixed loopback port and
@@ -90,6 +90,10 @@ When a provider explicitly reports exhausted quota or credit
 (`QUOTA_PAUSED`), Subagent MCP moves that exact model to the bottom for future
 tasks. It does not retry the failed task. Ambiguous failures, crashes, and
 timeouts do not reorder models or trigger another paid request.
+
+Operational recovery is capped at three actions. Only local state work or an
+explicitly retryable pre-provider failure may be retried; a provider task that
+already failed is never sent again automatically.
 
 DeepSeek routes may use an existing subscription, unlimited offer, or funded
 balance that the user authorizes. Subagent MCP never purchases, reloads, or
@@ -142,18 +146,22 @@ circuits. Each adapter translates that contract to its native harness. See
 
 Switch versions without reinstalling an environment that may still be running.
 The first command uses the source version; the add/start commands use the target
-version. This example upgrades 1.0.5 to 1.0.6:
+version. This example upgrades 1.0.6 to 1.0.7:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.5 subagent-harness-mcp ui --stop
+uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --stop
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.7 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.7 subagent-harness-mcp ui --background
 ```
 
 Start a fresh Codex task after changing the entry. Existing tasks keep their old
 runtime until they end. Use the same sequence with the exact versions reversed
 to roll back.
+
+An already-running MCP that reports `UPDATE_QUARANTINED` cannot hot-load the
+replacement safely. Do not retry that resident; finish with native fallback and
+use the new exact registration from a fresh task.
 
 For a one-time migration from a direct `subagent-harness-mcp serve` entry,
 replace the registration first and let the legacy task end naturally. After

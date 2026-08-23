@@ -113,6 +113,11 @@ direct installed-tool MCP entry through the client's public lifecycle command;
 it never kills the resident task. The package never rewrites MCP client
 configuration or clears uv caches automatically.
 
+A legacy resident whose package files changed returns terminal
+`UPDATE_QUARANTINED`; it cannot hot-load a replacement safely and is never
+retried. The exact isolated registration makes this a one-time migration
+boundary rather than a recurring update operation.
+
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside
 product ownership and are not parsed as a control contract.
@@ -145,6 +150,14 @@ guess, or separate paid status query controls availability. Canary and ordinary
 turns disable 1M context, fast mode, and the usage-credits command per process.
 The requested effort is pinned through both the SDK option and provider-native
 process environment because `system.init` does not publish an effort field.
+
+Persisting a terminal quota pause is controller-local state work. The service
+may retry that idempotent circuit write at most three times, but it never repeats
+the provider task. A concurrent circuit/config writer or exhausted SQLite retry
+cannot replace the provider verdict with cleanup ambiguity; the original
+terminal quota code remains visible and execution leases are released. A
+connect-only Refresh that cannot confirm cleanup reports quota unknown and does
+not move a ready circuit into recovery state.
 Ordinary Claude managed and DeepSeek ACP turns have no product-imposed elapsed
 completion deadline; initialization, query submission, cancellation, and
 connection cleanup remain bounded. Complete redacted final text is bounded to

@@ -64,7 +64,9 @@ def create_server(service: object) -> MCPServer:
             "Never silently abandon a failed delegation: inspect retryable, next_action, "
             "and recovery on every error before deciding anything. Perform at most the "
             "advertised recovery maximum and never more than three total retry, refresh, "
-            "or repair actions for one failed delegation. An idempotent transport replay "
+            "or repair actions for one failed delegation. Local circuit persistence may "
+            "also retry at most three times but never repeats provider work. An idempotent "
+            "transport replay "
             "reuses request_id and only observes the same execution; a deliberate retry "
             "starts a new execution with a new request_id, and a repaired payload also uses "
             "a new request_id. Never retry QUOTA_PAUSED, billing or "
@@ -542,7 +544,10 @@ def _require_current_runtime() -> None:
             "Subagent MCP package identity cannot be verified.",
             category="update",
             retryable=False,
-            next_action="Start a fresh Codex task before delegating provider work.",
+            next_action=(
+                "This already-running MCP cannot hot-reload. Do not retry it; "
+                "use the exact isolated registration from a fresh Codex task."
+            ),
         ) from exc
     if current != _RUNNING_PACKAGE_IDENTITY:
         raise ServiceError(
@@ -550,7 +555,10 @@ def _require_current_runtime() -> None:
             "Subagent MCP was updated while this MCP server was running.",
             category="update",
             retryable=False,
-            next_action="Start a fresh Codex task so it loads the installed Subagent MCP version.",
+            next_action=(
+                "This already-running MCP cannot hot-reload. Do not retry it; "
+                "use the exact isolated registration from a fresh Codex task."
+            ),
         )
 
 

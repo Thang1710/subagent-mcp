@@ -501,7 +501,10 @@ stateDiagram-v2
     Idle --> Closed
 ```
 
-A terminal quota event changes the execution and runtime circuit in one transaction.
+A terminal quota event remains the authoritative execution result. Persisting
+its runtime pause is separate idempotent controller-local state work: it may be
+retried at most three times, never repeats provider work, and cannot turn the
+provider verdict into synthetic cleanup ambiguity or retain execution leases.
 
 ## 13. Workspace and writer ownership
 
@@ -588,10 +591,21 @@ Runtime circuit states distinguish disabled, auth-required, transient failure, a
 - `model_not_found` invalidates only the affected variant when alternatives remain;
 - `overloaded` and `server_error` use the harness's bounded retry path and do not permanently pause the runtime;
 - status/cancel/close remain available while paused;
-- spawn/send are blocked;
-- `retry_after` is stored only when supplied by the provider;
-- after `retry_after`, the circuit becomes half-open and requires an approved live canary;
+- a later explicitly requested task may test the exact paused variant once; a
+  safe same-response result reopens it, while another terminal quota result
+  remains terminal and paused;
+- Provider Refresh stays connect-only and reports unknown when response-only
+  quota evidence or cleanup is unavailable; it never wedges a ready circuit in
+  recovery state;
+- `retry_after` is stored only when supplied by the provider and never becomes
+  a hard-coded local checkpoint;
 - exact remaining quota/reset time is reported as unknown unless provided.
+
+Circuit persistence uses bounded compare-and-swap. A concurrent UI/MCP writer,
+pair drift, or exhausted SQLite retry never replaces explicit
+`QUOTA_PAUSED`/`USAGE_CREDITS_FORBIDDEN` with `RECOVERY_REQUIRED`. The local
+warning remains visible, the failed provider task is not resent, and leases are
+released according to the real native cleanup outcome.
 
 The mere presence of a Claude Code `rate_limit_event` is not a terminal signal. Subagent MCP parses only structured top-level `system/init`, `rate_limit_event`, and `result` envelopes without parsing assistant/thinking blocks, and it does not assume JSON key order. A plan status of `allowed` or `allowed_warning` followed by `result.is_error=false` is a successful turn. In particular, `overageStatus=rejected` with `overageDisabledReason=out_of_credits` and `isUsingOverage=false` is informational when usage credits are disabled; it must not pause plan-backed execution. A terminal quota transition requires a final structured error (`result.is_error=true`) or a `StopFailure` whose normalized category is `rate_limit`/`billing_error`. Exit code zero, result subtype `success`, or a rate-limit envelope alone is insufficient in either direction. Subagent MCP never enables usage credits or changes billing settings.
 
@@ -805,7 +819,9 @@ Release requires all of the following:
 - Disabled/paused runtimes never spawn.
 - A clean host with no Claude Code CLI returns `INSTALL_REQUIRED` with current official guidance and no filesystem/config/process mutation; installed-but-logged-out returns `AUTH_REQUIRED`; neither path falls back to the SDK-bundled binary.
 - After standalone install and `claude auth login`, Claude Desktop and an interactive Claude terminal may remain closed while both transports complete their real canaries through the same attested CLI identity.
-- Quota exhaustion blocks subsequent calls until approved recovery.
+- Quota exhaustion makes the failed call terminal and pauses that exact model;
+  only a later explicitly requested half-open task with same-response safe
+  evidence may reopen it.
 - High, XHigh, Max, and Ultra real Codex sessions can delegate when requested.
 - A fresh Codex session completes at least one bounded real task through the registered `claude-code` MCP; evidence must attest the Claude Code harness and external session, and a direct shell invocation is not a substitute.
 - A read-only independent review succeeds through Claude subscription auth.

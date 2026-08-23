@@ -355,14 +355,17 @@ class ClaudeCodeAdapter:
             )
         try:
             await asyncio.wait_for(client.disconnect(), timeout=self._canary_timeout)
-        except BaseException:
+        except Exception:
             return _failure(
                 request.pair_key,
                 AdapterFailure(
-                    "RECOVERY_REQUIRED",
+                    "CAPABILITY_MISSING",
                     "adapter",
                     False,
-                    "Claude quota probe cleanup was not confirmed",
+                    (
+                        "Claude quota refresh cleanup was not confirmed; "
+                        "no model task was sent"
+                    ),
                 ),
                 {},
             )

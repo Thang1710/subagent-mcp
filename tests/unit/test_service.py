@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import itertools
 import json
+import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
@@ -122,6 +123,24 @@ class _QuotaFakeAdapter(FakeAdapter):
                 "overage_blocked": True,
                 "cleanup_confirmed": True,
             },
+        )
+
+
+class _TerminalQuotaAdapter(_QuotaFakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.before_failure = None
+        self.spawn_calls = 0
+
+    async def spawn(self, request):
+        del request
+        self.spawn_calls += 1
+        if self.before_failure is not None:
+            self.before_failure()
+        raise ServiceError(
+            "USAGE_CREDITS_FORBIDDEN",
+            "provider refused usage credits",
+            category="quota",
         )
 
 
@@ -613,6 +632,183 @@ def test_safe_task_response_reopens_an_explicit_quota_pause_without_extra_probe(
     assert task.execution_state == "succeeded"
     assert store.load_circuit("fake", "future-deep").state == "ready"
     assert adapter.quota_calls == 1
+
+
+def _prepare_ready_quota_circuit(service: SubagentMcpService) -> None:
+    async def run() -> None:
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "quota-race-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+
+    asyncio.run(run())
+
+
+def _active_writer_leases(store: StateStore) -> int:
+    with store.transaction() as database:
+        return int(
+            database.execute(
+                "SELECT COUNT(*) FROM leases "
+                "WHERE kind = 'writer' AND released_at_utc IS NULL"
+            ).fetchone()[0]
+        )
+
+
+def test_concurrent_circuit_recovery_never_masks_terminal_provider_quota(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    harness = FakeHarness()
+    adapter = _TerminalQuotaAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    _prepare_ready_quota_circuit(service)
+
+    def ui_refresh_wins() -> None:
+        current = store.load_circuit("fake", "future-deep")
+        store.require_ready_circuit_recovery(
+            runtime_id="fake",
+            variant_id="future-deep",
+            pair_key=current.pair_key,
+            expected_revision=current.revision,
+            error_code="RECOVERY_REQUIRED",
+        )
+
+    adapter.before_failure = ui_refresh_wins
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="quota-race-spawn",
+                    write_set=("src",),
+                )
+            )
+        )
+
+    assert captured.value.code == "USAGE_CREDITS_FORBIDDEN"
+    assert captured.value.retryable is False
+    assert adapter.spawn_calls == 1
+    record = store.load_execution("execution-2")
+    assert record.result["error"]["code"] == "USAGE_CREDITS_FORBIDDEN"
+    assert (record.observed or {}).get("evidence", {}).get("cleanup_confirmed") is not False
+    assert _active_writer_leases(store) == 0
+    assert store.load_circuit("fake", "future-deep").state == "recovery_required"
+    variant = ConfigStore(
+        resolve_paths(
+            {"SUBAGENT_MCP_HOME": str(tmp_path / "home")},
+            os_name="nt",
+        )
+    ).load()["runtimes"]["fake"]["variants"][0]
+    assert variant["availability"] == {
+        "state": "quota_paused",
+        "reason_code": "USAGE_CREDITS_FORBIDDEN",
+    }
+
+
+def test_quota_pause_retries_only_local_state_three_times_without_provider_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _TerminalQuotaAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    _prepare_ready_quota_circuit(service)
+    original = store.pause_ready_circuit
+    attempts = 0
+
+    def flaky_pause(**kwargs):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise sqlite3.OperationalError("database is locked")
+        return original(**kwargs)
+
+    monkeypatch.setattr(store, "pause_ready_circuit", flaky_pause)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+
+    assert captured.value.code == "USAGE_CREDITS_FORBIDDEN"
+    assert attempts == 3
+    assert adapter.spawn_calls == 1
+    assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+
+
+def test_exhausted_local_pause_repair_surfaces_warning_and_releases_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    harness = FakeHarness()
+    adapter = _TerminalQuotaAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    _prepare_ready_quota_circuit(service)
+    attempts = 0
+
+    def locked_pause(**kwargs):
+        del kwargs
+        nonlocal attempts
+        attempts += 1
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(store, "pause_ready_circuit", locked_pause)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="quota-locked-spawn",
+                    write_set=("src",),
+                )
+            )
+        )
+
+    error = captured.value
+    assert error.code == "USAGE_CREDITS_FORBIDDEN"
+    assert error.retryable is False
+    assert "local quota pause state was not recorded after 3 attempts" in str(error)
+    assert error.next_action is not None and "Do not retry this task" in error.next_action
+    assert attempts == 3
+    assert adapter.spawn_calls == 1
+    assert _active_writer_leases(store) == 0
+
+
+def test_quota_pause_persistence_never_swallows_cancellation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = FakeHarness()
+    adapter = _TerminalQuotaAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    _prepare_ready_quota_circuit(service)
+    circuit = store.load_circuit("fake", "future-deep")
+
+    def cancelled_pause(**kwargs):
+        del kwargs
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(store, "pause_ready_circuit", cancelled_pause)
+
+    with pytest.raises(asyncio.CancelledError):
+        service._pause_after_quota_error(
+            circuit,
+            ServiceError(
+                "QUOTA_PAUSED",
+                "provider quota paused",
+                category="quota",
+            ),
+        )
 
 
 def test_ready_runtime_does_not_spend_a_separate_provider_status_request(

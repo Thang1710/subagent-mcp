@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import sqlite3
 import time
 import uuid
 from pathlib import Path
@@ -1635,48 +1636,62 @@ class SubagentMcpService:
             return error
         if circuit is None:
             return error
-        try:
-            current = self._store.load_circuit(circuit.runtime_id, circuit.variant_id)
-            if current.pair_key != circuit.pair_key:
-                raise StateError("IDENTITY_CONFLICT", "runtime adapter pair changed")
-            if current.state == "auto_paused":
-                self._set_variant_quota_state(
-                    current.runtime_id,
-                    current.variant_id,
-                    paused=True,
-                    reason_code=error.code,
+        attempts = 0
+        same_pair = False
+        pause_persisted = False
+        for _ in range(RECOVERY_MAX_ATTEMPTS):
+            attempts += 1
+            try:
+                current = self._store.load_circuit(
+                    circuit.runtime_id,
+                    circuit.variant_id,
                 )
-                return error
-            if current.state != "ready":
-                raise StateError("CIRCUIT_CONFLICT", "runtime quota state changed")
-            paused = self._store.pause_ready_circuit(
-                runtime_id=current.runtime_id,
-                variant_id=current.variant_id,
-                pair_key=current.pair_key,
-                expected_revision=current.revision,
-                error_code=error.code,
+                same_pair = current.pair_key == circuit.pair_key
+                if not same_pair:
+                    break
+                if current.state == "auto_paused":
+                    pause_persisted = True
+                    break
+                if current.state != "ready":
+                    break
+                paused = self._store.pause_ready_circuit(
+                    runtime_id=current.runtime_id,
+                    variant_id=current.variant_id,
+                    pair_key=current.pair_key,
+                    expected_revision=current.revision,
+                    error_code=error.code,
+                )
+                pause_persisted = (
+                    paused.state == "auto_paused"
+                    and paused.pair_key == circuit.pair_key
+                )
+                if pause_persisted:
+                    break
+            except (StateError, sqlite3.DatabaseError):
+                continue
+        if same_pair:
+            self._set_variant_quota_state(
+                circuit.runtime_id,
+                circuit.variant_id,
+                paused=True,
+                reason_code=error.code,
             )
-        except BaseException:
-            return ServiceError(
-                "RECOVERY_REQUIRED",
-                "runtime quota pause could not be persisted",
-                category="state",
-                next_action="inspect_status",
-            )
-        if paused.state != "auto_paused" or paused.pair_key != circuit.pair_key:
-            return ServiceError(
-                "RECOVERY_REQUIRED",
-                "runtime quota pause could not be verified",
-                category="state",
-                next_action="inspect_status",
-            )
-        self._set_variant_quota_state(
-            circuit.runtime_id,
-            circuit.variant_id,
-            paused=True,
-            reason_code=error.code,
+        if pause_persisted:
+            return error
+        return ServiceError(
+            error.code,
+            (
+                f"{error}; local quota pause state was not recorded after "
+                f"{attempts} attempt{'s' if attempts != 1 else ''}"
+            ),
+            category=error.category,
+            retryable=False,
+            next_action=(
+                "Do not retry this task. Refresh runtime status before a future "
+                "delegation; if the local state warning persists, start a fresh "
+                "MCP server."
+            ),
         )
-        return error
 
     def _resume_after_safe_result(
         self,
