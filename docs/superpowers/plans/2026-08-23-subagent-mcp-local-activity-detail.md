@@ -809,7 +809,7 @@ Any real secret or personal path is Critical: stop before pushing, remove it fro
 
 - [ ] **Step 4: Fresh isolated public-user install**
 
-Use a new isolated directory under `D:\CodeX\Tools` with isolated `UV_TOOL_DIR`, `UV_CACHE_DIR`, and `SUBAGENT_MCP_HOME`. Install only the built wheel as a user would, run `--version`, start the UI on an isolated port, create no user/global config, verify HTTP/session/detail behavior, then stop it and remove only that explicitly created isolated directory. Do not delete existing tools, caches, auth, sessions, or global configuration.
+Use a new isolated temporary directory outside existing tool roots with isolated `UV_TOOL_DIR`, `UV_CACHE_DIR`, and `SUBAGENT_MCP_HOME`. Install only the built wheel as a user would, run `--version`, start the UI on an isolated port, create no user/global config, verify HTTP/session/detail behavior, then stop it and remove only that explicitly created isolated directory. Do not delete existing tools, caches, auth, sessions, or global configuration.
 
 - [ ] **Step 5: Real Claude and OX Alpha activity proof**
 

@@ -973,7 +973,7 @@ wheels = [
 
 [[package]]
 name = "subagent-harness-mcp"
-version = "1.0.5"
+version = "1.0.6"
 source = { editable = "." }
 dependencies = [
     { name = "claude-agent-sdk" },

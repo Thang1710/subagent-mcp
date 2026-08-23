@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.5` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.6` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -41,33 +41,27 @@ provider-specific branches in the core.
 ### 1. Install
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/) if needed,
-then install the stable release and register it with Codex:
+then register the exact isolated release and start its background UI:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-uv tool install subagent-harness-mcp==1.0.5
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.5 subagent-harness-mcp serve
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
 ```
 
 Start a new Codex task after registration.
 
 ### 2. Configure runtimes
 
-```powershell
-subagent-harness-mcp ui
-```
-
-The settings and read-only activity UI opens at
-`http://127.0.0.1:8765`. It runs independently of the MCP server.
-
-For a persistent background UI:
+Open `http://127.0.0.1:8765` in a browser. If the background UI was stopped,
+start the same exact release again:
 
 ```powershell
-subagent-harness-mcp ui --background
+uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
 ```
 
-Any local browser can later open or reload `http://127.0.0.1:8765/` directly.
-The UI does not depend on an active MCP connection.
+The settings and read-only activity UI stays on the fixed loopback port and
+does not depend on an active MCP connection.
 
 Current and recent activity is listed by external agent. Select a row to inspect
 its model, native harness, workspace, permissions, write set, current stage,
@@ -146,20 +140,29 @@ circuits. Each adapter translates that contract to its native harness. See
 
 ## Update or roll back on Windows
 
-If an older MCP entry launches `subagent-harness-mcp serve` directly, close
-every Codex window once before this first migration; that legacy process shares
-the persistent tool environment and may hold its executable open.
+Switch versions without reinstalling an environment that may still be running.
+The first command uses the source version; the add/start commands use the target
+version. This example upgrades 1.0.5 to 1.0.6:
 
 ```powershell
-subagent-harness-mcp ui --stop
-uv tool install --reinstall subagent-harness-mcp==1.0.5
+uvx --isolated --from subagent-harness-mcp==1.0.5 subagent-harness-mcp ui --stop
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --from subagent-harness-mcp==1.0.5 subagent-harness-mcp serve
-subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.6 subagent-harness-mcp ui --background
 ```
 
-Use the same commands with the previous exact version to roll back. Subagent MCP
-does not edit Codex configuration or clear uv caches on its own.
+Start a fresh Codex task after changing the entry. Existing tasks keep their old
+runtime until they end. Use the same sequence with the exact versions reversed
+to roll back.
+
+For a one-time migration from a direct `subagent-harness-mcp serve` entry,
+replace the registration first and let the legacy task end naturally. After
+replacing it, close every Codex window once before optionally removing the
+now-unused persistent tool. Leaving it installed is safe because every new
+command above uses `uvx --isolated`.
+
+Subagent MCP does not edit Codex configuration, kill Codex/provider processes,
+or clear uv caches on its own.
 
 ## Safety and billing
 

@@ -100,12 +100,18 @@ bootstrap.
 
 ## Runtime installation isolation
 
-The persistent `uv tool` installation owns the user-facing CLI and localhost
-UI. MCP clients should start the pinned package through `uvx --from`, which
-uses a separate cached environment. Keeping these process lifetimes separate
-prevents a long-running Windows stdio server from locking the environment that
-an ordinary CLI/UI update needs to replace. The package never rewrites MCP
-client configuration or clears uv caches automatically.
+The safe public path starts the MCP, CLI, and localhost UI through an exact
+`uvx --isolated --from subagent-harness-mcp==<version>` requirement. The
+`--isolated` flag prevents reuse of a persistent tool installation; each exact
+release resolves in a different cache environment. A running old MCP or UI may
+therefore finish from its old environment while a new release starts without
+removing or rewriting it.
+
+A persistent `uv tool` or pipx install is optional convenience, not part of the
+documented update/rollback boundary. One-time legacy migration replaces a
+direct installed-tool MCP entry through the client's public lifecycle command;
+it never kills the resident task. The package never rewrites MCP client
+configuration or clears uv caches automatically.
 
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside

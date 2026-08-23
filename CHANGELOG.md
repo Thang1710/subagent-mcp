@@ -2,6 +2,18 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.6 - 2026-08-23
+
+- Run the documented MCP, CLI, and fixed-port localhost UI through exact
+  `uvx --isolated --from` release environments, so an old Windows process may
+  finish without its files being removed or rewritten.
+- Remove the destructive persistent-tool reinstall from the default public
+  update and rollback path. Version changes now stop the old exact UI, replace
+  the MCP entry through Codex's public commands, and start the new exact UI.
+- Keep one-time legacy migration conservative: replace the direct registration
+  first, let old tasks end naturally, and never kill Codex/provider processes,
+  clear uv caches, or change billing.
+
 ## 1.0.5 - 2026-08-23
 
 - Expose a generic `max_write_roots_per_session` adapter manifest bound

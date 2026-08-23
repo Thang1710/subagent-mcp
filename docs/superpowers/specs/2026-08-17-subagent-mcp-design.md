@@ -674,11 +674,22 @@ The production deliverable is an MIT-licensed standalone open-source MCP server 
 
 Subagent MCP never patches, replaces, or vendors the user's Codex/Claude executables, wrappers, caches, plugins, global settings, or transcripts. It execute-validates an explicitly configured/discovered harness binary and supplies only per-run argv/settings inside Subagent MCP-owned state.
 
-Distribution publishes reproducible wheel/sdist artifacts to PyPI and matching GitHub Releases with a machine-readable manifest and SHA-256 checksums. The documented bootstrap paths are `uv tool install` and `pipx`; release automation builds and tests both artifacts before publication. Normal execution never downloads code.
+Distribution publishes reproducible wheel/sdist artifacts to PyPI and matching GitHub Releases with a machine-readable manifest and SHA-256 checksums. The safe documented public bootstrap is an exact pinned `uvx --isolated --from` invocation; persistent `uv tool` and pipx installations are optional CLI conveniences outside the update boundary. Release automation builds and tests both artifacts before publication. Normal provider execution never downloads code.
 
 Installation, update, and MCP registration are separate explicit commands with `--dry-run`. Registration uses the client's official lifecycle command and reads the result back; generic clients receive a versioned snippet/instructions. Direct configuration-file mutation is forbidden. An append-only ownership journal records every launcher, staged runtime, and client registration with its canonical identity. Uninstall removes only still-matching owned resources and keeps state, native sessions, and worktrees by default.
 
-All client registrations point to one stable platform launcher, never directly to a package-manager shim or versioned environment. Windows uses `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <absolute-launcher>` with a UTF-8 BOM launcher. macOS/Linux use a POSIX launcher with equivalent argv-array/no-eval behavior. The launcher reads an atomic `current.json` pointer to an immutable staged runtime. Update stages and verifies the candidate, runs migrations in expand-compatible mode plus health/canary gates, then switches the pointer atomically. A failed health window rolls back. Launcher updates themselves use stage/fsync/atomic replace and retain the previous copy.
+Product-managed staged installations point client registrations to one stable platform launcher, never to a persistent package-manager shim. Windows uses `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File <absolute-launcher>` with a UTF-8 BOM launcher. macOS/Linux use a POSIX launcher with equivalent argv-array/no-eval behavior. The launcher reads an atomic `current.json` pointer to an immutable staged runtime. Update stages and verifies the candidate, runs migrations in expand-compatible mode plus health/canary gates, then switches the pointer atomically. A failed health window rolls back. Launcher updates themselves use stage/fsync/atomic replace and retain the previous copy. The public Windows bootstrap may instead register an exact `uvx --isolated --from package==version` command; it preserves the same immutable-version behavior by starting each release from a different uv cache environment and never updating a live environment in place.
+
+### 18.1 2026-08-23 isolated public bootstrap amendment
+
+The Windows 1.0.6 public default uses exact `uvx --isolated --from` invocations
+for MCP, CLI, and localhost UI. This supersedes the earlier persistent-tool
+reinstall sequence, which can strand the CLI when a legacy Codex stdio process
+holds its executable open. Updates switch the public registration and start a
+new exact environment; old processes finish naturally. A persistent tool may
+remain installed as optional convenience, but no documented update rewrites it
+and Subagent MCP never terminates Codex/provider processes or edits client
+configuration automatically.
 
 Windows, macOS, and Linux are independently release-supported. Each platform requires a clean-machine install, client registration, MCP restart, update, rollback, and uninstall-preserves-data run using that platform's actual launcher and filesystem/process semantics. A green cross-platform unit-test matrix is necessary but never sufficient evidence.
 

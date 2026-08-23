@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.5"
+VERSION = "1.0.6"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -246,20 +246,19 @@ def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     readme_flat = " ".join(readme.split())
     architecture = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
-    uvx_command = (
-        "codex mcp add subagent-mcp -- uvx --from "
-        f"{DIST_NAME}=={VERSION} {DIST_NAME} serve"
-    )
+    uvx_prefix = f"uvx --isolated --from {DIST_NAME}=={VERSION} {DIST_NAME}"
 
-    assert uvx_command in readme
+    assert f"codex mcp add subagent-mcp -- {uvx_prefix} serve" in readme
+    assert f"{uvx_prefix} ui --background" in readme
+    assert "uvx --isolated --from" in readme
+    assert f"{DIST_NAME} ui --stop" in readme
+    assert f"uv tool install {DIST_NAME}" not in readme
+    assert "uv tool install --reinstall" not in readme
     assert "codex mcp add subagent-mcp -- subagent-harness-mcp serve" not in readme
     assert "codex mcp remove subagent-mcp" in readme
     assert "close every Codex window once" in readme_flat
-    assert readme.index("subagent-harness-mcp ui --stop") < readme.index(
-        f"uv tool install --reinstall {DIST_NAME}=={VERSION}"
-    )
-    assert "uvx" in architecture
-    assert "separate" in architecture.lower()
+    assert "uvx --isolated" in architecture
+    assert "different cache" in architecture.lower()
 
 
 def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:

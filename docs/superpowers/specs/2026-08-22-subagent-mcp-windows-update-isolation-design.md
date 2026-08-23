@@ -13,18 +13,19 @@ package installer would also be an unsafe and provider-host-specific contract.
 
 ## Smallest safe boundary
 
-Use two uv-managed environments for two different lifetimes:
+Use one exact isolated uvx environment per release and never update it in
+place:
 
-- `uv tool install subagent-harness-mcp==<version>` provides the persistent
-  user-facing CLI and localhost UI.
-- Codex starts the stdio server with
-  `uvx --from subagent-harness-mcp==<version> subagent-harness-mcp serve`.
-  `uvx` uses a separately cached environment outside the persistent tool
-  installation.
+- Codex starts stdio with `uvx --isolated --from
+  subagent-harness-mcp==<version> subagent-harness-mcp serve`.
+- The CLI and fixed-port localhost UI use the same exact isolated form.
+- A different exact version resolves in a different cache environment, so the
+  old process may finish without its files being removed or rewritten.
 
 This follows the official Codex stdio form `codex mcp add <name> -- <command>`
-and uv's documented isolated `uvx --from <package==version> <command>` form.
-The exact version remains pinned for reproducibility and rollback.
+and uv's documented `uvx --isolated --from <package==version> <command>` form.
+The exact version remains pinned for reproducibility and rollback, while
+`--isolated` prevents reuse of a persistent tool environment.
 
 The product never edits Codex configuration automatically. The README gives
 the explicit add/update commands and tells the user to start a new Codex task
@@ -32,19 +33,25 @@ after changing the MCP entry.
 
 ## Install, update, and rollback
 
-Fresh installation installs the CLI/UI tool and registers the pinned uvx
-command. Updating stops the UI, reinstalls only the persistent CLI/UI tool,
-then replaces the Codex MCP entry with the new pinned uvx version. Existing
-users whose entry directly invokes `subagent-harness-mcp serve` must close
-Codex once before the first migration because that old process already holds
-the persistent tool environment.
+Fresh installation registers the pinned isolated uvx command and starts the UI
+through the same exact release. Updating stops the old exact UI, replaces the
+Codex MCP entry with the new exact uvx version, and starts the new UI. It never
+reinstalls an environment held by a running process.
+
+Existing users whose entry directly invokes `subagent-harness-mcp serve`
+replace that registration first and let the old task finish naturally. They
+close Codex once only before optionally removing the now-unused persistent
+tool. Leaving it installed cannot affect new documented invocations because
+they include `--isolated`.
 
 Rollback uses the same sequence with the previous exact version. No command
 cleans uv caches, kills providers, enables billing, or mutates provider state.
 
 ## Evidence boundary
 
-Deterministic tests require the README to keep the persistent-tool and uvx
-commands separate. Release acceptance still installs wheel and sdist. A local
-no-provider smoke must start the packaged MCP through the documented uvx
-command, list its tools, and call only `runtime_list`.
+Deterministic tests require every README process command to use the exact
+isolated uvx form and forbid a persistent-tool reinstall. Release acceptance
+still installs wheel and sdist. A local no-provider smoke must start the
+packaged MCP through the documented isolated uvx command, prove its process is
+outside the persistent tool environment, list its tools, and call only
+`runtime_list`.
