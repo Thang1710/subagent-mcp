@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
 
+from .. import __version__
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError
 from .base import (
     AdapterContextRequest,
@@ -731,7 +732,7 @@ class _StdioAcpClient:
                 {
                     "protocolVersion": 1,
                     "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": "1.0.3"},
+                    "clientInfo": {"name": "subagent-mcp", "version": __version__},
                 },
             ),
             timeout=self._timeout,

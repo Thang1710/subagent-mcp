@@ -25,6 +25,7 @@ ROUGH_TOKEN_ESTIMATE_BASIS = (
     "content-only rough estimate: ceil(utf8_bytes / 3);"
     " not provider billing or a tokenizer claim"
 )
+_ICON_TONES = ("blue", "green", "purple", "teal")
 
 
 class ContractError(ValueError):
@@ -250,6 +251,21 @@ class AdapterManifest:
         }
 
 
+def _descriptor_icon(runtime_id: str, display_name: str) -> dict[str, str]:
+    """Provider-neutral badge: a derived monogram plus a stable package tone."""
+
+    monogram = next(
+        (character.upper() for character in display_name if character.isalnum()),
+        "S",
+    )
+    tone_index = hashlib.sha256(runtime_id.encode("utf-8")).digest()[0] % len(_ICON_TONES)
+    return {
+        "kind": "monogram",
+        "text": monogram,
+        "tone": _ICON_TONES[tone_index],
+    }
+
+
 @dataclass(frozen=True, slots=True)
 class AgentDescriptor:
     schema_version: int
@@ -283,10 +299,6 @@ class AgentDescriptor:
         validate_model_id(model)
         validate_identifier(transport, "transport", 64)
         _validate_text_collection(tuple(capability_gaps), "capability_gaps", allow_empty=True)
-        monogram = next(
-            (character.upper() for character in manifest.display_name if character.isalnum()),
-            "S",
-        )
         return cls(
             schema_version=CONTRACT_SCHEMA_VERSION,
             runtime_id=manifest.runtime_id,
@@ -296,7 +308,7 @@ class AgentDescriptor:
             model_display_name=model,
             transport=transport,
             capability_gaps=tuple(capability_gaps),
-            icon={"kind": "monogram", "text": monogram},
+            icon=_descriptor_icon(manifest.runtime_id, manifest.display_name),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -697,7 +709,7 @@ def result_artifact_metadata(
     capsule_at = text.casefold().find("capsule:")
     compact_text: str | None = None
     if capsule_at >= 0:
-        capsule = text[capsule_at + len("capsule:") :].splitlines()[0].strip()
+        capsule = text[capsule_at + len("capsule:") :].partition("\n")[0].strip()
         if capsule:
             compact_text = capsule[:RESULT_CAPSULE_MAX_CHARS]
             metadata["capsule"] = compact_text

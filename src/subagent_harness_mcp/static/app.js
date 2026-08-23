@@ -17,6 +17,7 @@
 
   const API_SESSION = '/api/v1/session';
   const API_SNAPSHOT = '/api/v1/snapshot';
+  const API_ACTIVITY = '/api/v1/activity/';
   const API_REFRESH = '/api/v1/refresh';
   const API_CONFIG = '/api/v1/config';
   const TOKEN_HEADER = 'X-Subagent-MCP-Token';
@@ -30,6 +31,9 @@
   let ready = false;
   let refreshing = false;
   let dead = false;
+  let selectedExecutionId = null;
+  let activityPollTimer = null;
+  let activityPollBusy = false;
 
   const cards = new Map();       // runtime id -> card entry
   const savedTimers = new Map(); // runtime id -> timeout handle
@@ -71,6 +75,15 @@
     activityPanel: byId('activity-panel'),
     activity: byId('activity'),
     activityEmpty: byId('activity-empty'),
+    activityDetail: byId('activity-detail'),
+    activityDetailIdentity: byId('activity-detail-identity'),
+    activityDetailFacts: byId('activity-detail-facts'),
+    activityDetailStage: byId('activity-detail-stage'),
+    activityDetailSteps: byId('activity-detail-steps'),
+    activityResultSection: byId('activity-result-section'),
+    activityDetailResult: byId('activity-detail-result'),
+    activityDetailArtifact: byId('activity-detail-artifact'),
+    activityDetailCapability: byId('activity-detail-capability'),
     fatal: byId('fatal'),
     fatalText: byId('fatal-text'),
     tplRuntime: byId('tpl-runtime'),
@@ -320,6 +333,8 @@
 
   function fatal(message) {
     dead = true;
+    window.clearTimeout(activityPollTimer);
+    activityPollTimer = null;
     csrf = null;
     setDocState('fatal');
     setText(dom.fatalText, message);
@@ -1532,43 +1547,250 @@
 
   /* ---------- activity (read-only, whitelisted fields) ---------- */
 
+  const ACTIVE_ACTIVITY_STATES = ['queued', 'starting', 'running', 'needs_input'];
+  const ACTIVITY_ICON_TONES = ['blue', 'green', 'purple', 'teal'];
+
+  function formatTimestamp(value) {
+    const date = toDate(value);
+    if (!date) return '';
+    return date.toLocaleString([], {
+      year: 'numeric', month: 'short', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit',
+    });
+  }
+
+  function normalizedIcon(raw) {
+    const candidate = raw && typeof raw === 'object' ? raw : {};
+    const text = str(candidate.text).replace(/[^A-Za-z0-9]/g, '').slice(0, 2) || 'S';
+    const tone = ACTIVITY_ICON_TONES.indexOf(candidate.tone) === -1 ? 'teal' : candidate.tone;
+    return { text, tone };
+  }
+
+  function makeActivityIcon(raw) {
+    const icon = normalizedIcon(raw);
+    const badge = make('span', 'activity-icon', icon.text);
+    badge.dataset.tone = icon.tone;
+    badge.setAttribute('aria-hidden', 'true');
+    return badge;
+  }
+
+  function updateActivitySelection() {
+    const buttons = dom.activity.querySelectorAll('button[data-execution-id]');
+    Array.prototype.forEach.call(buttons, (button) => {
+      const selected = button.dataset.executionId === selectedExecutionId;
+      button.dataset.selected = selected ? 'true' : 'false';
+      if (selected) button.setAttribute('aria-current', 'true');
+      else button.removeAttribute('aria-current');
+    });
+  }
+
+  function renderActivityLoading() {
+    setHidden(dom.activityDetail, false);
+    dom.activityDetail.dataset.freshness = 'loading';
+    dom.activityDetail.setAttribute('aria-busy', 'true');
+    clear(dom.activityDetailIdentity);
+    dom.activityDetailIdentity.appendChild(make('p', 'empty', 'Loading activity…'));
+    clear(dom.activityDetailFacts);
+    setText(dom.activityDetailStage, 'Loading local execution state…');
+    clear(dom.activityDetailSteps);
+    setHidden(dom.activityResultSection, true);
+    setText(dom.activityDetailResult, '');
+    setText(dom.activityDetailArtifact, '');
+    setText(dom.activityDetailCapability, '');
+  }
+
+  function selectActivity(executionId) {
+    if (!executionId) return;
+    const changed = selectedExecutionId !== executionId;
+    selectedExecutionId = executionId;
+    updateActivitySelection();
+    if (changed) renderActivityLoading();
+    loadActivityDetail(executionId, { silent: true });
+    scheduleActivityPoll(2000);
+  }
+
+  function addActivityFact(label, value) {
+    const text = str(value);
+    if (!text) return;
+    const row = make('div');
+    row.appendChild(make('dt', null, label));
+    row.appendChild(make('dd', null, text));
+    dom.activityDetailFacts.appendChild(row);
+  }
+
+  function renderActivityDetail(detail) {
+    clear(dom.activityDetailIdentity);
+    const identity = make('div', 'activity-detail-id');
+    identity.appendChild(makeActivityIcon(pick(detail, 'icon')));
+    const copy = make('div', 'activity-detail-copy');
+    copy.appendChild(make('h3', null, str(pick(detail, 'title')) || 'External-agent execution'));
+    const identityMeta = [
+      str(pick(detail, 'displayName', 'runtime')),
+      str(pick(detail, 'harness')),
+      str(pick(detail, 'modelDisplayName')),
+    ].filter(Boolean);
+    if (identityMeta.length) copy.appendChild(make('p', null, identityMeta.join(' · ')));
+    identity.appendChild(copy);
+    const state = str(pick(detail, 'state'));
+    const pill = make('span', 'pill');
+    pill.dataset.tone = toneFor(state, 'unknown');
+    pill.appendChild(dot());
+    pill.appendChild(make('span', null, humanize(state) || 'Unknown'));
+    identity.appendChild(pill);
+    dom.activityDetailIdentity.appendChild(identity);
+
+    clear(dom.activityDetailFacts);
+    addActivityFact('Model', pick(detail, 'modelDisplayName'));
+    const reasoning = pick(detail, 'reasoning');
+    if (reasoning && typeof reasoning === 'object' && Object.keys(reasoning).length) {
+      addActivityFact('Reasoning', JSON.stringify(reasoning));
+    }
+    addActivityFact('Native harness', pick(detail, 'harness'));
+    addActivityFact('Provider', pick(detail, 'provider'));
+    addActivityFact('Transport', pick(detail, 'transport'));
+    addActivityFact('Workspace', pick(detail, 'workspace'));
+    addActivityFact('Mode', humanize(pick(detail, 'mode')));
+    const permissions = asArray(pick(detail, 'permissions')).map(str).filter(Boolean);
+    addActivityFact('Permissions', permissions.join(' · '));
+    const writeSet = asArray(pick(detail, 'writeSet')).map(str).filter(Boolean);
+    addActivityFact('Write set', writeSet.length ? writeSet.join(' · ') : 'Read-only');
+    addActivityFact('Started', formatTimestamp(pick(detail, 'startedAt')));
+    addActivityFact('Updated', formatTimestamp(pick(detail, 'updatedAt')));
+    addActivityFact('Finished', formatTimestamp(pick(detail, 'finishedAt')));
+    addActivityFact('Elapsed', formatDuration(pick(detail, 'durationMs')));
+
+    setText(dom.activityDetailStage,
+      humanize(pick(detail, 'currentStage')) || humanize(state) || 'Unknown');
+
+    clear(dom.activityDetailSteps);
+    const steps = asArray(pick(detail, 'steps'));
+    if (!steps.length) {
+      dom.activityDetailSteps.appendChild(make('li', 'activity-step-empty', 'No lifecycle events recorded.'));
+    } else {
+      steps.forEach((step) => {
+        const item = make('li');
+        item.appendChild(make('span', 'activity-step-marker'));
+        const stepCopy = make('span', 'activity-step-copy');
+        stepCopy.appendChild(make('b', null, humanize(pick(step, 'kind')) || 'Event'));
+        const at = formatTimestamp(pick(step, 'at'));
+        if (at) stepCopy.appendChild(make('time', null, at));
+        item.appendChild(stepCopy);
+        dom.activityDetailSteps.appendChild(item);
+      });
+    }
+
+    const result = pick(detail, 'result');
+    const resultText = result && typeof result === 'object' ? str(result.text) : '';
+    setHidden(dom.activityResultSection, !resultText);
+    setText(dom.activityDetailResult, resultText);
+    const artifact = [];
+    if (result && typeof result === 'object') {
+      if (Number.isFinite(Number(result.charCount))) artifact.push(Number(result.charCount) + ' characters');
+      if (result.sha256) artifact.push('sha256 ' + shortHash(result.sha256));
+    }
+    setText(dom.activityDetailArtifact, artifact.join(' · '));
+
+    const gaps = asArray(pick(detail, 'capabilityGaps')).map(humanize).filter(Boolean);
+    setText(dom.activityDetailCapability, gaps.length
+      ? 'Capability gaps: ' + gaps.join(', ') + '. Progress remains limited to events the native harness publishes.'
+      : 'Progress reflects normalized lifecycle events published by the native harness.');
+
+    setHidden(dom.activityDetail, false);
+    dom.activityDetail.dataset.freshness = 'fresh';
+    dom.activityDetail.setAttribute('aria-busy', 'false');
+  }
+
+  async function loadActivityDetail(executionId, options) {
+    const opts = options || {};
+    if (!executionId || activityPollBusy || dead) return;
+    activityPollBusy = true;
+    try {
+      const detail = await request('GET', API_ACTIVITY + encodeURIComponent(executionId));
+      if (selectedExecutionId !== executionId) return;
+      renderActivityDetail(detail);
+    } catch (error) {
+      if (isAuthError(error)) {
+        fatal(error.message);
+        return;
+      }
+      if (selectedExecutionId === executionId) {
+        dom.activityDetail.dataset.freshness = 'stale';
+        dom.activityDetail.setAttribute('aria-busy', 'false');
+      }
+      if (!opts.silent) say(error.message);
+    } finally {
+      activityPollBusy = false;
+    }
+  }
+
   function renderActivity(data) {
     const items = asArray(pick(data, 'activity', 'agents', 'tasks'));
-    clear(dom.activity);
+    const previousSelection = selectedExecutionId;
+    const activeElement = document.activeElement;
+    const focusedExecutionId = activeElement && dom.activity.contains(activeElement)
+      ? str(activeElement.dataset && activeElement.dataset.executionId)
+      : '';
+    const ids = items.map((raw) => str(pick(raw, 'id', 'taskId', 'agentId'))).filter(Boolean);
+    if (ids.indexOf(selectedExecutionId) === -1) {
+      const active = items.find((raw) => {
+        const state = str(pick(raw, 'state', 'status', 'phase')).toLowerCase();
+        return ACTIVE_ACTIVITY_STATES.indexOf(state) !== -1;
+      });
+      selectedExecutionId = str(pick(active, 'id', 'taskId', 'agentId')) || ids[0] || null;
+    }
 
+    clear(dom.activity);
     items.forEach((raw, index) => {
-      // Only these keys are ever read; prompts, transcripts, and raw events
-      // are never rendered even if the payload carries them.
       const title = str(pick(raw, 'title', 'label', 'name'));
       const id = str(pick(raw, 'id', 'taskId', 'agentId'));
-      const runtime = str(pick(raw, 'runtime', 'adapter', 'runtimeName'));
+      if (!id) return;
+      const runtime = str(pick(raw, 'displayName', 'runtime', 'adapter', 'runtimeName'));
+      const model = str(pick(raw, 'modelDisplayName'));
       const state = pick(raw, 'state', 'status', 'phase');
-      const startedAt = pick(raw, 'startedAt', 'started_at', 'createdAt');
-      const finishedAt = pick(raw, 'finishedAt', 'finished_at', 'completedAt', 'endedAt');
-      const durationMs = pick(raw, 'durationMs', 'duration_ms', 'elapsedMs');
+      const duration = formatDuration(pick(raw, 'durationMs', 'duration_ms', 'elapsedMs'));
 
       const li = make('li');
-      li.appendChild(make('span', 'a-title', title || 'Task ' + (id ? shortHash(id) : index + 1)));
+      const button = make('button', 'activity-row');
+      button.type = 'button';
+      button.dataset.executionId = id;
+      button.appendChild(makeActivityIcon(pick(raw, 'icon')));
 
-      const pill = make('span', 'pill');
-      pill.dataset.tone = toneOf(raw, 'unknown');
-      pill.appendChild(dot());
-      pill.appendChild(make('span', null, humanize(state) || 'Unknown'));
-      li.appendChild(pill);
+      const rowCopy = make('span', 'activity-row-copy');
+      rowCopy.appendChild(make('span', 'a-title', title || 'Task ' + (index + 1)));
+      const meta = [runtime, model].filter(Boolean);
+      if (meta.length) rowCopy.appendChild(make('span', 'a-meta', meta.join(' · ')));
+      button.appendChild(rowCopy);
 
-      const meta = [];
-      if (runtime) meta.push(runtime);
-      if (id) meta.push(shortHash(id));
-      if (startedAt) meta.push('started ' + formatClock(startedAt));
-      if (finishedAt) meta.push('ended ' + formatClock(finishedAt));
-      const duration = formatDuration(durationMs);
-      if (duration) meta.push(duration);
-      if (meta.length) li.appendChild(make('span', 'a-meta', meta.join(' · ')));
+      const rowState = make('span', 'activity-row-state');
+      const statePill = make('span', 'pill');
+      statePill.dataset.tone = toneOf(raw, 'unknown');
+      statePill.appendChild(dot());
+      statePill.appendChild(make('span', null, humanize(state) || 'Unknown'));
+      rowState.appendChild(statePill);
+      if (duration) rowState.appendChild(make('span', 'a-duration', duration));
+      button.appendChild(rowState);
 
+      button.addEventListener('click', () => selectActivity(id));
+      li.appendChild(button);
       dom.activity.appendChild(li);
     });
 
+    updateActivitySelection();
+    if (focusedExecutionId) {
+      const replacement = Array.prototype.find.call(
+        dom.activity.querySelectorAll('button[data-execution-id]'),
+        (button) => button.dataset.executionId === focusedExecutionId,
+      );
+      if (replacement) replacement.focus({ preventScroll: true });
+    }
     setHidden(dom.activityEmpty, items.length > 0);
+    if (!selectedExecutionId) {
+      setHidden(dom.activityDetail, true);
+      clear(dom.activityDetailIdentity);
+    } else if (selectedExecutionId !== previousSelection) {
+      renderActivityLoading();
+      loadActivityDetail(selectedExecutionId, { silent: true });
+    }
   }
 
   /* ---------- render + refresh ---------- */
@@ -1596,13 +1818,15 @@
     dom.trustSave.disabled = true;
     clear(dom.activity);
     setHidden(dom.activityEmpty, false);
+    selectedExecutionId = null;
+    setHidden(dom.activityDetail, true);
   }
 
   async function refresh(options) {
     const opts = options || {};
     if (dead || refreshing) return;
     refreshing = true;
-    setBusy(true);
+    if (!opts.localOnly) setBusy(true);
     if (!opts.silent) say(opts.provider ? 'Checking provider…' : ready ? 'Refreshing…' : 'Loading…');
 
     try {
@@ -1610,13 +1834,18 @@
         opts.provider ? 'POST' : 'GET',
         opts.provider ? API_REFRESH : API_SNAPSHOT,
       );
-      render(data);
+      if (opts.localOnly) renderActivity(data);
+      else render(data);
       ready = true;
       setDocState('ready');
       if (!opts.silent) say('Updated ' + formatClock(Date.now()) + '.');
     } catch (error) {
       if (isAuthError(error)) {
         fatal(error.message);
+        return;
+      }
+      if (opts.localOnly) {
+        dom.activityPanel.dataset.freshness = 'stale';
         return;
       }
       setDocState(ready ? 'stale' : 'error');
@@ -1626,9 +1855,27 @@
       say(error.message);
     } finally {
       refreshing = false;
-      if (!dead) setBusy(false);
+      if (!dead && !opts.localOnly) setBusy(false);
     }
   }
+
+  function scheduleActivityPoll(delayMs) {
+    window.clearTimeout(activityPollTimer);
+    activityPollTimer = window.setTimeout(async () => {
+      if (!dead && document.visibilityState === 'visible') {
+        await refresh({ silent: true, localOnly: true });
+        if (selectedExecutionId) {
+          await loadActivityDetail(selectedExecutionId, { silent: true });
+        }
+        dom.activityPanel.dataset.freshness = 'fresh';
+      }
+      if (!dead) scheduleActivityPoll(selectedExecutionId ? 2000 : 5000);
+    }, delayMs);
+  }
+
+  document.addEventListener('visibilitychange', () => {
+    if (!dead && document.visibilityState === 'visible') scheduleActivityPoll(0);
+  });
 
   /* ---------- boot ---------- */
 
@@ -1652,5 +1899,6 @@
     }
 
     await refresh();
+    if (!dead) scheduleActivityPoll(selectedExecutionId ? 2000 : 5000);
   }());
 })();

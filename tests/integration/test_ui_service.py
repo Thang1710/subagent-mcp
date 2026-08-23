@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import http.client
 import json
 import os
@@ -10,10 +11,10 @@ import pytest
 
 from subagent_harness_mcp.adapters import claude_code as claude_code_module
 from subagent_harness_mcp.adapters import deepseek_harness as deepseek_harness_module
-from subagent_harness_mcp.adapters.fake import FakeAdapter
+from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigError, ConfigStore
-from subagent_harness_mcp.contracts import ServiceError
+from subagent_harness_mcp.contracts import ServiceError, SpawnRequest, TaskPacket
 from subagent_harness_mcp.paths import resolve_paths
 from subagent_harness_mcp.service import SubagentMcpService
 from subagent_harness_mcp.store import StateStore
@@ -103,6 +104,127 @@ def _configured_backend(home: Path) -> tuple[LocalUiBackend, ConfigStore]:
         registry=AdapterRegistry(builtin_factories=(FakeAdapter,)),
     )
     return LocalUiBackend(config=config, service=service), config
+
+
+def _activity_backend(home: Path) -> tuple[LocalUiBackend, SubagentMcpService]:
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(home.resolve())},
+        os_name="nt",
+    )
+    config = ConfigStore(paths)
+    config.save(
+        {
+            "schema_version": 1,
+            "revision": 0,
+            "runtimes": {
+                "fake": {
+                    "enabled": True,
+                    "selection_mode": "fixed",
+                    "fallback": False,
+                    "variants": [
+                        {
+                            "id": "configured",
+                            "model": "future/model-v9",
+                            "reasoning": {"mode": "provider-native"},
+                        }
+                    ],
+                }
+            },
+        },
+        expected_revision=0,
+    )
+    harness = FakeHarness()
+    harness.enqueue("done", result="safe terminal result")
+    store = StateStore.open(paths)
+    service = SubagentMcpService(
+        config=config,
+        store=store,
+        registry=AdapterRegistry(
+            builtin_factories=(lambda: FakeAdapter(harness),)
+        ),
+    )
+    backend = LocalUiBackend(config=config, service=service, store=store)
+    return backend, service
+
+
+def _activity_spawn(workspace: Path) -> SpawnRequest:
+    return SpawnRequest(
+        request_id="activity-spawn-1",
+        runtime_id="fake",
+        variant_id="configured",
+        task=TaskPacket(
+            title="Bounded activity task",
+            prompt="Return one deterministic result.",
+            acceptance_criteria=("Return normalized status.",),
+            role="sub-agent",
+        ),
+        cwd=str(workspace.resolve()),
+        mode="review",
+        transport="managed-sdk",
+        permissions=("repo_read",),
+    )
+
+
+def test_ui_activity_detail_projects_persisted_execution_without_raw_events(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    backend, service = _activity_backend(tmp_path / "home")
+    status = asyncio.run(service.agent_spawn(_activity_spawn(workspace)))
+
+    snapshot = backend.snapshot()
+    detail = backend.activity_detail(status.execution_id)
+
+    assert snapshot["activity"][0]["id"] == status.execution_id
+    assert snapshot["activity"][0]["title"] == "Bounded activity task"
+    assert snapshot["activity"][0]["icon"]["kind"] == "monogram"
+    assert detail is not None
+    assert detail["conversationId"] == status.conversation_id
+    assert detail["workspace"] == workspace.name
+    assert detail["writeSet"] == []
+    assert detail["steps"] == [
+        {"cursor": 1, "kind": "started", "at": detail["steps"][0]["at"]},
+        {"cursor": 2, "kind": "completed", "at": detail["steps"][1]["at"]},
+    ]
+    assert detail["result"]["text"] == "safe terminal result"
+    encoded = json.dumps(detail)
+    assert "payload" not in encoded
+    assert "external_session" not in encoded
+
+
+def test_ui_activity_reads_do_not_start_a_provider(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    _, writer_service = _activity_backend(home)
+    status = asyncio.run(writer_service.agent_spawn(_activity_spawn(workspace)))
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(home.resolve())},
+        os_name="nt",
+    )
+
+    class LocalReadService:
+        async def runtime_list(self):
+            return ()
+
+        async def runtime_check(self, *_args, **_kwargs):
+            raise AssertionError("activity reads must not check a provider")
+
+        async def runtime_canary(self, *_args, **_kwargs):
+            raise AssertionError("activity reads must not run a canary")
+
+        async def agent_spawn(self, *_args, **_kwargs):
+            raise AssertionError("activity reads must not spawn a provider task")
+
+    backend = LocalUiBackend(
+        config=ConfigStore(paths),
+        service=LocalReadService(),
+        store=StateStore.open(paths),
+    )
+
+    assert backend.snapshot()["activity"][0]["id"] == status.execution_id
+    assert backend.activity_detail(status.execution_id)["id"] == status.execution_id
 
 
 def test_ui_provider_refresh_is_explicit_and_uses_sanitized_quota_state(

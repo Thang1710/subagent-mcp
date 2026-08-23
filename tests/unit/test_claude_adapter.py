@@ -94,18 +94,26 @@ def test_rate_guard_rejects_available_overage_even_when_not_yet_in_use() -> None
     assert failure.code == "USAGE_CREDITS_FORBIDDEN"
 
 
-def test_rate_guard_reports_explicit_plan_rejection_as_quota_pause() -> None:
+def test_rate_guard_waits_for_terminal_result_after_rejected_plan_status() -> None:
     info = RateLimitInfo(
         status="rejected",
         overage_status="rejected",
         raw={"isUsingOverage": False},
     )
 
-    failure = _unsafe_rate(info)
+    assert _unsafe_rate(info) is None
 
-    assert failure is not None
-    assert failure.code == "QUOTA_PAUSED"
-    assert failure.message == "Claude plan quota is exhausted"
+
+def test_rate_limit_envelope_alone_does_not_pause_plan_backed_execution() -> None:
+    info = RateLimitInfo(
+        status="rejected",
+        rate_limit_type="seven_day_opus",
+        overage_status="rejected",
+        overage_disabled_reason="out_of_credits",
+        raw={"isUsingOverage": False},
+    )
+
+    assert _unsafe_rate(info) is None
 
 
 def test_rate_guard_reports_missing_no_overage_boolean_as_unknown() -> None:
@@ -164,10 +172,10 @@ def test_claude_adapter_version_changes_its_pair_identity(
 
     probe = asyncio.run(adapter.probe())
 
-    assert adapter.manifest.adapter_version == "1.0.2"
-    assert probe.details["adapter_version"] == "1.0.2"
+    assert adapter.manifest.adapter_version == "1.0.3"
+    assert probe.details["adapter_version"] == "1.0.3"
     pair_payload = {
-        "adapter_version": "1.0.2",
+        "adapter_version": "1.0.3",
         "sdk_version": probe.details["sdk_version"],
         "cli_path": os.path.normcase(probe.details["cli_path"]),
         "cli_version": probe.details["cli_version"],
@@ -341,6 +349,92 @@ class _PostQueryUnsafeClient(_UnsafeClient):
 
     async def interrupt(self) -> None:
         self.interrupt_calls += 1
+
+
+class _RejectedEnvelopeThenSuccessClient(_UnsafeClient):
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "rejected-envelope-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                overage_status="rejected",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="rejected-envelope-startup-rate",
+            session_id="rejected-envelope-session",
+        )
+        while not self.query_calls:
+            await asyncio.sleep(0)
+        yield AssistantMessage(
+            content=[TextBlock("completed despite an informational envelope")],
+            model="vendor/future-model",
+            session_id="rejected-envelope-session",
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="rejected",
+                rate_limit_type="seven_day_opus",
+                overage_status="rejected",
+                overage_disabled_reason="out_of_credits",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="rejected-envelope-terminal-rate",
+            session_id="rejected-envelope-session",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="rejected-envelope-session",
+            result="completed despite an informational envelope",
+            terminal_reason="completed",
+            uuid="rejected-envelope-result",
+        )
+
+
+class _SyntheticRateLimitClient(_UnsafeClient):
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "synthetic-rate-limit-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="rejected",
+                rate_limit_type="five_hour",
+                overage_status="rejected",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="synthetic-rate-limit-envelope",
+            session_id="synthetic-rate-limit-session",
+        )
+        while not self.query_calls:
+            await asyncio.sleep(0)
+        yield AssistantMessage(
+            content=[],
+            model="<synthetic>",
+            error="rate_limit",
+            session_id="synthetic-rate-limit-session",
+        )
 
 
 class _SafeQuotaClient(_UnsafeClient):
@@ -1124,6 +1218,107 @@ def test_output_before_unsafe_rate_is_never_accepted(tmp_path: Path) -> None:
     assert clients[0].disconnected is True
 
 
+def test_rejected_rate_envelope_before_success_is_informational(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_RejectedEnvelopeThenSuccessClient] = []
+
+    def factory(options):
+        client = _RejectedEnvelopeThenSuccessClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-rejected-envelope",
+                "execution-rejected-envelope",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        request = AdapterSessionRequest(
+            "conversation-rejected-envelope",
+            "execution-rejected-envelope",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        return await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+
+    finished = asyncio.run(run())
+
+    assert finished.execution_state == "succeeded"
+    assert finished.result_text == "completed despite an informational envelope"
+    assert clients[0].interrupt_calls == 0
+    assert clients[0].disconnected is True
+
+
+def test_synthetic_rate_limit_error_beats_model_attestation_in_spawn(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_SyntheticRateLimitClient] = []
+
+    def factory(options):
+        client = _SyntheticRateLimitClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-synthetic-rate",
+                "execution-synthetic-rate",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        request = AdapterSessionRequest(
+            "conversation-synthetic-rate",
+            "execution-synthetic-rate",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        return await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+
+    finished = asyncio.run(run())
+
+    assert finished.execution_state == "failed"
+    assert finished.error is not None and finished.error.code == "QUOTA_PAUSED"
+    assert clients[0].disconnected is True
+
+
 @pytest.mark.parametrize(
     ("rate_first", "assistant_session_id"),
     [
@@ -1566,6 +1761,48 @@ def test_canary_interrupts_immediately_on_unsafe_rate_after_query(tmp_path: Path
     assert result.error is not None and result.error.code == "USAGE_CREDITS_FORBIDDEN"
     assert clients[0].query_calls == 1
     assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
+def test_synthetic_rate_limit_error_beats_model_attestation_in_canary(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    clients: list[_SyntheticRateLimitClient] = []
+
+    def factory(options):
+        client = _SyntheticRateLimitClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+    probe = asyncio.run(adapter.probe())
+    base_pair_key = str(probe.details["pair_key"])
+
+    result = asyncio.run(
+        adapter.runtime_canary(
+            CanaryRequest(
+                runtime_id="claude-code",
+                variant_id="future-deep",
+                model="vendor/future-model",
+                reasoning={"effort": "xhigh"},
+                transport="managed-sdk",
+                base_pair_key=base_pair_key,
+                pair_key=_pair(base_pair_key),
+            )
+        )
+    )
+
+    assert result.passed is False
+    assert result.error is not None and result.error.code == "QUOTA_PAUSED"
     assert clients[0].disconnected is True
 
 

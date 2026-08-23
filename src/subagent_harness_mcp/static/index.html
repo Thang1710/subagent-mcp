@@ -91,9 +91,31 @@
       <h2 id="activity-title">Current &amp; recent activity</h2>
       <span class="stamp">Read-only</span>
     </div>
-    <ol class="activity" id="activity"></ol>
-    <p class="empty" id="activity-empty" hidden>No agent activity recorded yet.</p>
-    <p class="hint">Prompts, transcripts, and raw events are never shown here.</p>
+    <div class="activity-layout">
+      <div class="activity-list-pane">
+        <ol class="activity" id="activity"></ol>
+        <p class="empty" id="activity-empty" hidden>No agent activity recorded yet.</p>
+      </div>
+      <aside class="activity-detail" id="activity-detail" aria-live="polite" hidden>
+        <div class="activity-detail-identity" id="activity-detail-identity"></div>
+        <dl class="activity-detail-facts" id="activity-detail-facts"></dl>
+        <section aria-labelledby="activity-stage-title">
+          <h3 id="activity-stage-title">Current stage</h3>
+          <p class="activity-stage" id="activity-detail-stage"></p>
+        </section>
+        <section aria-labelledby="activity-lifecycle-title">
+          <h3 id="activity-lifecycle-title">Lifecycle</h3>
+          <ol class="activity-steps" id="activity-detail-steps"></ol>
+        </section>
+        <section class="activity-result" id="activity-result-section" aria-labelledby="activity-result-title" hidden>
+          <h3 id="activity-result-title">Result</h3>
+          <pre id="activity-detail-result"></pre>
+          <p class="activity-artifact" id="activity-detail-artifact"></p>
+        </section>
+        <p class="hint" id="activity-detail-capability"></p>
+      </aside>
+    </div>
+    <p class="hint activity-privacy">Prompts, hidden thinking, transcripts, and raw provider events are never shown here.</p>
   </section>
 
 </main>

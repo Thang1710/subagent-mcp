@@ -98,7 +98,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "1.0.2",
+            "adapter_version": "1.0.3",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -172,7 +172,7 @@ class ClaudeCodeAdapter:
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="1.0.2",
+            adapter_version="1.0.3",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -474,6 +474,12 @@ class ClaudeCodeAdapter:
                     )
                 rate_seen = True
             elif isinstance(message, AssistantMessage):
+                if message.error is not None:
+                    return _failure(
+                        request.pair_key,
+                        _assistant_error(message.error),
+                        {},
+                    )
                 if message.model != request.model or (
                     message.session_id is not None
                     and message.session_id != init_session
@@ -486,12 +492,6 @@ class ClaudeCodeAdapter:
                             False,
                             "Claude model or session changed during canary",
                         ),
-                        {},
-                    )
-                if message.error is not None:
-                    return _failure(
-                        request.pair_key,
-                        _assistant_error(message.error),
                         {},
                     )
                 assistant_seen = True
@@ -1124,6 +1124,8 @@ class ClaudeCodeAdapter:
                 rate_seen = True
                 continue
             if isinstance(message, AssistantMessage):
+                if message.error is not None:
+                    raise _service_failure(_assistant_error(message.error))
                 if message.model != context.effective_model or (
                     message.session_id is not None
                     and message.session_id != session_id
@@ -1133,8 +1135,6 @@ class ClaudeCodeAdapter:
                         AdapterFailure("CONTEXT_DRIFT", "adapter", False, "Claude model or session changed"),
                         self._canary_timeout,
                     )
-                if message.error is not None:
-                    raise _service_failure(_assistant_error(message.error))
                 assistant_seen = True
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
@@ -1209,7 +1209,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "1.0.2",
+            "adapter_version": "1.0.3",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],
@@ -1850,11 +1850,7 @@ def _unsafe_rate(info: Any) -> AdapterFailure | None:
             False,
             "Claude usage credits/overage are active",
         )
-    if status == "rejected":
-        return AdapterFailure(
-            "QUOTA_PAUSED", "quota", False, "Claude plan quota is exhausted"
-        )
-    if status not in {"allowed", "allowed_warning"}:
+    if status not in {"allowed", "allowed_warning", "rejected"}:
         return AdapterFailure(
             "CAPABILITY_MISSING",
             "provider",
@@ -1882,23 +1878,6 @@ def _unsafe_rate(info: Any) -> AdapterFailure | None:
             False,
             "Claude no-overage evidence is unavailable",
         )
-    error_code = raw.get("errorCode")
-    if isinstance(error_code, str):
-        folded = error_code.casefold()
-        if any(word in folded for word in ("credit", "billing")):
-            return AdapterFailure(
-                "USAGE_CREDITS_FORBIDDEN",
-                "quota",
-                False,
-                "Claude reported a billing/credit error",
-            )
-        if any(word in folded for word in ("quota", "rate")):
-            return AdapterFailure(
-                "QUOTA_PAUSED",
-                "quota",
-                False,
-                "Claude reported a quota/rate error",
-            )
     return None
 
 

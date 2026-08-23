@@ -144,6 +144,20 @@ def test_descriptor_shape_is_provider_neutral_and_model_agnostic() -> None:
     assert payload["ui_surfaces"]["native_host_panel"] == "unsupported"
 
 
+def test_descriptor_icon_has_deterministic_monogram_and_tone() -> None:
+    first = AgentDescriptor.from_manifest(
+        _manifest(), model="vendor/model", transport="managed-sdk"
+    ).to_dict()["icon"]
+    second = AgentDescriptor.from_manifest(
+        _manifest(), model="vendor/model", transport="managed-sdk"
+    ).to_dict()["icon"]
+
+    assert first == second
+    assert first["kind"] == "monogram"
+    assert first["text"] == "F"
+    assert first["tone"] in {"blue", "green", "purple", "teal"}
+
+
 def test_adapter_manifest_serializes_optional_model_schema() -> None:
     payload = _manifest().to_dict()
 
@@ -427,6 +441,15 @@ def test_result_artifact_metadata_reports_exact_utf8_bytes_and_rough_tokens() ->
         "rough_tokens_saved": (full_bytes + 2) // 3 - (compact_bytes + 2) // 3,
     }
     assert metrics["full_utf8_bytes"] != metadata["char_count"]
+
+
+@pytest.mark.parametrize("text", ["capsule:", "report done\ncapsule:"])
+def test_result_artifact_metadata_handles_empty_capsule_suffix(text: str) -> None:
+    metadata = result_artifact_metadata("execution-empty-capsule", {"text": text})
+
+    assert metadata is not None
+    assert metadata["preview"] == " ".join(text.split())
+    assert "capsule" not in metadata
 
 
 def test_slice_transfer_metrics_reports_exact_chars_bytes_and_rough_tokens() -> None:

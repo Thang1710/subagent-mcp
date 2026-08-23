@@ -25,6 +25,7 @@ def _server(
     *,
     patch_calls: list[tuple[dict[str, object], int]] | None = None,
     refresh_calls: list[None] | None = None,
+    activity_detail=None,
     control_token: str | None = None,
 ):
     calls = [] if patch_calls is None else patch_calls
@@ -40,7 +41,15 @@ def _server(
                 {
                     "id": "execution-1",
                     "title": "Bounded task",
+                    "runtime": "fake",
+                    "displayName": "Fake sub-agent",
                     "state": "succeeded",
+                    "icon": {
+                        "kind": "file",
+                        "text": "<svg>icon-markup-sentinel</svg>",
+                        "tone": "url(icon-url-sentinel)",
+                        "path": "icon-path-sentinel",
+                    },
                     "prompt": "must never leave the backend",
                     "events": [{"raw": "must never leave the backend"}],
                 }
@@ -65,6 +74,7 @@ def _server(
     return LoopbackUiServer(
         snapshot,
         patch_config,
+        activity_detail_provider=activity_detail,
         provider_refresher=refresh_provider,
         control_token=control_token,
     )
@@ -426,6 +436,32 @@ def test_static_ui_exposes_only_plain_runtime_controls() -> None:
     assert "await refresh();" in javascript
 
 
+def test_static_ui_has_safe_activity_detail_and_visibility_aware_polling() -> None:
+    package = resources.files("subagent_harness_mcp").joinpath("static")
+    html = package.joinpath("index.html").read_text(encoding="utf-8")
+    javascript = package.joinpath("app.js").read_text(encoding="utf-8")
+
+    assert 'id="activity-detail"' in html
+    assert 'id="activity-detail-result"' in html
+    assert "const API_ACTIVITY = '/api/v1/activity/';" in javascript
+    assert "document.visibilityState === 'visible'" in javascript
+    assert "encodeURIComponent(executionId)" in javascript
+    assert ".textContent" in javascript
+    assert "innerHTML" not in javascript.replace(
+        "Deliberately absent: storage, cookies, innerHTML, external requests,",
+        "",
+    )
+    polling = javascript.split("function scheduleActivityPoll", 1)[1]
+    assert "API_REFRESH" not in polling
+    activity_render = javascript.split("function renderActivity(data)", 1)[1].split(
+        "/* ---------- render + refresh ---------- */",
+        1,
+    )[0]
+    assert "document.activeElement" in activity_render
+    assert "dom.activity.contains(activeElement)" in activity_render
+    assert ".focus({ preventScroll: true })" in activity_render
+
+
 def test_host_origin_and_path_traversal_are_rejected() -> None:
     server = _server()
     server.start()
@@ -541,10 +577,110 @@ def test_bootstrap_is_single_use_and_api_requires_cookie_and_csrf() -> None:
     assert "prompt" not in snapshot["activity"][0]
     assert "events" not in snapshot["activity"][0]
     assert b"must never leave the backend" not in snapshot_body
+    assert snapshot["activity"][0]["icon"]["kind"] == "monogram"
+    assert snapshot["activity"][0]["icon"]["text"] == "F"
+    for sentinel in (
+        b"icon-markup-sentinel",
+        b"icon-url-sentinel",
+        b"icon-path-sentinel",
+    ):
+        assert sentinel not in snapshot_body
     assert missing_csrf == 403
     assert patched == 200
     assert json.loads(patched_body) == {"revision": 8}
     assert patch_calls == [({"runtimes": {"fake": {"enabled": False}}}, 7)]
+
+
+def test_activity_detail_requires_session_and_returns_normalized_404() -> None:
+    server = _server(activity_detail=lambda _execution_id: None)
+    server.start()
+    try:
+        anonymous, _, _ = _request(server, "GET", "/api/v1/activity/execution-1")
+        cookie, _ = _open_session(server)
+        missing, _, body = _request(
+            server,
+            "GET",
+            "/api/v1/activity/execution-does-not-exist",
+            headers={"Cookie": cookie},
+        )
+    finally:
+        server.close()
+
+    assert anonymous == 401
+    assert missing == 404
+    assert json.loads(body)["error"] == "NOT_FOUND"
+
+
+def test_activity_detail_response_projects_only_safe_fields() -> None:
+    def detail(_execution_id: str):
+        return {
+            "id": "execution-1",
+            "conversationId": "conversation-1",
+            "title": "Safe activity",
+            "runtime": "fake",
+            "displayName": "Fake sub-agent",
+            "modelDisplayName": "future/model-v9",
+            "reasoning": {
+                "effort": "max",
+                "apiKey": "reasoning-secret-sentinel",
+            },
+            "transport": "managed-sdk",
+            "icon": {
+                "kind": "file",
+                "text": "<svg>detail-icon-markup-sentinel</svg>",
+                "tone": "url(detail-icon-url-sentinel)",
+                "path": "detail-icon-path-sentinel",
+            },
+            "state": "succeeded",
+            "currentStage": "completed",
+            "steps": [
+                {
+                    "cursor": 1,
+                    "kind": "completed",
+                    "at": "2026-08-23T00:00:00.000Z",
+                    "payload": "raw-event-sentinel",
+                }
+            ],
+            "result": {
+                "text": "safe [REDACTED] result",
+                "prompt": "private-prompt-sentinel",
+                "raw": "raw-provider-sentinel",
+            },
+            "prompt": "top-level-prompt-sentinel",
+            "hiddenThinking": "hidden-thinking-sentinel",
+        }
+
+    server = _server(activity_detail=detail)
+    server.start()
+    try:
+        cookie, _ = _open_session(server)
+        status, _, body = _request(
+            server,
+            "GET",
+            "/api/v1/activity/execution-1",
+            headers={"Cookie": cookie},
+        )
+    finally:
+        server.close()
+
+    assert status == 200
+    parsed = json.loads(body)
+    assert parsed["result"]["text"] == "safe [REDACTED] result"
+    assert parsed["reasoning"] == {"effort": "max"}
+    assert parsed["icon"]["kind"] == "monogram"
+    assert parsed["icon"]["text"] == "F"
+    for sentinel in (
+        b"raw-event-sentinel",
+        b"private-prompt-sentinel",
+        b"raw-provider-sentinel",
+        b"top-level-prompt-sentinel",
+        b"hidden-thinking-sentinel",
+        b"reasoning-secret-sentinel",
+        b"detail-icon-markup-sentinel",
+        b"detail-icon-url-sentinel",
+        b"detail-icon-path-sentinel",
+    ):
+        assert sentinel not in body
 
 
 def test_managed_ui_direct_url_creates_its_first_browser_session() -> None:

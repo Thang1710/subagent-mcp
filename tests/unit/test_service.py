@@ -1196,6 +1196,40 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     assert "private transcript" not in durable
 
 
+def test_task_title_is_redacted_bounded_and_prompt_is_not_persisted(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("done", result="finished")
+    service, store = _service(tmp_path, harness)
+    request = _spawn_request(workspace, prompt="prompt-secret-marker")
+    request = replace(
+        request,
+        task=replace(
+            request.task,
+            title=(
+                "Review user@example.com Bearer abcdefghijklmnopqrstuvwxyz "
+                + "x" * 400
+            ),
+        ),
+    )
+
+    asyncio.run(service.agent_spawn(request))
+
+    with store.transaction() as database:
+        requested = json.loads(
+            database.execute("SELECT requested_json FROM executions").fetchone()[0]
+        )
+    assert requested["task_title"].startswith("Review [REDACTED_EMAIL] Bearer [REDACTED]")
+    assert len(requested["task_title"]) <= 240
+    encoded = json.dumps(requested)
+    assert "prompt-secret-marker" not in encoded
+    for absent in ("prompt", "acceptance_criteria", "role", "authority"):
+        assert absent not in requested
+
+
 def test_terminal_result_is_hash_addressed_and_read_in_bounded_slices(
     tmp_path: Path,
 ) -> None:

@@ -2,6 +2,19 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.4 - 2026-08-23
+
+- Add a selectable localhost activity list and responsive detail panel for
+  external agents, including model, native harness, safe workspace metadata,
+  current stage, lifecycle, elapsed time, and redacted terminal results.
+- Persist bounded task titles and deterministic runtime monograms without
+  exposing prompts, transcripts, hidden thinking, or raw provider events.
+- Treat Claude rate-limit events as informational until the provider emits a
+  terminal outcome, while preserving no-overage enforcement and exact quota
+  exhaustion handling.
+- Dispatch MCP Registry publication explicitly after the matching GitHub
+  release so token-created releases cannot silently skip registry publishing.
+
 ## 1.0.3 - 2026-08-23
 
 - Return a bound `running` Claude session after exact startup and no-overage

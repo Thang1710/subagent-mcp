@@ -1904,6 +1904,7 @@ def _requested_metadata(
         "permission_policy_id": request.permission_policy_id,
         "write_set": list(write_set),
         "mode": request.mode,
+        "task_title": _redact_text(request.task.title)[:240],
     }
 
 

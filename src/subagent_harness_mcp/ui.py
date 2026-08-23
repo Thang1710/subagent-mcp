@@ -14,6 +14,7 @@ import socket
 import threading
 import webbrowser
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime, timezone
 from http import HTTPStatus
 from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -24,7 +25,7 @@ from urllib.parse import quote, unquote, urlsplit
 
 from . import __version__
 from .config import ConfigError, ConfigStore
-from .contracts import ServiceError
+from .contracts import ServiceError, result_artifact_metadata
 from .ui_process import (
     CONTROL_CHALLENGE_HEADER,
     CONTROL_HEADER,
@@ -70,7 +71,9 @@ _ACTIVITY_FIELDS = frozenset(
         "adapter",
         "agentId",
         "completedAt",
+        "conversationId",
         "createdAt",
+        "displayName",
         "durationMs",
         "duration_ms",
         "elapsedMs",
@@ -78,8 +81,10 @@ _ACTIVITY_FIELDS = frozenset(
         "finishedAt",
         "finished_at",
         "id",
+        "icon",
         "label",
         "name",
+        "modelDisplayName",
         "phase",
         "runtime",
         "runtimeName",
@@ -89,6 +94,8 @@ _ACTIVITY_FIELDS = frozenset(
         "status",
         "taskId",
         "title",
+        "transport",
+        "updatedAt",
     }
 )
 _PRIVATE_KEYS = frozenset(
@@ -115,6 +122,21 @@ _PRIVATE_KEYS = frozenset(
         "transcript",
     }
 )
+_NORMALIZED_PRIVATE_KEYS = frozenset(
+    "".join(character for character in key.casefold() if character.isalnum())
+    for key in _PRIVATE_KEYS
+)
+_CURRENT_STAGE = {
+    "queued": "queued",
+    "starting": "starting_native_harness",
+    "running": "external_harness_working",
+    "needs_input": "waiting_for_input",
+    "succeeded": "completed",
+    "failed": "failed",
+    "cancelled": "cancelled",
+    "interrupted": "interrupted",
+}
+_ICON_TONES = ("blue", "green", "purple", "teal")
 _CSP = (
     "default-src 'none'; "
     "script-src 'self'; "
@@ -133,6 +155,7 @@ _CSP = (
 
 SnapshotProvider = Callable[[], Mapping[str, Any]]
 ConfigPatcher = Callable[[dict[str, Any], int], Mapping[str, Any]]
+ActivityDetailProvider = Callable[[str], Mapping[str, Any] | None]
 ProviderRefresher = Callable[[], Mapping[str, Any]]
 BrowserOpener = Callable[[str], object]
 
@@ -210,6 +233,9 @@ class LocalUiBackend:
             "trust": _trust_entries(document),
             "activity": activity,
         }
+
+    def activity_detail(self, execution_id: str) -> Mapping[str, Any] | None:
+        return _read_activity_detail(self._store, execution_id)
 
     def patch_config(
         self,
@@ -291,11 +317,13 @@ class _UiState:
         self,
         snapshot_provider: SnapshotProvider,
         config_patcher: ConfigPatcher,
+        activity_detail_provider: ActivityDetailProvider | None,
         provider_refresher: ProviderRefresher | None,
         control_token: str | None,
     ) -> None:
         self.snapshot_provider = snapshot_provider
         self.config_patcher = config_patcher
+        self.activity_detail_provider = activity_detail_provider
         self.provider_refresher = provider_refresher
         self.control_token = control_token
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
@@ -374,6 +402,7 @@ class LoopbackUiServer:
         snapshot_provider: SnapshotProvider,
         config_patcher: ConfigPatcher,
         *,
+        activity_detail_provider: ActivityDetailProvider | None = None,
         provider_refresher: ProviderRefresher | None = None,
         control_token: str | None = None,
         host: str = "127.0.0.1",
@@ -388,6 +417,8 @@ class LoopbackUiServer:
             raise UiError("UI_PORT_INVALID", "the settings UI port must be 0 through 65535")
         if not callable(snapshot_provider) or not callable(config_patcher):
             raise UiError("UI_BACKEND_INVALID", "UI callbacks must be callable")
+        if activity_detail_provider is not None and not callable(activity_detail_provider):
+            raise UiError("UI_BACKEND_INVALID", "activity detail callback must be callable")
         if provider_refresher is not None and not callable(provider_refresher):
             raise UiError("UI_BACKEND_INVALID", "provider refresh callback must be callable")
         if control_token is not None and (
@@ -399,6 +430,7 @@ class LoopbackUiServer:
         self._state = _UiState(
             snapshot_provider,
             config_patcher,
+            activity_detail_provider,
             provider_refresher,
             control_token,
         )
@@ -514,6 +546,7 @@ def run_ui(
     server = LoopbackUiServer(
         backend.snapshot,
         backend.patch_config,
+        activity_detail_provider=backend.activity_detail,
         provider_refresher=backend.refresh_provider,
         control_token=control_token,
         port=port,
@@ -600,6 +633,33 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                     self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "UI_BACKEND_FAILED")
                     return
                 self._send_json(HTTPStatus.OK, snapshot)
+                return
+            activity_prefix = "/api/v1/activity/"
+            if path.startswith(activity_prefix):
+                if self._session(require_csrf=False) is None:
+                    return
+                execution_id = path.removeprefix(activity_prefix)
+                if (
+                    not _valid_activity_execution_id(execution_id)
+                    or state.activity_detail_provider is None
+                ):
+                    self._json_error(HTTPStatus.NOT_FOUND, "NOT_FOUND")
+                    return
+                try:
+                    detail = state.activity_detail_provider(execution_id)
+                    public_detail = (
+                        None if detail is None else _public_activity_detail(detail)
+                    )
+                except (ConfigError, UiError) as exc:
+                    self._backend_error(exc)
+                    return
+                except Exception:
+                    self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "UI_BACKEND_FAILED")
+                    return
+                if public_detail is None:
+                    self._json_error(HTTPStatus.NOT_FOUND, "NOT_FOUND")
+                    return
+                self._send_json(HTTPStatus.OK, public_detail)
                 return
             asset = _ASSETS.get(path)
             if asset is None:
@@ -1033,10 +1093,123 @@ def _public_activity(value: object) -> list[dict[str, Any]]:
         item = {
             str(key): _bounded_public_value(field, depth=1)
             for key, field in raw.items()
-            if str(key) in _ACTIVITY_FIELDS
+            if str(key) in _ACTIVITY_FIELDS and str(key) != "icon"
         }
+        runtime_id = raw.get("runtime")
+        display_name = raw.get("displayName")
+        rendered_runtime = runtime_id if isinstance(runtime_id, str) else "subagent"
+        rendered_display = (
+            display_name if isinstance(display_name, str) else rendered_runtime
+        )
+        item["icon"] = _public_icon(
+            raw.get("icon"),
+            rendered_runtime,
+            rendered_display,
+        )
         result.append(item)
     return result
+
+
+def _public_activity_detail(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise UiError("UI_BACKEND_INVALID", "activity detail must be an object")
+    result: dict[str, Any] = {}
+    text_fields = (
+        "id",
+        "conversationId",
+        "title",
+        "runtime",
+        "displayName",
+        "provider",
+        "harness",
+        "modelDisplayName",
+        "transport",
+        "state",
+        "conversationState",
+        "currentStage",
+        "workspace",
+        "mode",
+        "startedAt",
+        "updatedAt",
+        "finishedAt",
+    )
+    for key in text_fields:
+        field = value.get(key)
+        if field is None and key == "finishedAt":
+            result[key] = None
+        elif isinstance(field, str):
+            result[key] = field[:16_384]
+    for key in ("stateRevision", "durationMs", "needsInputCount"):
+        field = value.get(key)
+        if isinstance(field, int) and not isinstance(field, bool) and field >= 0:
+            result[key] = field
+    for key in ("recoveryRequired",):
+        field = value.get(key)
+        if type(field) is bool:
+            result[key] = field
+
+    runtime_id = result.get("runtime", "subagent")
+    display_name = result.get("displayName", runtime_id)
+    result["icon"] = _public_icon(
+        value.get("icon"),
+        str(runtime_id),
+        str(display_name),
+    )
+
+    reasoning = value.get("reasoning")
+    if isinstance(reasoning, Mapping):
+        rendered_reasoning = _bounded_public_value(reasoning, depth=1)
+        result["reasoning"] = (
+            rendered_reasoning if isinstance(rendered_reasoning, dict) else {}
+        )
+
+    for key in ("permissions", "writeSet", "capabilityGaps"):
+        result[key] = _public_text_list(value.get(key))
+
+    steps = value.get("steps")
+    public_steps: list[dict[str, Any]] = []
+    if isinstance(steps, Sequence) and not isinstance(steps, (str, bytes, bytearray)):
+        for step in steps[:128]:
+            if not isinstance(step, Mapping):
+                continue
+            cursor = step.get("cursor")
+            kind = step.get("kind")
+            at = step.get("at")
+            if (
+                isinstance(cursor, int)
+                and not isinstance(cursor, bool)
+                and cursor >= 0
+                and isinstance(kind, str)
+                and isinstance(at, str)
+            ):
+                public_steps.append(
+                    {"cursor": cursor, "kind": kind[:128], "at": at[:128]}
+                )
+    result["steps"] = public_steps
+
+    raw_result = value.get("result")
+    public_result: dict[str, Any] | None = None
+    if isinstance(raw_result, Mapping) and isinstance(raw_result.get("text"), str):
+        public_result = {"text": str(raw_result["text"])[:16_384]}
+        for source, target in (
+            ("artifactId", "artifactId"),
+            ("sha256", "sha256"),
+            ("capsule", "capsule"),
+        ):
+            field = raw_result.get(source)
+            if isinstance(field, str):
+                public_result[target] = field[:16_384]
+        char_count = raw_result.get("charCount")
+        if isinstance(char_count, int) and not isinstance(char_count, bool) and char_count >= 0:
+            public_result["charCount"] = char_count
+    result["result"] = public_result
+    return result
+
+
+def _public_text_list(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [str(item)[:2048] for item in value[:128] if isinstance(item, str)]
 
 
 def _bounded_public_value(value: object, *, depth: int) -> Any:
@@ -1052,7 +1225,12 @@ def _bounded_public_value(value: object, *, depth: int) -> Any:
             if index >= 256:
                 break
             rendered_key = str(key)
-            if rendered_key.casefold() in _PRIVATE_KEYS:
+            normalized_key = "".join(
+                character
+                for character in rendered_key.casefold()
+                if character.isalnum()
+            )
+            if normalized_key in _NORMALIZED_PRIVATE_KEYS:
                 continue
             result[rendered_key] = _bounded_public_value(item, depth=depth + 1)
         return result
@@ -1938,8 +2116,9 @@ def _read_ui_state(store: object | None) -> tuple[list[dict[str, Any]], list[dic
             ).fetchall()
             activity_rows = database.execute(
                 """
-                SELECT e.execution_id, c.runtime_id, e.state,
-                       e.created_at_utc, e.terminal_at_utc
+                SELECT e.execution_id, e.conversation_id, c.runtime_id, e.state,
+                       c.descriptor_json, e.requested_json,
+                       e.created_at_utc, e.updated_at_utc, e.terminal_at_utc
                 FROM executions AS e
                 JOIN conversations AS c ON c.conversation_id = e.conversation_id
                 ORDER BY e.rowid DESC LIMIT 50
@@ -1957,18 +2136,274 @@ def _read_ui_state(store: object | None) -> tuple[list[dict[str, Any]], list[dic
         }
         for row in circuit_rows
     ]
-    activity = [
-        {
-            "id": str(row[0]),
-            "title": "External-agent execution",
-            "runtime": str(row[1]),
-            "state": str(row[2]),
-            "startedAt": row[3],
-            "finishedAt": row[4],
-        }
-        for row in activity_rows
-    ]
+    activity = [_activity_summary_row(row) for row in activity_rows]
     return circuits, activity
+
+
+def _read_activity_detail(
+    store: object | None,
+    execution_id: str,
+) -> dict[str, Any] | None:
+    if not _valid_activity_execution_id(execution_id):
+        return None
+    transaction = getattr(store, "transaction", None)
+    if not callable(transaction):
+        return None
+    try:
+        with transaction() as database:
+            row = database.execute(
+                """
+                SELECT e.execution_id, e.conversation_id, c.runtime_id,
+                       c.state, c.state_revision, e.state, e.state_revision,
+                       c.descriptor_json, e.requested_json, e.observed_json,
+                       e.result_json, e.created_at_utc, e.updated_at_utc,
+                       e.terminal_at_utc
+                FROM executions AS e
+                JOIN conversations AS c ON c.conversation_id = e.conversation_id
+                WHERE e.execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            event_rows = database.execute(
+                """
+                SELECT cursor, kind, created_at_utc
+                FROM events
+                WHERE execution_id = ?
+                ORDER BY cursor
+                LIMIT 128
+                """,
+                (execution_id,),
+            ).fetchall()
+    except Exception as exc:
+        raise UiError("UI_BACKEND_FAILED", "activity state could not be read") from exc
+
+    runtime_id = str(row[2])
+    descriptor = _decoded_object(row[7])
+    requested = _decoded_object(row[8])
+    observed = _decoded_object(row[9])
+    stored_result = _decoded_object(row[10])
+    display_name = _descriptor_text(descriptor, "display_name", runtime_id)
+    execution_state = str(row[5])
+    result_error = stored_result.get("error")
+    recovery_required = bool(
+        isinstance(result_error, Mapping)
+        and result_error.get("code") == "RECOVERY_REQUIRED"
+    )
+    reasoning = observed.get("reasoning")
+    if not isinstance(reasoning, Mapping):
+        reasoning = requested.get("reasoning")
+    needs_input = observed.get("needs_input")
+    needs_input_count = (
+        min(len(needs_input), 128)
+        if isinstance(needs_input, Sequence)
+        and not isinstance(needs_input, (str, bytes, bytearray))
+        else 0
+    )
+    capability_gaps = observed.get("capability_gaps")
+    if not isinstance(capability_gaps, Sequence) or isinstance(
+        capability_gaps, (str, bytes, bytearray)
+    ):
+        capability_gaps = descriptor.get("capability_gaps", ())
+    terminal_at = row[13]
+    current_stage = _CURRENT_STAGE.get(execution_state, "unknown")
+    if recovery_required:
+        current_stage = "recovery_required"
+    return {
+        "id": str(row[0]),
+        "conversationId": str(row[1]),
+        "title": _activity_title(requested, descriptor, runtime_id),
+        "runtime": runtime_id,
+        "displayName": display_name,
+        "provider": _descriptor_text(descriptor, "provider_id", runtime_id),
+        "harness": _descriptor_text(descriptor, "harness_id", runtime_id),
+        "modelDisplayName": _descriptor_text(descriptor, "model_display_name", ""),
+        "reasoning": _public_reasoning(reasoning),
+        "transport": _descriptor_text(
+            descriptor,
+            "transport",
+            str(requested.get("transport", "")),
+        ),
+        "icon": _public_icon(descriptor.get("icon"), runtime_id, display_name),
+        "state": execution_state,
+        "conversationState": str(row[3]),
+        "stateRevision": max(0, int(row[6])) if isinstance(row[6], int) else 0,
+        "currentStage": current_stage,
+        "workspace": _workspace_label(
+            requested.get("workspace_path", observed.get("workspace_path"))
+        ),
+        "mode": str(requested.get("mode", ""))[:128],
+        "permissions": _stored_text_list(requested.get("permissions")),
+        "writeSet": _stored_text_list(requested.get("write_set")),
+        "startedAt": row[11],
+        "updatedAt": row[12],
+        "finishedAt": terminal_at,
+        "durationMs": _activity_duration_ms(row[11], terminal_at),
+        "needsInputCount": needs_input_count,
+        "recoveryRequired": recovery_required,
+        "capabilityGaps": _stored_text_list(capability_gaps),
+        "steps": [
+            {"cursor": event[0], "kind": str(event[1]), "at": event[2]}
+            for event in event_rows
+            if isinstance(event[0], int)
+        ],
+        "result": _activity_result(str(row[0]), stored_result),
+    }
+
+
+def _activity_summary_row(row: Sequence[object]) -> dict[str, Any]:
+    runtime_id = str(row[2])
+    descriptor = _decoded_object(row[4])
+    requested = _decoded_object(row[5])
+    display_name = _descriptor_text(descriptor, "display_name", runtime_id)
+    return {
+        "id": str(row[0]),
+        "conversationId": str(row[1]),
+        "title": _activity_title(requested, descriptor, runtime_id),
+        "runtime": runtime_id,
+        "displayName": display_name,
+        "modelDisplayName": _descriptor_text(descriptor, "model_display_name", ""),
+        "transport": _descriptor_text(descriptor, "transport", ""),
+        "icon": _public_icon(descriptor.get("icon"), runtime_id, display_name),
+        "state": str(row[3]),
+        "startedAt": row[6],
+        "updatedAt": row[7],
+        "finishedAt": row[8],
+        "durationMs": _activity_duration_ms(row[6], row[8]),
+    }
+
+
+def _decoded_object(raw: object) -> dict[str, Any]:
+    if not isinstance(raw, str):
+        return {}
+    try:
+        value = json.loads(raw)
+    except (json.JSONDecodeError, UnicodeError):
+        return {}
+    return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _descriptor_text(
+    descriptor: Mapping[str, Any],
+    key: str,
+    fallback: str,
+) -> str:
+    value = descriptor.get(key)
+    if isinstance(value, str) and value.strip():
+        return value[:512]
+    return fallback[:512]
+
+
+def _activity_title(
+    requested: Mapping[str, Any],
+    descriptor: Mapping[str, Any],
+    runtime_id: str,
+) -> str:
+    title = requested.get("task_title")
+    if isinstance(title, str) and title.strip():
+        return title[:240]
+    display_name = _descriptor_text(descriptor, "display_name", runtime_id)
+    return f"{display_name} execution"[:240]
+
+
+def _public_icon(raw: object, runtime_id: str, display_name: str) -> dict[str, str]:
+    fallback_text = "".join(
+        character.upper()
+        for character in display_name
+        if character.isascii() and character.isalnum()
+    )[:1] or "S"
+    text = None
+    tone = None
+    if isinstance(raw, Mapping) and raw.get("kind") == "monogram":
+        candidate = raw.get("text")
+        if isinstance(candidate, str):
+            candidate = "".join(
+                character.upper()
+                for character in candidate
+                if character.isascii() and character.isalnum()
+            )[:2]
+            text = candidate or None
+        candidate_tone = raw.get("tone")
+        if candidate_tone in _ICON_TONES:
+            tone = str(candidate_tone)
+    if tone is None:
+        tone = _ICON_TONES[
+            hashlib.sha256(runtime_id.encode("utf-8")).digest()[0] % len(_ICON_TONES)
+        ]
+    return {"kind": "monogram", "text": text or fallback_text, "tone": tone}
+
+
+def _activity_duration_ms(started_at: object, finished_at: object) -> int | None:
+    if not isinstance(started_at, str):
+        return None
+    try:
+        started = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+        finished = (
+            datetime.now(timezone.utc)
+            if finished_at is None
+            else datetime.fromisoformat(str(finished_at).replace("Z", "+00:00"))
+        )
+        elapsed = finished - started
+    except (TypeError, ValueError):
+        return None
+    return max(0, int(elapsed.total_seconds() * 1000))
+
+
+def _workspace_label(value: object) -> str:
+    if not isinstance(value, str):
+        return "workspace"
+    normalized = value.replace("\\", "/").rstrip("/")
+    label = normalized.rsplit("/", 1)[-1]
+    if not label or label.endswith(":"):
+        return "workspace"
+    return label[:512]
+
+
+def _stored_text_list(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return []
+    return [item[:2048] for item in value[:128] if isinstance(item, str)]
+
+
+def _public_reasoning(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    rendered = _bounded_public_value(value, depth=1)
+    return rendered if isinstance(rendered, dict) else {}
+
+
+def _activity_result(
+    execution_id: str,
+    stored_result: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    text = stored_result.get("text")
+    if not isinstance(text, str):
+        return None
+    artifact = result_artifact_metadata(execution_id, stored_result)
+    result: dict[str, Any] = {"text": text[:16_384]}
+    if artifact is None:
+        return result
+    result.update(
+        {
+            "artifactId": str(artifact["artifact_id"]),
+            "sha256": str(artifact["sha256"]),
+            "charCount": int(artifact["char_count"]),
+        }
+    )
+    capsule = artifact.get("capsule")
+    if isinstance(capsule, str):
+        result["capsule"] = capsule
+    return result
+
+
+def _valid_activity_execution_id(value: object) -> bool:
+    return bool(
+        isinstance(value, str)
+        and 1 <= len(value) <= 128
+        and value.isascii()
+        and all(character.isalnum() or character in {"-", "_"} for character in value)
+    )
 
 
 def _run_service_method(

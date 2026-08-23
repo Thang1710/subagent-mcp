@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -23,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -178,7 +179,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert "```mermaid" in readme
     assert "**Claude Code — Ready.**" in readme
     assert "**DeepSeek Harness — Ready.**" in readme
-    assert "**Stable:** `1.0.3`" in readme
+    assert "**Stable:** `1.0.4`" in readme
     assert "fail-closed" not in readme
     assert "subscription-only policy before starting work" not in readme_flat
     assert "no provider task starts" not in readme_flat
@@ -209,6 +210,17 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert workflow.startswith("name: publish-release")
     assert "--prerelease" not in workflow
+
+
+def test_public_documents_do_not_publish_codex_task_ids() -> None:
+    task_id = re.compile(r"\b01a[0-9a-f]{5,}-[0-9a-f-]{20,}\b")
+    documents = list(ROOT.glob("*.md")) + list((ROOT / "docs").rglob("*.md"))
+
+    assert not [
+        path.relative_to(ROOT).as_posix()
+        for path in documents
+        if task_id.search(path.read_text(encoding="utf-8"))
+    ]
 
 
 def test_registry_publish_workflow_uses_secretless_oidc_and_pinned_publisher() -> None:
@@ -296,6 +308,7 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "workflow_dispatch:" in release
     assert "environment: pypi" in release
     assert "id-token: write" in release
+    assert "actions: write" in release
     assert "pypa/gh-action-pypi-publish@release/v1" in release
     assert "GH_REPO: ${{ github.repository }}" in release
     assert "tomllib" not in release
@@ -305,6 +318,9 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "release-manifest.json" in release
     assert "SHA256SUMS.txt" in release
     assert 'item.name.endswith((".whl", ".tar.gz"))' in release
+    assert "gh workflow run publish-mcp-registry.yml" in release
+    assert "--ref main" in release
+    assert '-f tag="$RELEASE_TAG"' in release
 
 
 def test_source_import_is_lightweight_and_typed(tmp_path: Path) -> None:
