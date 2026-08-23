@@ -2,6 +2,22 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.3 - 2026-08-23
+
+- Return a bound `running` Claude session after exact startup and no-overage
+  evidence, then supervise the native turn in the background without imposing a
+  model completion deadline. Native output that arrives before the matching
+  rate event is held in memory and accepted only after exact safe evidence.
+- Keep `agent_wait` local and non-cancelling; its four-minute controller window
+  returns current status while the external agent continues working.
+- Make status, terminal persistence, and interrupt races deterministic. Preserve
+  completed output and explicit quota failures even when cleanup is ambiguous,
+  and keep unsafe writer leases held until native cleanup is verified.
+- Surface a controller-restart loss as durable recovery instead of leaving an
+  execution permanently stuck in `running`. `agent_close` can retry cleanup,
+  atomically release held writer leases, and clear recovery without database
+  repair; verified process absence also recovers restart or startup ambiguity.
+
 ## 1.0.2 - 2026-08-23
 
 - Let an exact same-origin localhost page create an in-memory browser session,

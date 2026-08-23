@@ -18,6 +18,7 @@ from claude_agent_sdk import (
 )
 from subagent_harness_mcp.adapters import (
     AdapterContextRequest,
+    AdapterSessionRequest,
     AdapterSpawnRequest,
     CanaryRequest,
 )
@@ -163,10 +164,10 @@ def test_claude_adapter_version_changes_its_pair_identity(
 
     probe = asyncio.run(adapter.probe())
 
-    assert adapter.manifest.adapter_version == "1.0.1"
-    assert probe.details["adapter_version"] == "1.0.1"
+    assert adapter.manifest.adapter_version == "1.0.2"
+    assert probe.details["adapter_version"] == "1.0.2"
     pair_payload = {
-        "adapter_version": "1.0.1",
+        "adapter_version": "1.0.2",
         "sdk_version": probe.details["sdk_version"],
         "cli_path": os.path.normcase(probe.details["cli_path"]),
         "cli_version": probe.details["cli_version"],
@@ -477,6 +478,652 @@ class _PreflightOrderingClient(_UnsafeClient):
         )
 
 
+class _OutputBeforeRateClient(_UnsafeClient):
+    unsafe_rate = False
+
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "early-output-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        while not self.query_calls:
+            await asyncio.sleep(0)
+        yield AssistantMessage(
+            content=[TextBlock("early provider result")],
+            model="vendor/future-model",
+            session_id="early-output-session",
+        )
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                overage_status="allowed" if self.unsafe_rate else "rejected",
+                raw={"isUsingOverage": self.unsafe_rate},
+            ),
+            uuid="early-output-rate",
+            session_id="early-output-session",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="early-output-session",
+            result="early provider result",
+            terminal_reason="completed",
+            uuid="early-output-result",
+        )
+
+
+class _ControlledLifecycleClient(_UnsafeClient):
+    def __init__(self, options) -> None:
+        super().__init__(options)
+        self.rate_release = asyncio.Event()
+        self.terminal_release = asyncio.Event()
+        self.disconnect_started = asyncio.Event()
+        self.disconnect_release = asyncio.Event()
+        self.interrupt_started = asyncio.Event()
+        self.interrupt_release = asyncio.Event()
+        self.hold_disconnect = False
+        self.hold_interrupt = False
+        self.complete_during_interrupt = False
+        self.disconnect_calls = 0
+        self.disconnect_failures = 0
+
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "controlled-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        await self.rate_release.wait()
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                overage_status="rejected",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="controlled-rate",
+            session_id="controlled-session",
+        )
+        await self.terminal_release.wait()
+        if self.interrupt_calls and not self.complete_during_interrupt:
+            yield ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="controlled-session",
+                result="interrupted",
+                terminal_reason="aborted_streaming",
+                uuid="controlled-interrupted",
+            )
+            return
+        yield AssistantMessage(
+            content=[TextBlock("controlled result")],
+            model="vendor/future-model",
+            session_id="controlled-session",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="controlled-session",
+            result="controlled result",
+            terminal_reason="completed",
+            uuid="controlled-result",
+        )
+
+    async def interrupt(self) -> None:
+        await super().interrupt()
+        self.terminal_release.set()
+        if self.hold_interrupt:
+            self.interrupt_started.set()
+            await self.interrupt_release.wait()
+
+    async def disconnect(self) -> None:
+        if self.hold_disconnect:
+            self.disconnect_started.set()
+            await self.disconnect_release.wait()
+        self.disconnect_calls += 1
+        if self.disconnect_failures:
+            self.disconnect_failures -= 1
+            raise RuntimeError("disconnect failed")
+        await super().disconnect()
+
+
+async def _controlled_context(
+    adapter: ClaudeCodeAdapter,
+    workspace: Path,
+):
+    await adapter.probe()
+    return await adapter.resolve_context(
+        AdapterContextRequest(
+            runtime_id="claude-code",
+            variant_id="future-deep",
+            model="vendor/future-model",
+            reasoning={"effort": "xhigh"},
+            workspace_path=str(workspace.resolve()),
+            workspace_key="workspace-1",
+            transport="managed-sdk",
+            permissions=("repo_read",),
+            context_policy_id="context-1",
+            permission_policy_id="permission-1",
+        )
+    )
+
+
+async def _terminal_adapter_snapshot(
+    adapter: ClaudeCodeAdapter,
+    request: AdapterSessionRequest,
+):
+    while True:
+        snapshot = await adapter.snapshot(request)
+        if snapshot.execution_state != "running":
+            return snapshot
+        await asyncio.sleep(0)
+
+
+def test_orphan_cleanup_requires_absence_of_exact_managed_process(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    process = SimpleNamespace(
+        name=cli.name,
+        executable_path=str(cli.resolve()),
+        command_line="\x00".join(
+            (
+                str(cli.resolve()),
+                "--output-format",
+                "stream-json",
+                "--input-format",
+                "stream-json",
+                "--strict-mcp-config",
+            )
+        ),
+        cwd=str(workspace.resolve()),
+    )
+    unrelated = SimpleNamespace(
+        name="notepad.exe",
+        executable_path=None,
+        command_line=None,
+        cwd=None,
+    )
+    inaccessible_candidate = SimpleNamespace(
+        name="node.exe",
+        executable_path=None,
+        command_line=None,
+        cwd=None,
+    )
+
+    async def run(processes):
+        adapter = ClaudeCodeAdapter(
+            cli_path=cli,
+            command_runner=_Runner(),
+            sdk_version="0.2.142",
+            bundled_cli_paths=(),
+            process_inventory=lambda: processes,
+        )
+        context = await _controlled_context(adapter, workspace)
+        request = AdapterSessionRequest(
+            "conversation-orphan",
+            "execution-orphan",
+            "session-orphan",
+            "external-orphan",
+        )
+        return await adapter.orphan_cleanup_confirmed(request, context)
+
+    assert asyncio.run(run(())) is True
+    assert asyncio.run(run((unrelated,))) is True
+    assert asyncio.run(run((process,))) is False
+    assert asyncio.run(run((inaccessible_candidate,))) is False
+
+
+def test_orphan_cleanup_rejects_changed_runtime_binding(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        process_inventory=lambda: (),
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        cli.write_bytes(b"changed-cli")
+        request = AdapterSessionRequest(
+            "conversation-orphan",
+            "execution-orphan",
+            "session-orphan",
+            "external-orphan",
+        )
+        return await adapter.orphan_cleanup_confirmed(request, context)
+
+    assert asyncio.run(run()) is False
+
+
+def test_spawn_returns_running_after_safe_rate_and_finishes_in_background(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        spawn_task = asyncio.create_task(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-controlled",
+                    "execution-controlled",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        )
+        while not clients:
+            await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        assert spawn_task.done() is False
+        clients[0].rate_release.set()
+        try:
+            started = await asyncio.wait_for(asyncio.shield(spawn_task), timeout=0.1)
+        except (TimeoutError, asyncio.TimeoutError):
+            clients[0].terminal_release.set()
+            await spawn_task
+            pytest.fail("Claude spawn waited for the terminal model result")
+        assert started.execution_state == "running"
+        assert clients[0].disconnected is False
+        request = AdapterSessionRequest(
+            "conversation-controlled",
+            "execution-controlled",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        clients[0].terminal_release.set()
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
+
+    started, finished = asyncio.run(run())
+
+    assert started.external_session_id == "controlled-session"
+    assert finished.execution_state == "succeeded"
+    assert finished.result_text == "controlled result"
+    assert clients[0].disconnected is True
+
+
+def test_interrupt_stops_a_running_background_claude_turn(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        spawn_task = asyncio.create_task(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-interrupt",
+                    "execution-interrupt",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        )
+        while not clients:
+            await asyncio.sleep(0)
+        clients[0].rate_release.set()
+        try:
+            started = await asyncio.wait_for(asyncio.shield(spawn_task), timeout=0.1)
+        except (TimeoutError, asyncio.TimeoutError):
+            clients[0].terminal_release.set()
+            await spawn_task
+            pytest.fail("Claude spawn waited for the terminal model result")
+        request = AdapterSessionRequest(
+            "conversation-interrupt",
+            "execution-interrupt",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        return await adapter.interrupt(request)
+
+    interrupted = asyncio.run(run())
+
+    assert interrupted.execution_state == "interrupted"
+    assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
+def test_late_interrupt_preserves_result_while_cleanup_finishes(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        client.hold_disconnect = True
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        spawn_task = asyncio.create_task(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-late-interrupt",
+                    "execution-late-interrupt",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        )
+        while not clients:
+            await asyncio.sleep(0)
+        clients[0].rate_release.set()
+        started = await asyncio.wait_for(spawn_task, timeout=0.1)
+        request = AdapterSessionRequest(
+            "conversation-late-interrupt",
+            "execution-late-interrupt",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        clients[0].terminal_release.set()
+        await asyncio.wait_for(clients[0].disconnect_started.wait(), timeout=1)
+        late_interrupt = asyncio.create_task(adapter.interrupt(request))
+        await asyncio.sleep(0)
+        assert clients[0].interrupt_calls == 0
+        clients[0].disconnect_release.set()
+        return await asyncio.wait_for(late_interrupt, timeout=1)
+
+    finished = asyncio.run(run())
+
+    assert finished.execution_state == "succeeded"
+    assert finished.result_text == "controlled result"
+    assert clients[0].interrupt_calls == 0
+    assert clients[0].disconnected is True
+
+
+def test_result_wins_when_completion_arrives_during_interrupt_call(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        client.hold_interrupt = True
+        client.complete_during_interrupt = True
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        spawn_task = asyncio.create_task(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-mid-interrupt",
+                    "execution-mid-interrupt",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        )
+        while not clients:
+            await asyncio.sleep(0)
+        clients[0].rate_release.set()
+        started = await asyncio.wait_for(spawn_task, timeout=0.1)
+        request = AdapterSessionRequest(
+            "conversation-mid-interrupt",
+            "execution-mid-interrupt",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        interrupt_task = asyncio.create_task(adapter.interrupt(request))
+        await asyncio.wait_for(clients[0].interrupt_started.wait(), timeout=1)
+        await asyncio.sleep(0)
+        clients[0].interrupt_release.set()
+        return await asyncio.wait_for(interrupt_task, timeout=1)
+
+    finished = asyncio.run(run())
+
+    assert finished.execution_state == "succeeded"
+    assert finished.result_text == "controlled result"
+    assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
+def test_close_retries_ambiguous_terminal_cleanup(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        client.disconnect_failures = 1
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        spawn_task = asyncio.create_task(
+            adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-cleanup-retry",
+                    "execution-cleanup-retry",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        )
+        while not clients:
+            await asyncio.sleep(0)
+        clients[0].rate_release.set()
+        started = await asyncio.wait_for(spawn_task, timeout=0.1)
+        request = AdapterSessionRequest(
+            "conversation-cleanup-retry",
+            "execution-cleanup-retry",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        clients[0].terminal_release.set()
+        ambiguous = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        closed = await adapter.close(request)
+        return ambiguous, closed
+
+    ambiguous, closed = asyncio.run(run())
+
+    assert ambiguous.execution_state == "failed"
+    assert ambiguous.result_text == "controlled result"
+    assert ambiguous.evidence["cleanup_confirmed"] is False
+    assert closed.conversation_state == "closed"
+    assert closed.result_text == "controlled result"
+    assert closed.evidence["cleanup_confirmed"] is True
+    assert clients[0].disconnect_calls == 2
+
+
+def test_output_before_safe_rate_is_buffered_then_preserved(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_OutputBeforeRateClient] = []
+
+    def factory(options):
+        client = _OutputBeforeRateClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-early-output",
+                "execution-early-output",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        request = AdapterSessionRequest(
+            "conversation-early-output",
+            "execution-early-output",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
+
+    started, finished = asyncio.run(run())
+
+    assert started.execution_state == "running"
+    assert finished.execution_state == "succeeded"
+    assert finished.result_text == "early provider result"
+    assert clients[0].interrupt_calls == 0
+    assert clients[0].disconnected is True
+
+
+def test_output_before_unsafe_rate_is_never_accepted(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_OutputBeforeRateClient] = []
+
+    def factory(options):
+        client = _OutputBeforeRateClient(options)
+        client.unsafe_rate = True
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        with pytest.raises(ServiceError) as captured:
+            await adapter.spawn(
+                AdapterSpawnRequest(
+                    "conversation-unsafe-early-output",
+                    "execution-unsafe-early-output",
+                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                    context,
+                )
+            )
+        return captured.value
+
+    failure = asyncio.run(run())
+
+    assert failure.code == "USAGE_CREDITS_FORBIDDEN"
+    assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
 @pytest.mark.parametrize(
     ("rate_first", "assistant_session_id"),
     [
@@ -530,8 +1177,8 @@ def test_lifecycle_queries_after_control_connect_and_uses_response_attestation(
         )
     )
 
-    snapshot = asyncio.run(
-        adapter.spawn(
+    async def run():
+        started = await adapter.spawn(
             AdapterSpawnRequest(
                 "conversation-1",
                 "execution-1",
@@ -539,8 +1186,20 @@ def test_lifecycle_queries_after_control_connect_and_uses_response_attestation(
                 context,
             )
         )
-    )
+        request = AdapterSessionRequest(
+            "conversation-1",
+            "execution-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
 
+    started, snapshot = asyncio.run(run())
+
+    assert started.execution_state == "running"
     assert snapshot.execution_state == "succeeded"
     assert snapshot.result_text == "provider-authorized result"
     assert clients[0].query_started_before_init is True
@@ -604,8 +1263,8 @@ def test_terminal_turn_has_no_product_completion_deadline(tmp_path: Path) -> Non
         )
     )
 
-    snapshot = asyncio.run(
-        adapter.spawn(
+    async def run():
+        started = await adapter.spawn(
             AdapterSpawnRequest(
                 "conversation-slow",
                 "execution-slow",
@@ -613,8 +1272,20 @@ def test_terminal_turn_has_no_product_completion_deadline(tmp_path: Path) -> Non
                 context,
             )
         )
-    )
+        request = AdapterSessionRequest(
+            "conversation-slow",
+            "execution-slow",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
 
+    started, snapshot = asyncio.run(run())
+
+    assert started.execution_state == "running"
     assert snapshot.execution_state == "succeeded"
     assert clients[0].disconnected is True
 
@@ -947,7 +1618,9 @@ def test_resolve_context_binds_opaque_model_workspace_and_resume_policy(
         "permission_policy_id": "default",
     }
     assert "workspace_write" in adapter.manifest.semantic_permissions
-    assert "background_lifecycle" in context.capability_gaps
+    assert "background_lifecycle" not in context.capability_gaps
+    assert "live_status" not in context.capability_gaps
+    assert "live_status_after_restart" in context.capability_gaps
     assert "declared_mcp" in context.capability_gaps
     assert "project_local_context_and_hooks" in context.capability_gaps
 

@@ -317,11 +317,11 @@ def create_server(service: object) -> MCPServer:
     @server.tool(name="agent_wait", structured_output=False)
     async def agent_wait(
         targets: list[dict[str, Any]],
-        timeout_seconds: float = 300.0,
+        timeout_seconds: float = 240.0,
         response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Wait locally for up to five minutes and return compact status by default."""
+        """Wait locally for up to four minutes without interrupting a running agent."""
 
         return await _invoke(
             "agent_wait",

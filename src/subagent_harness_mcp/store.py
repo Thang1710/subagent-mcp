@@ -1098,6 +1098,51 @@ class StateStore:
                 (_utc_now(), execution_id),
             )
 
+    def confirm_execution_cleanup(self, execution_id: str) -> ExecutionRecord:
+        """Persist verified native cleanup and release its writer leases atomically."""
+
+        _require_id(execution_id, "execution_id", 128)
+        now = _utc_now()
+        with self.transaction(write=True) as database:
+            row = database.execute(
+                """
+                SELECT state, observed_json FROM executions
+                WHERE execution_id = ?
+                """,
+                (execution_id,),
+            ).fetchone()
+            if row is None:
+                raise StateError("EXECUTION_NOT_FOUND", "execution does not exist")
+            state, observed_json = row
+            if state not in _TERMINAL_STATES:
+                raise StateError(
+                    "STATE_CONFLICT",
+                    "cleanup can only be confirmed for a terminal execution",
+                )
+            observed = dict(
+                _decode_optional_object(observed_json, "execution observation") or {}
+            )
+            evidence = observed.get("evidence")
+            observed["evidence"] = {
+                **(dict(evidence) if isinstance(evidence, Mapping) else {}),
+                "cleanup_confirmed": True,
+            }
+            database.execute(
+                """
+                UPDATE executions SET observed_json = ?, updated_at_utc = ?
+                WHERE execution_id = ?
+                """,
+                (_canonical_json_text(observed), now, execution_id),
+            )
+            database.execute(
+                """
+                UPDATE leases SET released_at_utc = ?
+                WHERE execution_id = ? AND released_at_utc IS NULL
+                """,
+                (now, execution_id),
+            )
+        return self.load_execution(execution_id)
+
     def bind_execution(
         self,
         *,

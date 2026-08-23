@@ -285,7 +285,7 @@ def test_agent_status_compact_projection_keeps_actionable_optional_state() -> No
     ]
     assert payload["recovery_required"] is True
     assert "result" not in payload
-    assert WaitRequest((WaitTarget("conversation-2"),)).timeout_seconds == 300.0
+    assert WaitRequest((WaitTarget("conversation-2"),)).timeout_seconds == 240.0
 
 
 def test_public_schemas_cover_adapter_and_normalized_descriptor() -> None:

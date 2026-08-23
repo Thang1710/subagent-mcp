@@ -27,6 +27,7 @@ from subagent_harness_mcp.contracts import (
     SendRequest,
     ServiceError,
     SpawnRequest,
+    StatusRequest,
     TaskPacket,
 )
 from subagent_harness_mcp.paths import resolve_paths
@@ -135,8 +136,8 @@ class _PassingClient:
 
 
 class _QuotaClient(_PassingClient):
-    def __init__(self, options) -> None:
-        super().__init__(options)
+    def __init__(self, options, *, session_id: str = "session-1") -> None:
+        super().__init__(options, session_id=session_id)
         self.interrupt_calls = 0
 
     async def receive_messages(self):
@@ -199,6 +200,22 @@ class _QuotaStatusClient(_PassingClient):
             uuid="rate-quota-status",
             session_id=self.session_id,
         )
+
+
+async def _terminal_status(
+    service: SubagentMcpService,
+    conversation_id: str,
+):
+    async def poll():
+        while True:
+            status = await service.agent_status(
+                StatusRequest(conversation_id, refresh=True)
+            )
+            if status.execution_state not in {"queued", "starting", "running"}:
+                return status
+            await asyncio.sleep(0)
+
+    return await asyncio.wait_for(poll(), timeout=1)
 
 
 def test_canary_is_single_launch_idempotent_and_gates_spawn(tmp_path: Path) -> None:
@@ -288,10 +305,16 @@ def test_canary_is_single_launch_idempotent_and_gates_spawn(tmp_path: Path) -> N
     assert "must never persist" not in paths.database_file.read_bytes().decode(
         "utf-8", errors="ignore"
     )
-    started = asyncio.run(service.agent_spawn(spawn))
-    assert started.execution_state == "succeeded"
+    async def run_spawn():
+        started = await service.agent_spawn(spawn)
+        finished = await _terminal_status(service, started.conversation_id)
+        return started, finished
+
+    started, finished = asyncio.run(run_spawn())
+    assert started.execution_state == "running"
+    assert finished.execution_state == "succeeded"
     assert started.external_session_id == "session-1"
-    assert started.result == {"text": "review complete"}
+    assert finished.result == {"text": "review complete"}
     assert len(clients) == 2
     assert clients[1].options.resume is None
     assert clients[1].options.model == "vendor/future-model"
@@ -373,9 +396,10 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
         bundled_cli_paths=(),
         canary_timeout_seconds=1,
     )
+    store = StateStore.open(paths)
     service = SubagentMcpService(
         config=config,
-        store=StateStore.open(paths),
+        store=store,
         registry=AdapterRegistry(builtin_factories=(lambda: first_adapter,)),
         id_factory=_Ids(),
     )
@@ -389,8 +413,8 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
             }
         )
     )
-    started = asyncio.run(
-        service.agent_spawn(
+    async def run_first_turn():
+        started = await service.agent_spawn(
             SpawnRequest(
                 request_id="spawn-1",
                 runtime_id="claude-code",
@@ -402,7 +426,9 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
                 permissions=("repo_read", "workspace_write"),
             )
         )
-    )
+        return await _terminal_status(service, started.conversation_id)
+
+    started = asyncio.run(run_first_turn())
 
     resumed_clients: list[_PassingClient] = []
 
@@ -425,15 +451,19 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
         registry=AdapterRegistry(builtin_factories=(lambda: fresh_adapter,)),
         id_factory=_Ids(),
     )
-    followed = asyncio.run(
-        fresh_service.agent_send(
+    async def run_follow_up():
+        running = await fresh_service.agent_send(
             SendRequest("send-1", started.conversation_id, "Now finish the follow-up.")
         )
-    )
-    closed = asyncio.run(
-        fresh_service.agent_close(ActionRequest("close-1", started.conversation_id))
-    )
+        followed = await _terminal_status(fresh_service, started.conversation_id)
+        closed = await fresh_service.agent_close(
+            ActionRequest("close-1", started.conversation_id)
+        )
+        return running, followed, closed
 
+    running, followed, closed = asyncio.run(run_follow_up())
+
+    assert running.execution_state == "running"
     assert followed.execution_state == "succeeded"
     assert followed.external_session_id == started.external_session_id == "session-1"
     assert followed.result == {"text": "follow-up complete"}
@@ -451,8 +481,19 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
     assert closed.conversation_state == "closed"
 
 
-def test_disconnect_ambiguity_is_persisted_and_blocks_fresh_adapter_reuse(
+@pytest.mark.parametrize(
+    ("quota_failure", "expected_error", "expected_text", "expected_circuit"),
+    [
+        (False, "RECOVERY_REQUIRED", "review complete", "ready"),
+        (True, "USAGE_CREDITS_FORBIDDEN", None, "auto_paused"),
+    ],
+)
+def test_disconnect_ambiguity_preserves_result_or_quota_and_blocks_reuse(
     tmp_path: Path,
+    quota_failure: bool,
+    expected_error: str,
+    expected_text: str | None,
+    expected_circuit: str,
 ) -> None:
     paths = resolve_paths({"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt")
     config = ConfigStore(paths)
@@ -478,7 +519,11 @@ def test_disconnect_ambiguity_is_persisted_and_blocks_fresh_adapter_reuse(
     created: list[_PassingClient] = []
 
     def factory(options):
-        client = _PassingClient(options, fail_disconnect=len(created) == 1)
+        if quota_failure and len(created) == 1:
+            client = _QuotaClient(options)
+            client.fail_disconnect = True
+        else:
+            client = _PassingClient(options, fail_disconnect=len(created) == 1)
         created.append(client)
         return client
 
@@ -490,16 +535,16 @@ def test_disconnect_ambiguity_is_persisted_and_blocks_fresh_adapter_reuse(
         bundled_cli_paths=(),
         canary_timeout_seconds=1,
     )
+    store = StateStore.open(paths)
     service = SubagentMcpService(
         config=config,
-        store=StateStore.open(paths),
+        store=store,
         registry=AdapterRegistry(builtin_factories=(lambda: adapter,)),
         id_factory=_Ids(),
     )
     asyncio.run(service.runtime_canary({"request_id": "canary-1", "runtime_id": "claude-code", "variant_id": "future-deep", "transport": "managed-sdk"}))
-    with pytest.raises(ServiceError) as failed:
-        asyncio.run(
-            service.agent_spawn(
+    async def run_ambiguous_turn():
+        started = await service.agent_spawn(
                 SpawnRequest(
                     request_id="spawn-1",
                     runtime_id="claude-code",
@@ -511,7 +556,9 @@ def test_disconnect_ambiguity_is_persisted_and_blocks_fresh_adapter_reuse(
                     permissions=("repo_read",),
                 )
             )
-        )
+        return await _terminal_status(service, started.conversation_id)
+
+    failed = asyncio.run(run_ambiguous_turn())
     fresh_calls: list[object] = []
     fresh_adapter = ClaudeCodeAdapter(
         cli_path=cli,
@@ -533,7 +580,11 @@ def test_disconnect_ambiguity_is_persisted_and_blocks_fresh_adapter_reuse(
             )
         )
 
-    assert failed.value.code == "RECOVERY_REQUIRED"
+    assert failed.execution_state == "failed"
+    assert failed.result["error"]["code"] == expected_error
+    assert failed.result.get("text") == expected_text
+    assert failed.recovery_required is True
+    assert store.load_circuit("claude-code", "future-deep").state == expected_circuit
     assert blocked.value.code == "RECOVERY_REQUIRED"
     assert fresh_calls == []
 
@@ -673,12 +724,13 @@ def test_spawn_and_send_auto_resume_only_after_safe_task_response(
 
     def factory(options):
         mode = next(modes)
+        session_id = f"session-{len(clients) + 1}"
         client = (
-            _QuotaStatusClient(options)
+            _QuotaStatusClient(options, session_id=session_id)
             if mode == "quota_status"
-            else _QuotaClient(options)
+            else _QuotaClient(options, session_id=session_id)
             if mode == "quota_turn"
-            else _PassingClient(options)
+            else _PassingClient(options, session_id=session_id)
         )
         clients.append(client)
         return client
@@ -719,34 +771,51 @@ def test_spawn_and_send_auto_resume_only_after_safe_task_response(
         "transport": "managed-sdk",
     }
     asyncio.run(service.runtime_canary(canary | {"request_id": "canary-initial"}))
-    with pytest.raises(ServiceError) as spawn_quota:
-        asyncio.run(spawn("spawn-quota"))
-    assert spawn_quota.value.code == "USAGE_CREDITS_FORBIDDEN"
+    async def run_spawn(request_id: str):
+        started = await spawn(request_id)
+        finished = await _terminal_status(service, started.conversation_id)
+        return started, finished
+
+    quota_started, spawn_quota = asyncio.run(run_spawn("spawn-quota"))
+    assert quota_started.execution_state == "running"
+    assert spawn_quota.result["error"]["code"] == "USAGE_CREDITS_FORBIDDEN"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
     assert isinstance(clients[-1], _QuotaClient)
     assert len(clients) == 2
 
-    started = asyncio.run(spawn("spawn-auto-resume"))
+    _, started = asyncio.run(run_spawn("spawn-auto-resume"))
     assert started.execution_state == "succeeded"
     assert store.load_circuit("claude-code", "future-deep").state == "ready"
     assert len(clients) == 3
 
-    with pytest.raises(ServiceError) as send_quota:
-        asyncio.run(
-            service.agent_send(
+    async def run_send(request_id: str, prompt: str):
+        running = await service.agent_send(
                 SendRequest("send-quota", started.conversation_id, "Continue safely.")
             )
-        )
-    assert send_quota.value.code == "USAGE_CREDITS_FORBIDDEN"
+        finished = await _terminal_status(service, started.conversation_id)
+        return running, finished
+
+    send_started, send_quota = asyncio.run(run_send("send-quota", "Continue safely."))
+    assert send_started.execution_state == "running"
+    assert send_quota.result["error"]["code"] == "USAGE_CREDITS_FORBIDDEN"
     assert store.load_circuit("claude-code", "future-deep").state == "auto_paused"
     assert isinstance(clients[-1], _QuotaClient) and clients[-1].interrupt_calls == 1
     assert len(clients) == 4
 
-    resumed_send = asyncio.run(
-        service.agent_send(
-            SendRequest("send-auto-resume", started.conversation_id, "Continue after status.")
+    async def run_resumed_send():
+        running = await service.agent_send(
+            SendRequest(
+                "send-auto-resume",
+                started.conversation_id,
+                "Continue after status.",
+            )
         )
+        return running, await _terminal_status(service, started.conversation_id)
+
+    resumed_running, resumed_send = asyncio.run(
+        run_resumed_send()
     )
+    assert resumed_running.execution_state == "running"
     assert resumed_send.execution_state == "succeeded"
     assert store.load_circuit("claude-code", "future-deep").state == "ready"
     assert len(clients) == 5

@@ -1,8 +1,4 @@
-"""Capability-gated managed Claude Code adapter.
-
-The Windows preview deliberately implements only terminal synchronous managed
-turns. Background status, needs-input, and promotion remain explicit gaps.
-"""
+"""Capability-gated managed Claude Code adapter."""
 
 from __future__ import annotations
 
@@ -12,10 +8,10 @@ import json
 import os
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import metadata
 from pathlib import Path
-from typing import Any, Callable, Mapping, Protocol, Sequence, get_args
+from typing import AsyncIterator, Any, Callable, Iterable, Mapping, Protocol, Sequence, get_args
 
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError, validate_model_id
 from .base import (
@@ -80,6 +76,17 @@ class CommandRunner(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class _ProcessObservation:
+    name: str
+    executable_path: str | None
+    command_line: str | None
+    cwd: str | None
+
+
+ProcessInventory = Callable[[], Iterable[_ProcessObservation]]
+
+
+@dataclass(frozen=True, slots=True)
 class _BoundRuntime:
     cli_path: Path
     cli_version: str
@@ -91,7 +98,7 @@ class _BoundRuntime:
     def details(self) -> dict[str, str]:
         return {
             "pair_key": self.pair_key,
-            "adapter_version": "1.0.1",
+            "adapter_version": "1.0.2",
             "sdk_version": self.sdk_version,
             "cli_path": str(self.cli_path),
             "cli_version": self.cli_version,
@@ -103,10 +110,37 @@ class _BoundRuntime:
 
 
 @dataclass(slots=True)
+class _ManagedTurn:
+    execution_id: str
+    client: Any
+    rate_seen: bool
+    task: asyncio.Task[None] | None = None
+    interrupted: bool = False
+    interrupt_ambiguous: bool = False
+    finishing: bool = False
+    finalized: bool = False
+
+
+@dataclass(slots=True)
 class _ManagedSession:
     context: ResolvedContext
     snapshot: AdapterSnapshot
+    turn: _ManagedTurn | None = None
     closed: bool = False
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+def _turn_done(turn: _ManagedTurn) -> bool:
+    return turn.finalized or (turn.task is not None and turn.task.done())
+
+
+async def _replay_messages(
+    prefix: Sequence[Any], messages: Any
+) -> AsyncIterator[Any]:
+    for message in prefix:
+        yield message
+    async for message in messages:
+        yield message
 
 
 class ClaudeCodeAdapter:
@@ -118,6 +152,7 @@ class ClaudeCodeAdapter:
         client_factory: Callable[[Any], Any] | None = None,
         sdk_version: str | None = None,
         bundled_cli_paths: Sequence[Path] | None = None,
+        process_inventory: ProcessInventory | None = None,
         canary_timeout_seconds: float = DEFAULT_PROVIDER_TIMEOUT_SECONDS,
         turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
@@ -126,18 +161,18 @@ class ClaudeCodeAdapter:
         self._client_factory = client_factory or _default_client_factory
         self._sdk_version = sdk_version
         self._bundled_cli_paths = bundled_cli_paths
+        self._process_inventory = process_inventory or _windows_process_inventory
         self._canary_timeout = canary_timeout_seconds
         self._turn_timeout = turn_timeout_seconds
         self._last_probe_pair: str | None = None
         self._sessions: dict[str, _ManagedSession] = {}
-        self._active_clients: dict[str, tuple[Any, ResolvedContext, str]] = {}
         self._manifest = AdapterManifest(
             adapter_api_version=ADAPTER_API_VERSION,
             runtime_id="claude-code",
             provider_id="anthropic",
             harness_id="claude-code",
             display_name="Claude sub-agent",
-            adapter_version="1.0.1",
+            adapter_version="1.0.2",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
             capabilities=frozenset({"canary", "session", "resume", "workspace"}),
@@ -558,8 +593,7 @@ class ClaudeCodeAdapter:
             transport=request.transport,
             context_hash=context_hash,
             capability_gaps=(
-                "background_lifecycle",
-                "live_status",
+                "live_status_after_restart",
                 "needs_input",
                 "declared_mcp",
                 "project_local_context_and_hooks",
@@ -568,31 +602,82 @@ class ClaudeCodeAdapter:
         )
 
     async def spawn(self, request: AdapterSpawnRequest) -> AdapterSnapshot:
-        snapshot = await self._run_terminal_turn(
+        client, messages, session_id, rate_seen = await self._open_turn(
             context=request.context,
             prompt=_spawn_prompt(request),
-            external_execution_id=request.execution_id,
             expected_session_id=None,
         )
-        self._sessions[snapshot.external_session_id] = _ManagedSession(
+        if session_id in self._sessions:
+            await _disconnect_or_recovery(
+                client,
+                self._canary_timeout,
+                "Claude reused a live session identity",
+            )
+            raise ServiceError("CONTEXT_DRIFT", "Claude reused a live session identity")
+        snapshot = _running_snapshot(
             request.context,
-            snapshot,
+            session_id=session_id,
+            execution_id=request.execution_id,
+        )
+        session = _ManagedSession(request.context, snapshot)
+        self._sessions[session_id] = session
+        self._start_background_turn(
+            session,
+            client=client,
+            messages=messages,
+            execution_id=request.execution_id,
+            rate_seen=rate_seen,
         )
         return snapshot
 
     async def send(self, request: AdapterSendRequest) -> AdapterSnapshot:
         existing = self._sessions.get(request.external_session_id)
-        if existing is not None and existing.context.context_hash != request.context.context_hash:
-            raise ServiceError("CONTEXT_DRIFT", "Claude resumed context changed")
-        snapshot = await self._run_terminal_turn(
+        if existing is not None:
+            if existing.closed:
+                raise ServiceError("SESSION_CLOSED", "Claude session is closed")
+            if existing.context.context_hash != request.context.context_hash:
+                raise ServiceError("CONTEXT_DRIFT", "Claude resumed context changed")
+            async with existing.lock:
+                if existing.turn is not None and not _turn_done(existing.turn):
+                    raise ServiceError("SESSION_BUSY", "Claude turn is active")
+                client, messages, session_id, rate_seen = await self._open_turn(
+                    context=request.context,
+                    prompt=_send_prompt(request),
+                    expected_session_id=request.external_session_id,
+                )
+                snapshot = _running_snapshot(
+                    request.context,
+                    session_id=session_id,
+                    execution_id=request.execution_id,
+                )
+                existing.snapshot = snapshot
+                self._start_background_turn(
+                    existing,
+                    client=client,
+                    messages=messages,
+                    execution_id=request.execution_id,
+                    rate_seen=rate_seen,
+                )
+                return snapshot
+
+        client, messages, session_id, rate_seen = await self._open_turn(
             context=request.context,
             prompt=_send_prompt(request),
-            external_execution_id=request.execution_id,
             expected_session_id=request.external_session_id,
         )
-        self._sessions[request.external_session_id] = _ManagedSession(
+        snapshot = _running_snapshot(
             request.context,
-            snapshot,
+            session_id=session_id,
+            execution_id=request.execution_id,
+        )
+        session = _ManagedSession(request.context, snapshot)
+        self._sessions[session_id] = session
+        self._start_background_turn(
+            session,
+            client=client,
+            messages=messages,
+            execution_id=request.execution_id,
+            rate_seen=rate_seen,
         )
         return snapshot
 
@@ -607,35 +692,82 @@ class ClaudeCodeAdapter:
         return session.snapshot
 
     async def interrupt(self, request: AdapterSessionRequest) -> AdapterSnapshot:
-        active = self._active_clients.get(request.external_session_id)
-        if active is None:
+        session = self._sessions.get(request.external_session_id)
+        if session is None:
             raise ServiceError("CAPABILITY_MISSING", "Claude turn is not active")
-        client, context, execution_id = active
+        _require_external_execution(request, session.snapshot)
+        async with session.lock:
+            turn = session.turn
+            if turn is None or _turn_done(turn):
+                return session.snapshot
+            if not turn.finishing:
+                turn.interrupted = True
+                try:
+                    await asyncio.wait_for(
+                        turn.client.interrupt(), timeout=self._canary_timeout
+                    )
+                except BaseException as exc:
+                    turn.interrupted = False
+                    turn.interrupt_ambiguous = True
+                    raise ServiceError(
+                        "RECOVERY_REQUIRED",
+                        "Claude interrupt was not confirmed",
+                        category="adapter",
+                    ) from exc
+            task = turn.task
+        assert task is not None
         try:
-            await asyncio.wait_for(client.interrupt(), timeout=self._canary_timeout)
-        except BaseException as exc:
+            await asyncio.wait_for(asyncio.shield(task), timeout=self._canary_timeout)
+        except (TimeoutError, asyncio.TimeoutError) as exc:
             raise ServiceError(
                 "RECOVERY_REQUIRED",
-                "Claude interrupt was not confirmed",
+                "Claude interrupt terminal state was not confirmed",
                 category="adapter",
             ) from exc
-        return _terminal_snapshot(
-            context,
-            session_id=request.external_session_id,
-            execution_id=execution_id,
-            execution_state="interrupted",
-            error=AdapterFailure("INTERRUPTED", "cancelled", False, "Claude turn interrupted"),
-        )
+        return session.snapshot
 
     async def close(self, request: AdapterSessionRequest) -> AdapterSnapshot:
-        active = self._active_clients.get(request.external_session_id)
-        if active is not None:
-            raise ServiceError("SESSION_BUSY", "active Claude turn cannot be closed")
         session = self._sessions.get(request.external_session_id)
         if session is None:
             return _placeholder_snapshot(request, conversation_state="closed")
         _require_external_execution(request, session.snapshot)
+        if session.turn is not None and not _turn_done(session.turn):
+            raise ServiceError("SESSION_BUSY", "active Claude turn cannot be closed")
         current = session.snapshot
+        if current.evidence.get("cleanup_confirmed") is False:
+            turn = session.turn
+            if turn is None:
+                raise ServiceError(
+                    "RECOVERY_REQUIRED",
+                    "Claude session cleanup is unverified",
+                    category="adapter",
+                )
+            try:
+                await asyncio.wait_for(
+                    turn.client.disconnect(), timeout=self._canary_timeout
+                )
+            except BaseException as exc:
+                raise ServiceError(
+                    "RECOVERY_REQUIRED",
+                    "Claude session cleanup is still unverified",
+                    category="adapter",
+                ) from exc
+            current = AdapterSnapshot(
+                external_session_id=current.external_session_id,
+                external_execution_id=current.external_execution_id,
+                conversation_state=current.conversation_state,
+                execution_state=current.execution_state,
+                effective_model=current.effective_model,
+                effective_reasoning=current.effective_reasoning,
+                workspace_path=current.workspace_path,
+                workspace_key=current.workspace_key,
+                context_hash=current.context_hash,
+                result_text=current.result_text,
+                needs_input=current.needs_input,
+                error=current.error,
+                evidence={**dict(current.evidence), "cleanup_confirmed": True},
+            )
+            session.snapshot = current
         session.closed = True
         session.snapshot = AdapterSnapshot(
             external_session_id=current.external_session_id,
@@ -650,7 +782,11 @@ class ClaudeCodeAdapter:
             result_text=current.result_text,
             needs_input=current.needs_input,
             error=current.error,
-            evidence={"source": "claude-code-managed-sdk", "native_session_retained": True},
+            evidence={
+                **dict(current.evidence),
+                "source": "claude-code-managed-sdk",
+                "native_session_retained": True,
+            },
         )
         return session.snapshot
 
@@ -663,14 +799,72 @@ class ClaudeCodeAdapter:
             raise ServiceError("SESSION_CLOSED", "Claude session is closed")
         return session.snapshot
 
-    async def _run_terminal_turn(
+    async def orphan_cleanup_confirmed(
+        self,
+        request: AdapterSessionRequest,
+        context: ResolvedContext,
+    ) -> bool:
+        del request
+        state, bound, _ = self._bind_no_model()
+        if (
+            state != "needs_canary"
+            or bound is None
+            or not _bound_matches_context(bound, context)
+        ):
+            return False
+        try:
+            processes = await asyncio.to_thread(
+                lambda: tuple(self._process_inventory())
+            )
+        except Exception:
+            return False
+        workspace = _fold_path(context.workspace_path)
+        cli_path = _fold_path(bound.cli_path)
+        cli_name = bound.cli_path.name.casefold()
+        candidate_names = {cli_name, "claude", "claude.exe", "node", "node.exe"}
+        for process in processes:
+            name = str(process.name or "").casefold()
+            executable = (
+                None
+                if not process.executable_path
+                else _fold_path(process.executable_path)
+            )
+            command = (process.command_line or "").casefold()
+            markers_match = bool(command) and all(
+                marker in command
+                for marker in (
+                    "--output-format",
+                    "stream-json",
+                    "--input-format",
+                    "--strict-mcp-config",
+                )
+            )
+            cli_matches = bool(
+                executable == cli_path
+                or cli_path in command
+                or (executable is None and name == cli_name)
+            )
+            if not process.cwd:
+                if cli_matches or (
+                    name in candidate_names and (not command or markers_match)
+                ):
+                    return False
+                continue
+            if _fold_path(process.cwd) != workspace:
+                continue
+            if cli_matches or (
+                name in candidate_names and (not command or markers_match)
+            ):
+                return False
+        return True
+
+    async def _open_turn(
         self,
         *,
         context: ResolvedContext,
         prompt: str,
-        external_execution_id: str,
         expected_session_id: str | None,
-    ) -> AdapterSnapshot:
+    ) -> tuple[Any, Any, str, bool]:
         state, bound, _ = self._bind_no_model()
         if state != "needs_canary" or bound is None:
             raise _service_probe_error(state)
@@ -678,54 +872,148 @@ class ClaudeCodeAdapter:
             raise ServiceError("CONTEXT_DRIFT", "Claude runtime identity changed before launch")
         options = _build_lifecycle_options(context, bound, resume=expected_session_id)
         client = self._client_factory(options)
-        session_id: str | None = None
-        failure: BaseException | None = None
-        snapshot: AdapterSnapshot | None = None
         try:
             await asyncio.wait_for(client.connect(None), timeout=self._canary_timeout)
             messages = client.receive_messages().__aiter__()
             await asyncio.wait_for(client.query(prompt), timeout=self._canary_timeout)
-            session_id, rate_seen = await self._await_lifecycle_guard(
+            session_id, rate_seen, buffered = await self._await_lifecycle_guard(
                 client,
                 messages,
                 context=context,
                 expected_session_id=expected_session_id,
             )
-            self._active_clients[session_id] = (client, context, external_execution_id)
-            snapshot = await self._receive_terminal_result(
-                client,
-                messages,
-                context=context,
-                session_id=session_id,
-                external_execution_id=external_execution_id,
-                rate_seen=rate_seen,
-            )
+            messages = _replay_messages(buffered, messages)
         except (TimeoutError, asyncio.TimeoutError) as exc:
-            failure = ServiceError("RECOVERY_REQUIRED", "Claude terminal turn timed out", category="adapter")
-            failure.__cause__ = exc
-        except BaseException as exc:
-            failure = exc
-        finally:
-            if session_id is not None:
-                self._active_clients.pop(session_id, None)
-            try:
-                await asyncio.wait_for(client.disconnect(), timeout=self._canary_timeout)
-            except BaseException as exc:
-                raise ServiceError(
-                    "RECOVERY_REQUIRED",
-                    "Claude terminal turn cleanup was not confirmed",
-                    category="adapter",
-                ) from exc
-        if failure is not None:
-            if isinstance(failure, ServiceError):
-                raise failure
+            await _disconnect_or_recovery(
+                client,
+                self._canary_timeout,
+                "Claude startup cleanup was not confirmed",
+            )
             raise ServiceError(
                 "RECOVERY_REQUIRED",
-                f"Claude terminal turn outcome is ambiguous ({type(failure).__name__})",
+                "Claude startup handshake timed out",
                 category="adapter",
-            ) from failure
-        assert snapshot is not None
-        return snapshot
+            ) from exc
+        except ServiceError:
+            await _disconnect_or_recovery(
+                client,
+                self._canary_timeout,
+                "Claude startup cleanup was not confirmed",
+            )
+            raise
+        except BaseException as exc:
+            await _disconnect_or_recovery(
+                client,
+                self._canary_timeout,
+                "Claude startup cleanup was not confirmed",
+            )
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                f"Claude startup outcome is ambiguous ({type(exc).__name__})",
+                category="adapter",
+            ) from exc
+        return client, messages, session_id, rate_seen
+
+    def _start_background_turn(
+        self,
+        session: _ManagedSession,
+        *,
+        client: Any,
+        messages: Any,
+        execution_id: str,
+        rate_seen: bool,
+    ) -> None:
+        turn = _ManagedTurn(execution_id, client, rate_seen)
+        turn.task = asyncio.create_task(
+            self._finish_background_turn(
+                session,
+                turn=turn,
+                messages=messages,
+            )
+        )
+        session.turn = turn
+
+    async def _finish_background_turn(
+        self,
+        session: _ManagedSession,
+        *,
+        turn: _ManagedTurn,
+        messages: Any,
+    ) -> None:
+        snapshot: AdapterSnapshot | None = None
+        failure: BaseException | None = None
+        cleanup_failure: BaseException | None = None
+        try:
+            snapshot = await self._receive_terminal_result(
+                turn.client,
+                messages,
+                context=session.context,
+                session_id=session.snapshot.external_session_id,
+                external_execution_id=turn.execution_id,
+                rate_seen=turn.rate_seen,
+            )
+        except BaseException as exc:
+            failure = exc
+        turn.finishing = True
+        try:
+            await asyncio.wait_for(turn.client.disconnect(), timeout=self._canary_timeout)
+        except BaseException as exc:
+            cleanup_failure = exc
+
+        async with session.lock:
+            if session.turn is not turn:
+                return
+            if cleanup_failure is not None:
+                reported_failure = failure
+                if reported_failure is None:
+                    reported_failure = ServiceError(
+                        "RECOVERY_REQUIRED",
+                        "Claude terminal turn cleanup was not confirmed",
+                        category="adapter",
+                    )
+                session.snapshot = _failed_snapshot(
+                    session.context,
+                    session_id=session.snapshot.external_session_id,
+                    execution_id=turn.execution_id,
+                    failure=reported_failure,
+                    cleanup_confirmed=False,
+                    result_text=None if snapshot is None else snapshot.result_text,
+                )
+            elif turn.interrupt_ambiguous:
+                session.snapshot = _failed_snapshot(
+                    session.context,
+                    session_id=session.snapshot.external_session_id,
+                    execution_id=turn.execution_id,
+                    failure=ServiceError(
+                        "RECOVERY_REQUIRED",
+                        "Claude interrupt outcome is ambiguous",
+                        category="adapter",
+                    ),
+                    cleanup_confirmed=True,
+                    result_text=None if snapshot is None else snapshot.result_text,
+                )
+            elif turn.interrupted and snapshot is None:
+                session.snapshot = _terminal_snapshot(
+                    session.context,
+                    session_id=session.snapshot.external_session_id,
+                    execution_id=f"claude-turn-{turn.execution_id}",
+                    execution_state="interrupted",
+                    error=AdapterFailure(
+                        "INTERRUPTED", "cancelled", False, "Claude turn interrupted"
+                    ),
+                )
+            elif failure is not None:
+                session.snapshot = _failed_snapshot(
+                    session.context,
+                    session_id=session.snapshot.external_session_id,
+                    execution_id=turn.execution_id,
+                    failure=failure,
+                    cleanup_confirmed=True,
+                )
+            else:
+                assert snapshot is not None
+                session.snapshot = snapshot
+            turn.finalized = True
 
     async def _await_lifecycle_guard(
         self,
@@ -734,25 +1022,18 @@ class ClaudeCodeAdapter:
         *,
         context: ResolvedContext,
         expected_session_id: str | None,
-    ) -> tuple[str, bool]:
+    ) -> tuple[str, bool, tuple[Any, ...]]:
         from claude_agent_sdk import AssistantMessage, RateLimitEvent, ResultMessage, SystemMessage
 
         session_id: str | None = None
+        rate_session_id: str | None = None
         rate_seen = False
-        while session_id is None:
+        buffered: list[Any] = []
+        while session_id is None or not rate_seen:
             message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
             if isinstance(message, (AssistantMessage, ResultMessage)):
-                failure = AdapterFailure(
-                    "CONTEXT_DRIFT",
-                    "adapter",
-                    False,
-                    "Claude emitted output before startup status completed",
-                )
-                await _interrupt_or_recovery(
-                    client,
-                    failure,
-                    self._canary_timeout,
-                )
+                buffered.append(message)
+                continue
             if isinstance(message, SystemMessage) and message.subtype == "init":
                 data = message.data
                 candidate = data.get("session_id")
@@ -782,8 +1063,32 @@ class ClaudeCodeAdapter:
                     await _interrupt_or_recovery(
                         client, unsafe, self._canary_timeout
                     )
+                candidate = message.session_id
+                if not isinstance(candidate, str) or not candidate:
+                    await _interrupt_or_recovery(
+                        client,
+                        AdapterFailure(
+                            "CONTEXT_DRIFT",
+                            "adapter",
+                            False,
+                            "Claude rate status did not identify its session",
+                        ),
+                        self._canary_timeout,
+                    )
+                rate_session_id = candidate
                 rate_seen = True
-        return session_id, rate_seen
+        if rate_session_id != session_id:
+            await _interrupt_or_recovery(
+                client,
+                AdapterFailure(
+                    "CONTEXT_DRIFT",
+                    "adapter",
+                    False,
+                    "Claude rate status did not match the native session",
+                ),
+                self._canary_timeout,
+            )
+        return session_id, rate_seen, tuple(buffered)
 
     async def _receive_terminal_result(
         self,
@@ -904,7 +1209,7 @@ class ClaudeCodeAdapter:
         sha256 = _sha256_file(resolved)
         file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
         pair_payload = {
-            "adapter_version": "1.0.1",
+            "adapter_version": "1.0.2",
             "sdk_version": sdk_version,
             "cli_path": os.path.normcase(str(resolved)),
             "cli_version": version.stdout.strip()[:256],
@@ -1040,6 +1345,83 @@ def _lifecycle_context_hash(
     except (TypeError, ValueError, UnicodeError) as exc:
         raise ServiceError("POLICY_REJECTED", "Claude context is not canonical") from exc
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _bound_matches_context(bound: _BoundRuntime, context: ResolvedContext) -> bool:
+    attestation = context.attestation
+    variant_id = attestation.get("variant_id")
+    permissions = attestation.get("permissions")
+    write_set = attestation.get("write_set")
+    context_policy_id = attestation.get("context_policy_id")
+    permission_policy_id = attestation.get("permission_policy_id")
+    if (
+        context.runtime_id != "claude-code"
+        or context.transport != "managed-sdk"
+        or attestation.get("source") != "claude-code-managed-sdk"
+        or not isinstance(variant_id, str)
+        or not isinstance(permissions, list)
+        or not all(isinstance(item, str) for item in permissions)
+        or not isinstance(write_set, list)
+        or not all(isinstance(item, str) for item in write_set)
+        or not isinstance(context_policy_id, str)
+        or not isinstance(permission_policy_id, str)
+    ):
+        return False
+    try:
+        expected = _lifecycle_context_hash(
+            bound,
+            runtime_id=context.runtime_id,
+            variant_id=variant_id,
+            model=context.effective_model,
+            reasoning=context.effective_reasoning,
+            workspace_path=context.workspace_path,
+            workspace_key=context.workspace_key,
+            transport=context.transport,
+            permissions=permissions,
+            write_set=write_set,
+            context_policy_id=context_policy_id,
+            permission_policy_id=permission_policy_id,
+        )
+    except ServiceError:
+        return False
+    return expected == context.context_hash
+
+
+def _fold_path(value: str | Path) -> str:
+    try:
+        resolved = Path(value).resolve(strict=False)
+    except OSError:
+        resolved = Path(value).absolute()
+    folded = os.path.normcase(str(resolved))
+    return folded.casefold() if os.name == "nt" else folded
+
+
+def _windows_process_inventory() -> tuple[_ProcessObservation, ...]:
+    import psutil
+
+    observations: list[_ProcessObservation] = []
+    for process in psutil.process_iter(
+        ("name", "exe", "cmdline", "cwd"),
+        ad_value=None,
+    ):
+        try:
+            info = process.info
+            command = info.get("cmdline")
+            if isinstance(command, (list, tuple)):
+                command_line = "\x00".join(str(part) for part in command) or None
+            else:
+                command_line = None if command is None else str(command)
+            observations.append(
+                _ProcessObservation(
+                    str(info.get("name") or ""),
+                    None if not info.get("exe") else str(info["exe"]),
+                    command_line,
+                    None if not info.get("cwd") else str(info["cwd"]),
+                )
+            )
+        except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+            continue
+    return tuple(observations)
 
 
 def _build_lifecycle_options(
@@ -1229,6 +1611,81 @@ def _send_prompt(request: AdapterSendRequest) -> str:
     return "\n".join(lines)
 
 
+def _running_snapshot(
+    context: ResolvedContext,
+    *,
+    session_id: str,
+    execution_id: str,
+) -> AdapterSnapshot:
+    return AdapterSnapshot(
+        external_session_id=session_id,
+        external_execution_id=f"claude-turn-{execution_id}",
+        conversation_state="active",
+        execution_state="running",
+        effective_model=context.effective_model,
+        effective_reasoning=context.effective_reasoning,
+        workspace_path=context.workspace_path,
+        workspace_key=context.workspace_key,
+        context_hash=context.context_hash,
+        evidence={
+            "source": "claude-code-managed-sdk",
+            "background_lifecycle": True,
+            "quota_guard": "exact-task-response-and-live-monitor",
+            "rate_evidence_seen": True,
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": False,
+        },
+    )
+
+
+def _failed_snapshot(
+    context: ResolvedContext,
+    *,
+    session_id: str,
+    execution_id: str,
+    failure: BaseException,
+    cleanup_confirmed: bool,
+    result_text: str | None = None,
+) -> AdapterSnapshot:
+    if isinstance(failure, ServiceError):
+        error = AdapterFailure(
+            failure.code,
+            failure.category,
+            failure.retryable,
+            str(failure),
+        )
+    else:
+        error = AdapterFailure(
+            "RECOVERY_REQUIRED",
+            "adapter",
+            False,
+            f"Claude terminal turn outcome is ambiguous ({type(failure).__name__})",
+        )
+    return AdapterSnapshot(
+        external_session_id=session_id,
+        external_execution_id=f"claude-turn-{execution_id}",
+        conversation_state="idle",
+        execution_state="failed",
+        effective_model=context.effective_model,
+        effective_reasoning=context.effective_reasoning,
+        workspace_path=context.workspace_path,
+        workspace_key=context.workspace_key,
+        context_hash=context.context_hash,
+        result_text=result_text,
+        error=error,
+        evidence={
+            "source": "claude-code-managed-sdk",
+            "background_lifecycle": True,
+            "quota_guard": "exact-task-response-and-live-monitor",
+            "rate_evidence_seen": error.code not in {"CAPABILITY_MISSING", "CONTEXT_DRIFT"},
+            "is_using_overage": False,
+            "overage_blocked": True,
+            "cleanup_confirmed": cleanup_confirmed,
+        },
+    )
+
+
 def _terminal_snapshot(
     context: ResolvedContext,
     *,
@@ -1252,7 +1709,7 @@ def _terminal_snapshot(
         error=error,
         evidence={
             "source": "claude-code-managed-sdk",
-            "terminal_synchronous": True,
+            "background_lifecycle": True,
             "quota_guard": "exact-task-response-and-live-monitor",
             "rate_evidence_seen": True,
             "is_using_overage": False,
@@ -1319,6 +1776,21 @@ async def _interrupt_or_recovery(
             category="adapter",
         ) from exc
     raise _service_failure(failure)
+
+
+async def _disconnect_or_recovery(
+    client: Any,
+    timeout_seconds: float,
+    message: str,
+) -> None:
+    try:
+        await asyncio.wait_for(client.disconnect(), timeout=timeout_seconds)
+    except BaseException as exc:
+        raise ServiceError(
+            "RECOVERY_REQUIRED",
+            message,
+            category="adapter",
+        ) from exc
 
 
 def _variant_pair_key(

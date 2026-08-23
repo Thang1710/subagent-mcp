@@ -28,6 +28,7 @@ from subagent_harness_mcp.contracts import (
     SendRequest,
     ServiceError,
     SpawnRequest,
+    StatusRequest,
     TaskPacket,
     WaitRequest,
     WaitTarget,
@@ -140,6 +141,54 @@ class _CatalogFakeAdapter(FakeAdapter):
                 "model": "model-b",
             },
         )
+
+
+class _RestartGapAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.cleanup_confirmed = False
+
+    async def resolve_context(self, request):
+        context = await super().resolve_context(request)
+        return replace(context, capability_gaps=("live_status_after_restart",))
+
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            evidence={**dict(snapshot.evidence), "cleanup_confirmed": False},
+        )
+
+    async def open_session(self, request):
+        del request
+        raise ServiceError(
+            "CAPABILITY_MISSING",
+            "live session belongs to the previous controller process",
+        )
+
+    async def orphan_cleanup_confirmed(self, request, context):
+        del request, context
+        return self.cleanup_confirmed
+
+
+class _StartupRecoveryAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.fail_spawn = True
+        self.cleanup_confirmed = False
+
+    async def spawn(self, request):
+        if self.fail_spawn:
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "startup cleanup was not confirmed",
+                category="adapter",
+            )
+        return await super().spawn(request)
+
+    async def orphan_cleanup_confirmed(self, request, context):
+        del request, context
+        return self.cleanup_confirmed
 
 
 def _service(
@@ -675,6 +724,245 @@ def test_wait_does_not_wake_codex_for_a_running_revision(tmp_path: Path) -> None
     waited, interrupted = asyncio.run(run())
 
     assert waited.execution_state == interrupted.execution_state == "interrupted"
+
+
+def test_wait_timeout_returns_running_without_interrupting_agent(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    service, _ = _service(tmp_path, harness)
+
+    async def run():
+        started = await service.agent_spawn(_spawn_request(workspace))
+        waited = await service.agent_wait(
+            WaitRequest(
+                (WaitTarget(started.conversation_id),),
+                timeout_seconds=0.01,
+            )
+        )
+        return started, waited[0]
+
+    started, waited = asyncio.run(run())
+
+    assert started.execution_state == waited.execution_state == "running"
+    assert harness.call_count("interrupt") == 0
+
+
+def test_service_supervisor_persists_background_terminal_without_caller_poll(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    service, store = _service(tmp_path, harness)
+
+    async def run():
+        started = await service.agent_spawn(_spawn_request(workspace))
+        session = harness._sessions[str(started.external_session_id)]
+        session.snapshot = replace(
+            session.snapshot,
+            conversation_state="idle",
+            execution_state="succeeded",
+            result_text="supervised result",
+        )
+
+        async def persisted():
+            while True:
+                record = store.load_execution(started.execution_id)
+                if record.execution_state == "succeeded":
+                    return record
+                await asyncio.sleep(0)
+
+        return await asyncio.wait_for(persisted(), timeout=0.1)
+
+    record = asyncio.run(run())
+
+    assert record.result == {"text": "supervised result"}
+    assert harness.call_count("snapshot") >= 1
+
+
+def test_restart_gap_becomes_persisted_recovery_instead_of_stuck_running(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_harness = FakeHarness()
+    first_harness.enqueue("running")
+    first_adapter = _RestartGapAdapter(first_harness)
+    first_service, store = _service(tmp_path, first_harness, adapter=first_adapter)
+
+    started = asyncio.run(
+        first_service.agent_spawn(_spawn_request(workspace, write=True))
+    )
+    fresh_harness = FakeHarness()
+    fresh_adapter = _RestartGapAdapter(fresh_harness)
+    fresh_ids = itertools.count(100)
+    fresh_service = SubagentMcpService(
+        config=first_service._config,
+        store=store,
+        registry=AdapterRegistry(builtin_factories=(lambda: fresh_adapter,)),
+        id_factory=lambda prefix: f"{prefix}-{next(fresh_ids)}",
+    )
+
+    recovered = asyncio.run(
+        fresh_service.agent_status(
+            StatusRequest(started.conversation_id, refresh=True)
+        )
+    )
+
+    assert recovered.execution_state == "failed"
+    assert recovered.recovery_required is True
+    assert recovered.result["error"]["code"] == "RECOVERY_REQUIRED"
+
+    with pytest.raises(ServiceError) as still_busy:
+        asyncio.run(
+            fresh_service.agent_spawn(
+                _spawn_request(
+                    workspace,
+                    request_id="restart-overlap-before-cleanup",
+                    write=True,
+                )
+            )
+        )
+    assert still_busy.value.code == "WRITE_SET_BUSY"
+
+    with pytest.raises(ServiceError) as unverified_close:
+        asyncio.run(
+            fresh_service.agent_close(
+                ActionRequest("restart-close-unverified", started.conversation_id)
+            )
+        )
+    assert unverified_close.value.code == "RECOVERY_REQUIRED"
+
+    fresh_adapter.cleanup_confirmed = True
+    closed = asyncio.run(
+        fresh_service.agent_close(
+            ActionRequest("restart-close-verified", started.conversation_id)
+        )
+    )
+
+    fresh_harness.enqueue("running")
+    replacement = asyncio.run(
+        fresh_service.agent_spawn(
+            _spawn_request(
+                workspace,
+                request_id="restart-overlap-after-cleanup",
+                write=True,
+            )
+        )
+    )
+
+    assert closed.conversation_state == "closed"
+    assert closed.recovery_required is False
+    assert replacement.execution_state == "running"
+
+
+def test_restart_gap_releases_writer_after_verified_process_absence(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_harness = FakeHarness()
+    first_harness.enqueue("running")
+    first_service, store = _service(
+        tmp_path,
+        first_harness,
+        adapter=_RestartGapAdapter(first_harness),
+    )
+    started = asyncio.run(
+        first_service.agent_spawn(_spawn_request(workspace, write=True))
+    )
+
+    fresh_harness = FakeHarness()
+    fresh_harness.enqueue("running")
+    fresh_adapter = _RestartGapAdapter(fresh_harness)
+    fresh_adapter.cleanup_confirmed = True
+    fresh_ids = itertools.count(200)
+    fresh_service = SubagentMcpService(
+        config=first_service._config,
+        store=store,
+        registry=AdapterRegistry(builtin_factories=(lambda: fresh_adapter,)),
+        id_factory=lambda prefix: f"{prefix}-{next(fresh_ids)}",
+    )
+
+    reconciled = asyncio.run(
+        fresh_service.agent_status(
+            StatusRequest(started.conversation_id, refresh=True)
+        )
+    )
+    replacement = asyncio.run(
+        fresh_service.agent_spawn(
+            _spawn_request(
+                workspace,
+                request_id="restart-auto-release",
+                write=True,
+            )
+        )
+    )
+
+    assert reconciled.execution_state == "failed"
+    assert reconciled.recovery_required is False
+    assert reconciled.result["error"]["code"] == "CONTROLLER_DISCONNECTED"
+    assert replacement.execution_state == "running"
+
+
+def test_startup_recovery_holds_writer_until_verified_close(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _StartupRecoveryAdapter(harness)
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    with pytest.raises(ServiceError) as startup:
+        asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+    assert startup.value.code == "RECOVERY_REQUIRED"
+
+    with pytest.raises(ServiceError) as still_busy:
+        asyncio.run(
+            service.agent_spawn(
+                _spawn_request(
+                    workspace,
+                    request_id="startup-overlap-before-cleanup",
+                    write=True,
+                )
+            )
+        )
+    assert still_busy.value.code == "WRITE_SET_BUSY"
+
+    failed = asyncio.run(
+        service.agent_status(StatusRequest("conversation-1", refresh=False))
+    )
+    with pytest.raises(ServiceError) as unverified_close:
+        asyncio.run(
+            service.agent_close(
+                ActionRequest("startup-close-unverified", failed.conversation_id)
+            )
+        )
+    assert unverified_close.value.code == "RECOVERY_REQUIRED"
+
+    adapter.cleanup_confirmed = True
+    closed = asyncio.run(
+        service.agent_close(
+            ActionRequest("startup-close-verified", failed.conversation_id)
+        )
+    )
+    adapter.fail_spawn = False
+    harness.enqueue("running")
+    replacement = asyncio.run(
+        service.agent_spawn(
+            _spawn_request(
+                workspace,
+                request_id="startup-overlap-after-cleanup",
+                write=True,
+            )
+        )
+    )
+
+    assert closed.conversation_state == "closed"
+    assert closed.recovery_required is False
+    assert replacement.execution_state == "running"
 
 
 def test_concurrent_idempotent_spawn_calls_adapter_exactly_once(tmp_path: Path) -> None:

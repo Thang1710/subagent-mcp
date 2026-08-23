@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping, NoReturn
 from .adapters.base import (
     Adapter,
     AdapterContextRequest,
+    AdapterFailure,
     AdapterSendRequest,
     AdapterSessionRequest,
     AdapterSnapshot,
@@ -99,6 +100,7 @@ class SubagentMcpService:
         self._canary_cleanup_verifier = (
             canary_cleanup_verifier or _refuse_canary_cleanup
         )
+        self._snapshot_monitors: dict[str, asyncio.Task[None]] = {}
 
     async def runtime_list(self) -> tuple[dict[str, Any], ...]:
         try:
@@ -362,6 +364,7 @@ class SubagentMcpService:
         conversation_id = self._id_factory("conversation")
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
+        context: ResolvedContext | None = None
         try:
             workspace_path, workspace_key = _workspace(request.cwd)
             write_set = _normalize_write_set(
@@ -435,6 +438,7 @@ class SubagentMcpService:
                 context=context,
                 snapshot=snapshot,
             )
+            self._start_snapshot_monitor(adapter, record, context)
             self._resume_after_safe_result(ready_circuit, snapshot)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
@@ -445,7 +449,17 @@ class SubagentMcpService:
             return status
         except ServiceError as exc:
             public = self._pause_after_quota_error(ready_circuit, exc)
-            self._record_failure(execution_id, public)
+            cleanup_unverified = public.code == "RECOVERY_REQUIRED" and context is not None
+            self._record_failure(
+                execution_id,
+                public,
+                release_leases=not cleanup_unverified,
+                observed=(
+                    _unverified_cleanup_observation(context)
+                    if cleanup_unverified and context is not None
+                    else None
+                ),
+            )
             raise public
         except (StateError, RegistryError, ConfigError) as exc:
             public = _public_error(exc)
@@ -458,7 +472,16 @@ class SubagentMcpService:
                 category="adapter",
                 next_action="inspect_status",
             )
-            self._record_failure(execution_id, public, release_leases=False)
+            self._record_failure(
+                execution_id,
+                public,
+                release_leases=context is None,
+                observed=(
+                    _unverified_cleanup_observation(context)
+                    if context is not None
+                    else None
+                ),
+            )
             raise public from exc
 
     async def agent_status(self, request: StatusRequest) -> AgentStatus:
@@ -473,7 +496,67 @@ class SubagentMcpService:
                 session = _session_request(record)
                 try:
                     await adapter.open_session(session)
+                    snapshot = await adapter.snapshot(session)
                 except ServiceError as exc:
+                    capability_gaps = (
+                        record.observed.get("capability_gaps")
+                        if isinstance(record.observed, Mapping)
+                        else None
+                    )
+                    if (
+                        exc.code == "CAPABILITY_MISSING"
+                        and isinstance(capability_gaps, (list, tuple))
+                        and "live_status_after_restart" in capability_gaps
+                    ):
+                        context = _context_from_record(record)
+                        cleanup_confirmed = False
+                        if isinstance(adapter, OrphanCleanupAdapter):
+                            try:
+                                cleanup_confirmed = (
+                                    await adapter.orphan_cleanup_confirmed(
+                                        session, context
+                                    )
+                                    is True
+                                )
+                            except asyncio.CancelledError:
+                                raise
+                            except BaseException:
+                                cleanup_confirmed = False
+                        if cleanup_confirmed:
+                            observed = dict(record.observed or {})
+                            evidence = observed.get("evidence")
+                            observed["evidence"] = {
+                                **(
+                                    dict(evidence)
+                                    if isinstance(evidence, Mapping)
+                                    else {}
+                                ),
+                                "cleanup_confirmed": True,
+                            }
+                            self._record_failure(
+                                record.execution_id,
+                                ServiceError(
+                                    "CONTROLLER_DISCONNECTED",
+                                    "native controller disconnected after verified process cleanup",
+                                    category="adapter",
+                                ),
+                                observed=observed,
+                            )
+                        else:
+                            self._record_failure(
+                                record.execution_id,
+                                ServiceError(
+                                    "RECOVERY_REQUIRED",
+                                    "native live session was lost after controller restart; cleanup is unverified",
+                                    category="adapter",
+                                    next_action="verify_cleanup",
+                                ),
+                                release_leases=False,
+                            )
+                        record = self._store.load_execution(record.execution_id)
+                        return self._status(
+                            record, after_cursor=request.after_cursor
+                        )
                     if not (
                         exc.code == "CAPABILITY_MISSING"
                         and isinstance(adapter, OrphanCleanupAdapter)
@@ -501,8 +584,8 @@ class SubagentMcpService:
                     )
                     record = self._store.load_execution(record.execution_id)
                     return self._status(record, after_cursor=request.after_cursor)
-                snapshot = await adapter.snapshot(session)
                 context = _context_from_record(record)
+                snapshot = self._reconcile_background_circuit(record, snapshot)
                 record = self._apply_snapshot(
                     adapter,
                     execution_id=record.execution_id,
@@ -577,12 +660,28 @@ class SubagentMcpService:
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
         previous: ExecutionRecord | None = None
+        context: ResolvedContext | None = None
         try:
             previous = self._store.load_latest_execution(request.conversation_id)
+            previous_evidence = (
+                previous.observed.get("evidence")
+                if isinstance(previous.observed, Mapping)
+                else None
+            )
             if (
                 isinstance(previous.result, Mapping)
                 and isinstance(previous.result.get("error"), Mapping)
                 and previous.result["error"].get("code") == "RECOVERY_REQUIRED"
+                and not (
+                    isinstance(previous_evidence, Mapping)
+                    and previous_evidence.get("cleanup_confirmed") is True
+                )
+            ):
+                raise ServiceError("RECOVERY_REQUIRED", "native session cleanup is unverified")
+            if (
+                previous.execution_state in TERMINAL_EXECUTION_STATES
+                and isinstance(previous_evidence, Mapping)
+                and previous_evidence.get("cleanup_confirmed") is False
             ):
                 raise ServiceError("RECOVERY_REQUIRED", "native session cleanup is unverified")
             if previous.conversation_state == "closed":
@@ -663,6 +762,7 @@ class SubagentMcpService:
                 context=context,
                 snapshot=snapshot,
             )
+            self._start_snapshot_monitor(adapter, record, context)
             self._resume_after_safe_result(ready_circuit, snapshot)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
@@ -673,10 +773,19 @@ class SubagentMcpService:
             return status
         except ServiceError as exc:
             public = self._pause_after_quota_error(ready_circuit, exc)
+            cleanup_unverified = public.code == "RECOVERY_REQUIRED" and context is not None
             self._record_failure(
                 execution_id,
                 public,
-                observed=None if previous is None else previous.observed,
+                release_leases=not cleanup_unverified,
+                observed=(
+                    _unverified_cleanup_observation(
+                        context,
+                        None if previous is None else previous.observed,
+                    )
+                    if cleanup_unverified and context is not None
+                    else None if previous is None else previous.observed
+                ),
             )
             raise public
         except (StateError, RegistryError, ConfigError) as exc:
@@ -697,8 +806,15 @@ class SubagentMcpService:
             self._record_failure(
                 execution_id,
                 public,
-                release_leases=False,
-                observed=None if previous is None else previous.observed,
+                release_leases=context is None,
+                observed=(
+                    _unverified_cleanup_observation(
+                        context,
+                        None if previous is None else previous.observed,
+                    )
+                    if context is not None
+                    else None if previous is None else previous.observed
+                ),
             )
             raise public from exc
 
@@ -1070,15 +1186,39 @@ class SubagentMcpService:
             else:
                 if record.execution_state not in TERMINAL_EXECUTION_STATES:
                     raise ServiceError("SESSION_BUSY", "active execution cannot be closed")
+                cleanup_verified = False
+                evidence = (
+                    record.observed.get("evidence")
+                    if isinstance(record.observed, Mapping)
+                    else None
+                )
+                cleanup_unverified = bool(
+                    isinstance(evidence, Mapping)
+                    and evidence.get("cleanup_confirmed") is False
+                )
                 if record.external_session_id is not None:
                     native_session_available = True
                     try:
                         await adapter.open_session(_session_request(record))
                     except ServiceError as exc:
+                        capability_gaps = (
+                            record.observed.get("capability_gaps")
+                            if isinstance(record.observed, Mapping)
+                            else None
+                        )
+                        restart_orphan = bool(
+                            exc.code == "CAPABILITY_MISSING"
+                            and isinstance(capability_gaps, (list, tuple))
+                            and "live_status_after_restart" in capability_gaps
+                            and isinstance(adapter, OrphanCleanupAdapter)
+                        )
                         if not (
                             exc.code == "CAPABILITY_MISSING"
-                            and _can_logically_close_connection_owned_session(
-                                adapter, record
+                            and (
+                                restart_orphan
+                                or _can_logically_close_connection_owned_session(
+                                    adapter, record
+                                )
                             )
                         ):
                             raise
@@ -1089,6 +1229,45 @@ class SubagentMcpService:
                             raise ServiceError(
                                 "RECOVERY_REQUIRED", "native session did not close"
                             )
+                        evidence = snapshot.evidence
+                        cleanup_verified = bool(
+                            isinstance(evidence, Mapping)
+                            and evidence.get("cleanup_confirmed") is True
+                        )
+                    elif cleanup_unverified and isinstance(
+                        adapter, OrphanCleanupAdapter
+                    ):
+                        cleanup_verified = (
+                            await adapter.orphan_cleanup_confirmed(
+                                _session_request(record),
+                                _context_from_record(record),
+                            )
+                            is True
+                        )
+                elif cleanup_unverified and isinstance(adapter, OrphanCleanupAdapter):
+                    cleanup_verified = (
+                        await adapter.orphan_cleanup_confirmed(
+                            AdapterSessionRequest(
+                                record.conversation_id,
+                                record.execution_id,
+                                f"unbound-{record.execution_id}",
+                                None,
+                            ),
+                            _context_from_record(record),
+                        )
+                        is True
+                    )
+                if cleanup_unverified:
+                    if not cleanup_verified:
+                        raise ServiceError(
+                            "RECOVERY_REQUIRED",
+                            "native session cleanup is still unverified",
+                            category="adapter",
+                            next_action="verify_cleanup",
+                        )
+                    record = self._store.confirm_execution_cleanup(
+                        record.execution_id
+                    )
                 record = self._store.close_conversation(request.conversation_id)
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
@@ -1225,6 +1404,7 @@ class SubagentMcpService:
             capability_gaps=context.capability_gaps,
         )
         observed = _snapshot_observation(snapshot, context)
+        result = _snapshot_result(snapshot)
         current = self._store.load_execution(execution_id)
         if current.external_execution_id is None:
             current = self._store.bind_execution(
@@ -1234,6 +1414,19 @@ class SubagentMcpService:
                 workspace_key=context.workspace_key,
                 descriptor=descriptor.to_dict(),
                 observed=observed,
+            )
+        if (
+            current.execution_state == snapshot.execution_state
+            and current.observed == observed
+            and current.result == result
+        ):
+            return current
+        if current.execution_state in TERMINAL_EXECUTION_STATES:
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "adapter published conflicting terminal snapshots",
+                category="adapter",
+                next_action="inspect_status",
             )
         if snapshot.execution_state == "running":
             return current
@@ -1246,7 +1439,6 @@ class SubagentMcpService:
         }.get(snapshot.execution_state)
         if event_kind is None:
             raise ServiceError("ADAPTER_INVALID", "adapter returned an unknown state")
-        result = _snapshot_result(snapshot)
         record = self._store.transition_execution(
             execution_id=execution_id,
             execution_state=snapshot.execution_state,
@@ -1255,6 +1447,7 @@ class SubagentMcpService:
             result=result,
             event_kind=event_kind,
             event_payload={} if result is None else {"result": result},
+            release_leases=snapshot.evidence.get("cleanup_confirmed") is not False,
         )
         if (
             snapshot.error is not None
@@ -1269,6 +1462,69 @@ class SubagentMcpService:
                     reason_code=snapshot.error.code,
                 )
         return record
+
+    def _start_snapshot_monitor(
+        self,
+        adapter: Adapter,
+        record: ExecutionRecord,
+        context: ResolvedContext,
+    ) -> None:
+        if record.execution_state != "running":
+            return
+        existing = self._snapshot_monitors.get(record.execution_id)
+        if existing is not None and not existing.done():
+            return
+        task = asyncio.create_task(
+            self._supervise_snapshot(adapter, record.execution_id, context)
+        )
+        self._snapshot_monitors[record.execution_id] = task
+
+        def finished(done: asyncio.Task[None]) -> None:
+            if self._snapshot_monitors.get(record.execution_id) is done:
+                self._snapshot_monitors.pop(record.execution_id, None)
+            try:
+                done.result()
+            except asyncio.CancelledError:
+                pass
+
+        task.add_done_callback(finished)
+
+    async def _supervise_snapshot(
+        self,
+        adapter: Adapter,
+        execution_id: str,
+        context: ResolvedContext,
+    ) -> None:
+        try:
+            while True:
+                await asyncio.sleep(0.05)
+                current = self._store.load_execution(execution_id)
+                if current.execution_state in TERMINAL_EXECUTION_STATES:
+                    return
+                snapshot = await adapter.snapshot(_session_request(current))
+                if snapshot.execution_state == "running":
+                    continue
+                snapshot = self._reconcile_background_circuit(current, snapshot)
+                self._apply_snapshot(
+                    adapter,
+                    execution_id=execution_id,
+                    context=context,
+                    snapshot=snapshot,
+                )
+                return
+        except asyncio.CancelledError:
+            raise
+        except BaseException as exc:
+            self._record_failure(
+                execution_id,
+                ServiceError(
+                    "RECOVERY_REQUIRED",
+                    f"background session supervision failed ({type(exc).__name__})",
+                    category="adapter",
+                    next_action="inspect_status",
+                ),
+                release_leases=False,
+            )
 
     def _status(self, record: ExecutionRecord, *, after_cursor: int) -> AgentStatus:
         descriptor = _descriptor_from_record(record, self._registry)
@@ -1286,10 +1542,19 @@ class SubagentMcpService:
                 after_cursor=after_cursor,
             )
         )
+        evidence = observed.get("evidence")
+        cleanup_confirmed = bool(
+            isinstance(evidence, Mapping)
+            and evidence.get("cleanup_confirmed") is True
+        )
         recovery = bool(
             isinstance(record.result, Mapping)
             and isinstance(record.result.get("error"), Mapping)
             and record.result["error"].get("code") == "RECOVERY_REQUIRED"
+            and not cleanup_confirmed
+            or record.execution_state in TERMINAL_EXECUTION_STATES
+            and isinstance(evidence, Mapping)
+            and evidence.get("cleanup_confirmed") is False
         )
         return AgentStatus(
             conversation_id=record.conversation_id,
@@ -1416,6 +1681,54 @@ class SubagentMcpService:
                 )
         except (StateError, ConfigError):
             return
+
+    def _reconcile_background_circuit(
+        self,
+        record: ExecutionRecord,
+        snapshot: AdapterSnapshot,
+    ) -> AdapterSnapshot:
+        variant_id = record.requested.get("variant_id")
+        if not isinstance(variant_id, str) or not variant_id:
+            return snapshot
+        try:
+            circuit = self._store.load_circuit(record.runtime_id, variant_id)
+        except StateError:
+            return snapshot
+        if (
+            snapshot.error is not None
+            and snapshot.error.code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
+        ):
+            public = self._pause_after_quota_error(
+                circuit,
+                ServiceError(
+                    snapshot.error.code,
+                    snapshot.error.message,
+                    category=snapshot.error.category,
+                    retryable=snapshot.error.retryable,
+                ),
+            )
+            if public.code != snapshot.error.code:
+                return AdapterSnapshot(
+                    external_session_id=snapshot.external_session_id,
+                    external_execution_id=snapshot.external_execution_id,
+                    conversation_state="idle",
+                    execution_state="failed",
+                    effective_model=snapshot.effective_model,
+                    effective_reasoning=snapshot.effective_reasoning,
+                    workspace_path=snapshot.workspace_path,
+                    workspace_key=snapshot.workspace_key,
+                    context_hash=snapshot.context_hash,
+                    error=AdapterFailure(
+                        public.code,
+                        public.category,
+                        public.retryable,
+                        str(public),
+                    ),
+                    evidence=snapshot.evidence,
+                )
+        elif snapshot.execution_state == "succeeded":
+            self._resume_after_safe_result(circuit, snapshot)
+        return snapshot
 
     def _set_variant_quota_state(
         self,
@@ -1662,6 +1975,19 @@ def _snapshot_observation(
     snapshot: AdapterSnapshot,
     context: ResolvedContext,
 ) -> dict[str, Any]:
+    observed = _context_observation(context)
+    observed.update(
+        {
+            "external_session_id": snapshot.external_session_id,
+            "external_execution_id": snapshot.external_execution_id,
+            "needs_input": _redact(list(snapshot.needs_input)),
+            "evidence": _redact(snapshot.evidence),
+        }
+    )
+    return observed
+
+
+def _context_observation(context: ResolvedContext) -> dict[str, Any]:
     resume_attestation = {
         key: _redact(context.attestation[key])
         for key in (
@@ -1683,27 +2009,47 @@ def _snapshot_observation(
         "transport": context.transport,
         "context_hash": context.context_hash,
         "capability_gaps": list(context.capability_gaps),
-        "external_session_id": snapshot.external_session_id,
-        "external_execution_id": snapshot.external_execution_id,
-        "needs_input": _redact(list(snapshot.needs_input)),
-        "evidence": _redact(snapshot.evidence),
         "attestation": resume_attestation,
     }
 
 
+def _unverified_cleanup_observation(
+    context: ResolvedContext,
+    previous: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    observed = _context_observation(context)
+    if isinstance(previous, Mapping):
+        for key in ("external_session_id", "external_execution_id", "needs_input"):
+            if key in previous:
+                observed[key] = _redact(previous[key])
+    observed.setdefault("external_session_id", None)
+    observed.setdefault("external_execution_id", None)
+    observed.setdefault("needs_input", [])
+    prior_evidence = previous.get("evidence") if isinstance(previous, Mapping) else None
+    observed["evidence"] = {
+        **(
+            dict(_redact(prior_evidence))
+            if isinstance(prior_evidence, Mapping)
+            else {}
+        ),
+        "source": str(context.attestation.get("source", "adapter")),
+        "cleanup_confirmed": False,
+    }
+    return observed
+
+
 def _snapshot_result(snapshot: AdapterSnapshot) -> Mapping[str, Any] | None:
+    result: dict[str, Any] = {}
     if snapshot.result_text is not None:
-        return {"text": _redact_text(snapshot.result_text)}
+        result["text"] = _redact_text(snapshot.result_text)
     if snapshot.error is not None:
-        return {
-            "error": {
-                "code": snapshot.error.code,
-                "category": snapshot.error.category,
-                "retryable": snapshot.error.retryable,
-                "message": _redact_text(snapshot.error.message),
-            }
+        result["error"] = {
+            "code": snapshot.error.code,
+            "category": snapshot.error.category,
+            "retryable": snapshot.error.retryable,
+            "message": _redact_text(snapshot.error.message),
         }
-    return None
+    return result or None
 
 
 def _safe_quota_evidence(details: Mapping[str, Any] | None) -> bool:

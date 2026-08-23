@@ -83,8 +83,8 @@
       "approval": "automatic",
       "request_id_required": false,
       "response_mode_default": "compact",
-      "timeout_seconds_default": 300,
-      "purpose": "Wait boundedly for one to eight targets"
+      "timeout_seconds_default": 240,
+      "purpose": "Wait locally for one to eight targets without interrupting running agents"
     },
     "agent_interrupt": {
       "approval": "automatic",

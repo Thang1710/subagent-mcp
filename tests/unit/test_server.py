@@ -480,7 +480,7 @@ def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> 
     }:
         response_mode = schemas[name]["properties"]["response_mode"]
         assert response_mode["default"] == "compact"
-    assert schemas["agent_wait"]["properties"]["timeout_seconds"]["default"] == 300.0
+    assert schemas["agent_wait"]["properties"]["timeout_seconds"]["default"] == 240.0
 
 
 def test_result_read_is_bounded_read_only_and_parses_exact_artifact_identity() -> None:
@@ -594,7 +594,7 @@ def test_unknown_response_mode_fails_before_service_call() -> None:
     assert service.calls == []
 
 
-def test_wait_uses_five_minute_default_without_model_polling() -> None:
+def test_wait_returns_before_transport_deadline_without_model_polling() -> None:
     service = _RecordingService()
     server = create_server(service)
 
@@ -608,4 +608,4 @@ def test_wait_uses_five_minute_default_without_model_polling() -> None:
     assert result.is_error is False
     name, request = service.calls[-1]
     assert name == "agent_wait"
-    assert request.timeout_seconds == 300.0
+    assert request.timeout_seconds == 240.0

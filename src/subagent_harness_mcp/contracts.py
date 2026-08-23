@@ -587,7 +587,7 @@ class WaitTarget:
 @dataclass(frozen=True, slots=True)
 class WaitRequest:
     targets: tuple[WaitTarget, ...]
-    timeout_seconds: float = 300.0
+    timeout_seconds: float = 240.0
 
     def __post_init__(self) -> None:
         if not 1 <= len(self.targets) <= 8:
@@ -596,9 +596,9 @@ class WaitRequest:
             isinstance(self.timeout_seconds, bool)
             or not isinstance(self.timeout_seconds, (int, float))
             or not math.isfinite(self.timeout_seconds)
-            or not 0 <= self.timeout_seconds <= 300
+            or not 0 <= self.timeout_seconds <= 240
         ):
-            raise ContractError("REQUEST_INVALID", "timeout_seconds must be between 0 and 300")
+            raise ContractError("REQUEST_INVALID", "timeout_seconds must be between 0 and 240")
 
 
 @dataclass(frozen=True, slots=True)
