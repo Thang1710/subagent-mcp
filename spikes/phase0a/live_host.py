@@ -862,7 +862,7 @@ def _run_windows_handle_branch(root: Path, branch: str) -> dict[str, Any]:
     atomic_denied = False
     branch_observed = False
     try:
-        _wait_for_file(ready, process, time.monotonic() + 5)
+        _wait_for_file(ready, process, time.monotonic() + 30)
         try:
             settings.write_text('{"held":false}\n', encoding="utf-8")
         except PermissionError:

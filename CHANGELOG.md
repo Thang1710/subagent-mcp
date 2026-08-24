@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.10 - 2026-08-24
+
+- Allow the Windows sharing canary's PowerShell helper up to 30 seconds to
+  signal readiness on a cold CI runner; file-lock and release assertions are
+  unchanged.
+- Replace the unpublished 1.0.9 candidate, whose build stopped before the
+  PyPI, GitHub release, and MCP Registry publication jobs.
+
 ## 1.0.9 - 2026-08-24
 
 - Allow the deterministic background-supervision regression enough time on
