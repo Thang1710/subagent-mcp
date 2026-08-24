@@ -630,6 +630,7 @@ def test_server_instructions_carry_the_capped_recovery_contract() -> None:
     assert "Never infer or schedule a provider reset time" in instructions
     assert "runtime_check(refresh_quota=true)" in instructions
     assert "one new explicit task is the live availability check" in instructions
+    assert "Never choose a wait-for-reset action" in instructions
     assert "select the next configured model" not in instructions
     for terminal in (
         "QUOTA_PAUSED",

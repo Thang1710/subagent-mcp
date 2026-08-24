@@ -759,10 +759,52 @@ def test_safe_task_response_reopens_an_explicit_quota_pause_without_extra_probe(
 
     paused, task = asyncio.run(run())
 
-    assert paused["state"] == "auto_paused"
+    assert paused["state"] == "ready"
+    assert paused["can_start_explicit_task"] is True
+    assert paused["quota"]["state"] == "quota_paused"
     assert task.execution_state == "succeeded"
     assert store.load_circuit("fake", "future-deep").state == "ready"
     assert adapter.quota_calls == 1
+
+
+def test_cached_quota_pause_is_reported_as_nonblocking_for_a_new_explicit_task(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def run():
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+        adapter.quota_error_code = "QUOTA_PAUSED"
+        await service.runtime_check("fake", refresh_quota=True)
+        local = await service.runtime_check("fake")
+        listed = (await service.runtime_list())[0]
+        return local, listed
+
+    local, listed = asyncio.run(run())
+
+    assert store.load_circuit("fake", "future-deep").state == "auto_paused"
+    assert local["state"] == "ready"
+    assert local["can_start_explicit_task"] is True
+    assert local["details"]["circuits"] == [
+        {
+            "variant_id": "future-deep",
+            "state": "auto_paused",
+            "revision": 3,
+            "blocks_explicit_task": False,
+        }
+    ]
+    assert listed["circuits"][0]["state"] == "auto_paused"
+    assert listed["circuits"][0]["blocks_explicit_task"] is False
 
 
 def test_explicit_task_rechecks_non_probe_quota_pause(tmp_path: Path) -> None:

@@ -887,7 +887,9 @@
         copy.appendChild(make('b', null, option.label));
         copy.appendChild(make('code', null, value));
         row.appendChild(copy);
-        if (!option.available || option.state === 'quota_paused') {
+        if (option.state === 'recheck_on_task') {
+          row.appendChild(make('span', 'model-priority-paused', 'Checks live on next task'));
+        } else if (!option.available || option.state === 'quota_paused') {
           row.appendChild(make('span', 'model-priority-paused', 'Quota paused'));
         }
         const controls = make('span', 'model-priority-move');

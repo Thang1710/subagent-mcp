@@ -1588,7 +1588,9 @@ def _runtime_cards(
         capabilities = _manifest_strings(manifest, "capabilities")
         record_state = str(record.get("state", "unavailable"))
         if any(
-            isinstance(circuit, Mapping) and circuit.get("state") == "auto_paused"
+            isinstance(circuit, Mapping)
+            and circuit.get("state") == "auto_paused"
+            and circuit.get("blocks_explicit_task") is not False
             for circuit in record.get("circuits", ())
         ):
             record_state = "auto_paused"
@@ -1654,7 +1656,13 @@ def _model_priority_field(
         if isinstance(availability, Mapping) and isinstance(
             availability.get("state"), str
         ):
-            state_by_model[model] = str(availability["state"])
+            state = str(availability["state"])
+            if (
+                state == "quota_paused"
+                and availability.get("reason_code") == "QUOTA_PAUSED"
+            ):
+                state = "recheck_on_task"
+            state_by_model[model] = state
 
     suggested: list[dict[str, Any]] = []
     seen: set[str] = set()

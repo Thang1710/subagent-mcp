@@ -11,7 +11,7 @@ import sqlite3
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable, Mapping, NoReturn
+from typing import Any, Callable, Mapping, NoReturn, Sequence
 
 from .adapters.base import (
     Adapter,
@@ -154,6 +154,7 @@ class SubagentMcpService:
         for record in self._registry.records():
             policy = policies.get(record.runtime_id, {})
             catalog: list[dict[str, str]] = []
+            adapter: Adapter | None = None
             if record.manifest is not None:
                 try:
                     adapter = self._registry.get(record.runtime_id)
@@ -161,6 +162,7 @@ class SubagentMcpService:
                         catalog = _public_model_catalog(await adapter.model_catalog())
                 except Exception:
                     catalog = []
+            circuits = self._store.list_circuits(record.runtime_id)
             result.append(
                 {
                     "runtime_id": record.runtime_id,
@@ -172,13 +174,8 @@ class SubagentMcpService:
                     "model_catalog": catalog,
                     "reason": record.reason,
                     "circuits": [
-                        {
-                            "variant_id": circuit.variant_id,
-                            "state": circuit.state,
-                            "revision": circuit.revision,
-                            "pair_key": circuit.pair_key,
-                        }
-                        for circuit in self._store.list_circuits(record.runtime_id)
+                        _public_circuit(adapter, circuit, include_pair_key=True)
+                        for circuit in circuits
                     ],
                 }
             )
@@ -232,13 +229,9 @@ class SubagentMcpService:
                         )
                     )
                 if circuits:
-                    state = circuits[0].state
+                    state = _runtime_check_state(adapter, circuits)
                     details["circuits"] = [
-                        {
-                            "variant_id": item.variant_id,
-                            "state": item.state,
-                            "revision": item.revision,
-                        }
+                        _public_circuit(adapter, item)
                         for item in circuits
                     ]
             quota: dict[str, Any] = {
@@ -254,18 +247,16 @@ class SubagentMcpService:
                 )
                 circuits = list(self._store.list_circuits(runtime_id))
                 if circuits:
-                    state = circuits[0].state
+                    state = _runtime_check_state(adapter, circuits)
                     details["circuits"] = [
-                        {
-                            "variant_id": item.variant_id,
-                            "state": item.state,
-                            "revision": item.revision,
-                        }
+                        _public_circuit(adapter, item)
                         for item in circuits
                     ]
             return {
                 "runtime_id": runtime_id,
                 "state": state,
+                "can_start_explicit_task": bool(variants)
+                and state in {"available", "ready"},
                 "details": details,
                 "manifest": adapter.manifest.to_dict(),
                 "quota": quota,
@@ -1431,10 +1422,7 @@ class SubagentMcpService:
         half_open = (
             allow_quota_paused
             and isinstance(availability, Mapping)
-            and (
-                isinstance(adapter, QuotaProbeAdapter)
-                or availability.get("reason_code") == "QUOTA_PAUSED"
-            )
+            and _availability_allows_explicit_task(adapter, availability)
         )
         if (
             isinstance(availability, Mapping)
@@ -2432,6 +2420,56 @@ def _runtime_state_error(runtime_id: str, state: str) -> ServiceError:
         f"runtime {runtime_id!r} is {state}",
         category="runtime",
     )
+
+
+def _availability_allows_explicit_task(
+    adapter: Adapter,
+    availability: Mapping[str, Any],
+) -> bool:
+    return (
+        isinstance(adapter, QuotaProbeAdapter)
+        or availability.get("reason_code") == "QUOTA_PAUSED"
+    )
+
+
+def _circuit_allows_explicit_task(
+    adapter: Adapter | None,
+    circuit: CircuitRecord,
+) -> bool:
+    if circuit.state == "ready":
+        return True
+    if adapter is None or circuit.state != "auto_paused":
+        return False
+    return _availability_allows_explicit_task(
+        adapter,
+        {"reason_code": circuit.details.get("error_code")},
+    )
+
+
+def _public_circuit(
+    adapter: Adapter | None,
+    circuit: CircuitRecord,
+    *,
+    include_pair_key: bool = False,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "variant_id": circuit.variant_id,
+        "state": circuit.state,
+        "revision": circuit.revision,
+        "blocks_explicit_task": not _circuit_allows_explicit_task(adapter, circuit),
+    }
+    if include_pair_key:
+        result["pair_key"] = circuit.pair_key
+    return result
+
+
+def _runtime_check_state(
+    adapter: Adapter,
+    circuits: Sequence[CircuitRecord],
+) -> str:
+    if any(_circuit_allows_explicit_task(adapter, circuit) for circuit in circuits):
+        return "ready"
+    return circuits[0].state
 
 
 def _refuse_canary_cleanup(

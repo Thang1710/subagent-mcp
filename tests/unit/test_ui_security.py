@@ -476,6 +476,7 @@ def test_static_ui_exposes_only_plain_runtime_controls() -> None:
     assert "draggable = true" in javascript
     assert "Move up" in javascript
     assert "Move down" in javascript
+    assert "Checks live on next task" in javascript
     assert "item.field.options.forEach" in javascript
     assert "if (draft.indexOf(option.value) === -1) draft.push(option.value);" in javascript
     assert "createElement('datalist')" not in javascript

@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.11 - 2026-08-24
+
+- Keep persisted quota-pause evidence as history without exposing it as a
+  controller-side block: each later explicit task checks the native harness
+  again, and no cached reset time or wait-until choice is used.
+- Report whether a circuit blocks a new explicit task and keep the localhost
+  runtime/model status aligned with that executable gate.
+
 ## 1.0.10 - 2026-08-24
 
 - Allow the Windows sharing canary's PowerShell helper up to 30 seconds to

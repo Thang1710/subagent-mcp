@@ -328,6 +328,65 @@ def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
     assert configured["available"] is True
 
 
+def test_ui_does_not_treat_a_live_recheckable_pause_as_runtime_unavailable(
+    tmp_path: Path,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+
+    class RecheckablePausedService:
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "available",
+                    "enabled": True,
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [
+                        {
+                            "variant_id": "configured",
+                            "state": "auto_paused",
+                            "revision": 1,
+                            "pair_key": "sha256:test",
+                            "blocks_explicit_task": False,
+                        }
+                    ],
+                },
+            )
+
+    snapshot = LocalUiBackend(
+        config=config,
+        service=RecheckablePausedService(),
+    ).snapshot()
+
+    assert snapshot["runtimes"][0]["status"]["state"] == "available"
+    assert snapshot["health"]["state"] == "available"
+
+
+def test_ui_labels_cached_quota_pause_as_a_live_next_task_check(
+    tmp_path: Path,
+) -> None:
+    backend, config = _configured_backend(tmp_path / "home")
+    config.set_variant_quota_state(
+        "fake",
+        "configured",
+        paused=True,
+        reason_code="QUOTA_PAUSED",
+    )
+
+    snapshot = backend.snapshot()
+    fields = {
+        field["id"]: field
+        for group in snapshot["runtimes"][0]["groups"]
+        for field in group["fields"]
+    }
+    option = fields["model_priority"]["options"][0]
+
+    assert option["state"] == "recheck_on_task"
+    assert option["available"] is True
+
+
 def test_ui_provider_refresh_reports_unknown_without_backend_details(
     tmp_path: Path,
 ) -> None:
