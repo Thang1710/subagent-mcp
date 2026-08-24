@@ -9,6 +9,9 @@ All notable changes to Subagent MCP are documented here.
   again, and no cached reset time or wait-until choice is used.
 - Report whether a circuit blocks a new explicit task and keep the localhost
   runtime/model status aligned with that executable gate.
+- Recover a prior controller's incomplete `starting` execution through a
+  per-execution OS lock, without a timeout or relaunch. Writer leases release
+  only when native work provably never started or cleanup is later verified.
 
 ## 1.0.10 - 2026-08-24
 

@@ -312,6 +312,19 @@ def test_launch_compare_and_swap_has_one_winner_and_crash_never_relaunches(
     assert json.loads(result)["error"]["code"] == "RECOVERY_REQUIRED"
 
 
+def test_launch_guard_is_exclusive_until_the_owner_releases_it(tmp_path: Path) -> None:
+    store = StateStore.open(_paths(tmp_path))
+
+    first = store.try_acquire_launch_guard("execution-guarded")
+    assert first is not None
+    assert store.try_acquire_launch_guard("execution-guarded") is None
+
+    first.close()
+    replacement = store.try_acquire_launch_guard("execution-guarded")
+    assert replacement is not None
+    replacement.close()
+
+
 def test_newer_owned_database_version_fails_closed(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     store = StateStore.open(paths)

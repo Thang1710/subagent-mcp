@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -11,7 +12,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping
+from typing import Any, BinaryIO, Iterator, Mapping
 
 from .paths import ProductPaths
 
@@ -20,6 +21,8 @@ APPLICATION_ID = 0x534D4350  # "SMCP"
 DATABASE_SCHEMA_VERSION = 1
 _SQLITE_TIMEOUT_SECONDS = 5.0
 _PROCESS_INITIALIZE_LOCK = threading.Lock()
+_PROCESS_LAUNCH_GUARD_LOCK = threading.Lock()
+_PROCESS_LAUNCH_GUARDS: set[str] = set()
 _EXPLICIT_PAUSE_EVIDENCE_PREFIX = "explicit_provider_result_v2:"
 _LEGACY_QUOTA_GUARD_NAME = "circuits_reject_unproven_quota_pause_v2"
 _RETIRED_LEGACY_QUOTA_GUARDS = ("circuits_reject_unproven_quota_pause_v1",)
@@ -116,6 +119,24 @@ class LaunchClaim:
     state: str
     state_revision: int
     recovery_required: bool
+
+
+class LaunchGuard:
+    def __init__(self, stream: BinaryIO, process_key: str) -> None:
+        self._stream = stream
+        self._process_key = process_key
+        self._closed = False
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        try:
+            _unlock_launch_stream(self._stream)
+        finally:
+            self._stream.close()
+            with _PROCESS_LAUNCH_GUARD_LOCK:
+                _PROCESS_LAUNCH_GUARDS.discard(self._process_key)
 
 
 @dataclass(frozen=True, slots=True)
@@ -353,56 +374,114 @@ class StateStore:
                 _is_recovery_required(result_json),
             )
 
+    def try_acquire_launch_guard(self, execution_id: str) -> LaunchGuard | None:
+        _require_id(execution_id, "execution_id", 128)
+        directory = self._paths.state_dir / "launch-guards"
+        stream: BinaryIO | None = None
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(execution_id.encode("utf-8")).hexdigest()
+            path = directory / f"{digest}.lock"
+            process_key = str(path.resolve(strict=False))
+            if os.name == "nt":
+                process_key = process_key.casefold()
+            with _PROCESS_LAUNCH_GUARD_LOCK:
+                if process_key in _PROCESS_LAUNCH_GUARDS:
+                    return None
+                _PROCESS_LAUNCH_GUARDS.add(process_key)
+            stream = path.open("a+b")
+            stream.seek(0, os.SEEK_END)
+            if stream.tell() == 0:
+                stream.write(b"\0")
+                stream.flush()
+            if not _try_lock_launch_stream(stream):
+                stream.close()
+                with _PROCESS_LAUNCH_GUARD_LOCK:
+                    _PROCESS_LAUNCH_GUARDS.discard(process_key)
+                return None
+            return LaunchGuard(stream, process_key)
+        except OSError as exc:
+            if stream is not None:
+                stream.close()
+            if "process_key" in locals():
+                with _PROCESS_LAUNCH_GUARD_LOCK:
+                    _PROCESS_LAUNCH_GUARDS.discard(process_key)
+            raise StateError(
+                "LAUNCH_LOCK_FAILED",
+                "execution launch ownership could not be verified",
+            ) from exc
+
+    def record_launch_attempt(
+        self,
+        execution_id: str,
+        observed: Mapping[str, Any],
+    ) -> ExecutionRecord:
+        _require_id(execution_id, "execution_id", 128)
+        durable_observation = dict(observed)
+        durable_observation["native_invoked"] = True
+        encoded = _canonical_json_text(durable_observation)
+        with self.transaction(write=True) as database:
+            database.execute(
+                """
+                UPDATE executions
+                SET observed_json = ?, updated_at_utc = ?
+                WHERE execution_id = ? AND state = 'starting'
+                  AND external_execution_id IS NULL
+                """,
+                (encoded, _utc_now(), execution_id),
+            )
+            if database.execute("SELECT changes()").fetchone()[0] != 1:
+                raise StateError(
+                    "STATE_CONFLICT",
+                    "execution is no longer awaiting native launch",
+                )
+        return self.load_execution(execution_id)
+
     def recover_incomplete_launch(self, execution_id: str) -> LaunchClaim:
         """Fail an attested prior-process start; never turn it back into queued."""
 
         _require_id(execution_id, "execution_id", 128)
-        with self.transaction(write=True) as database:
-            row = database.execute(
-                """
-                SELECT e.state, e.state_revision, e.result_json,
-                       e.external_execution_id, c.external_session_id
-                FROM executions AS e
-                JOIN conversations AS c ON c.conversation_id = e.conversation_id
-                WHERE e.execution_id = ?
-                """,
-                (execution_id,),
-            ).fetchone()
-            if row is None:
-                raise StateError("EXECUTION_NOT_FOUND", "execution does not exist")
-            state, revision, result_json, external_execution, external_session = row
-            if state != "starting":
-                return LaunchClaim(
-                    False,
-                    str(state),
-                    int(revision),
-                    _is_recovery_required(result_json),
-                )
-            if external_execution is not None or external_session is not None:
-                raise StateError(
-                    "RECOVERY_UNSAFE",
-                    "execution has a native identity and must be reconciled",
-                )
-            revision += 1
-            result_json = _canonical_json_text(
-                {
-                    "error": {
-                        "code": "RECOVERY_REQUIRED",
-                        "message": "launch outcome is ambiguous; external work was not repeated",
-                    }
-                }
+        record = self.load_execution(execution_id)
+        if record.execution_state != "starting":
+            return LaunchClaim(
+                False,
+                record.execution_state,
+                record.execution_revision,
+                bool(
+                    isinstance(record.result, Mapping)
+                    and isinstance(record.result.get("error"), Mapping)
+                    and record.result["error"].get("code") == "RECOVERY_REQUIRED"
+                ),
             )
-            now = _utc_now()
-            database.execute(
-                """
-                UPDATE executions
-                SET state = 'failed', state_revision = ?, result_json = ?,
-                    terminal_at_utc = ?, updated_at_utc = ?
-                WHERE execution_id = ? AND state = 'starting'
-                """,
-                (revision, result_json, now, now, execution_id),
+        if record.external_execution_id is not None:
+            raise StateError(
+                "RECOVERY_UNSAFE",
+                "execution has a native execution identity and must be reconciled",
             )
-            return LaunchClaim(False, "failed", revision, True)
+        observed = dict(record.observed or {})
+        native_invoked = observed.get("native_invoked") is True
+        recovered = self.transition_execution(
+            execution_id=execution_id,
+            execution_state="failed",
+            conversation_state="idle",
+            observed=observed,
+            result={
+                "error": {
+                    "code": "RECOVERY_REQUIRED",
+                    "message": "prior controller launch ended without a terminal result",
+                },
+                "orphan_possible": native_invoked,
+            },
+            event_kind="failed",
+            event_payload={"error": {"code": "RECOVERY_REQUIRED"}},
+            release_leases=not native_invoked,
+        )
+        return LaunchClaim(
+            False,
+            recovered.execution_state,
+            recovered.execution_revision,
+            True,
+        )
 
     def claim_action_request(
         self,
@@ -1585,6 +1664,43 @@ def _initialization_lock(path: Path) -> Iterator[None]:
             yield
         finally:
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+
+
+def _try_lock_launch_stream(stream: BinaryIO) -> bool:
+    stream.seek(0)
+    if os.name == "nt":
+        import msvcrt
+
+        try:
+            msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno == errno.EACCES or getattr(exc, "winerror", None) == 33:
+                return False
+            raise
+        return True
+
+    import fcntl
+
+    try:
+        fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            return False
+        raise
+    return True
+
+
+def _unlock_launch_stream(stream: BinaryIO) -> None:
+    if os.name == "nt":
+        import msvcrt
+
+        stream.seek(0)
+        msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+        return
+
+    import fcntl
+
+    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def _read_application_id(database: sqlite3.Connection) -> int:

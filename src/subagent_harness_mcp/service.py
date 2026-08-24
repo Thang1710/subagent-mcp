@@ -54,6 +54,7 @@ from .contracts import (
 from .store import (
     CircuitRecord,
     ExecutionRecord,
+    LaunchGuard,
     StateError,
     StateStore,
     VerifiedCleanupReceipt,
@@ -399,6 +400,7 @@ class SubagentMcpService:
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
         context: ResolvedContext | None = None
+        launch_guard: LaunchGuard | None = None
         native_invoked = False
         try:
             workspace_path, workspace_key = _workspace(request.cwd)
@@ -467,8 +469,16 @@ class SubagentMcpService:
             )
             conversation_id = claim.conversation_id
             execution_id = claim.execution_id
+            launch_guard = self._store.try_acquire_launch_guard(execution_id)
+            if launch_guard is None:
+                return self._status(
+                    self._store.load_execution(execution_id),
+                    after_cursor=0,
+                )
             launch = self._store.claim_execution_start(execution_id)
             if not launch.should_launch:
+                if launch.state == "starting":
+                    self._store.recover_incomplete_launch(execution_id)
                 return self._status(self._store.load_execution(execution_id), after_cursor=0)
             if "workspace_write" in request.permissions:
                 self._store.acquire_writer_scope_leases(
@@ -492,6 +502,10 @@ class SubagentMcpService:
                 )
             )
             _require_context(context, requested)
+            self._store.record_launch_attempt(
+                execution_id,
+                _unverified_cleanup_observation(context),
+            )
             native_invoked = True
             snapshot = await adapter.spawn(
                 AdapterSpawnRequest(conversation_id, execution_id, request.task, context)
@@ -560,10 +574,14 @@ class SubagentMcpService:
                 ),
             )
             raise public from exc
+        finally:
+            if launch_guard is not None:
+                launch_guard.close()
 
     async def agent_status(self, request: StatusRequest) -> AgentStatus:
         try:
             record = self._store.load_latest_execution(request.conversation_id)
+            record = self._recover_unowned_start(record)
             if (
                 request.refresh
                 and record.execution_state in {"running", "needs_input"}
@@ -738,9 +756,11 @@ class SubagentMcpService:
         ready_circuit: CircuitRecord | None = None
         previous: ExecutionRecord | None = None
         context: ResolvedContext | None = None
+        launch_guard: LaunchGuard | None = None
         native_invoked = False
         try:
             previous = self._store.load_latest_execution(request.conversation_id)
+            previous = self._recover_unowned_start(previous)
             previous_evidence = (
                 previous.observed.get("evidence")
                 if isinstance(previous.observed, Mapping)
@@ -811,8 +831,16 @@ class SubagentMcpService:
                 requested=requested,
             )
             execution_id = claim.execution_id
+            launch_guard = self._store.try_acquire_launch_guard(execution_id)
+            if launch_guard is None:
+                return self._status(
+                    self._store.load_execution(execution_id),
+                    after_cursor=0,
+                )
             launch = self._store.claim_execution_start(execution_id)
             if not launch.should_launch:
+                if launch.state == "starting":
+                    self._store.recover_incomplete_launch(execution_id)
                 return self._status(self._store.load_execution(execution_id), after_cursor=0)
             if "workspace_write" in requested.get("permissions", ()):
                 self._store.acquire_writer_scope_leases(
@@ -822,8 +850,12 @@ class SubagentMcpService:
                 )
             context = _context_from_record(previous)
             session = _session_request(previous)
-            await adapter.open_session(session)
+            self._store.record_launch_attempt(
+                execution_id,
+                _unverified_cleanup_observation(context, previous.observed),
+            )
             native_invoked = True
+            await adapter.open_session(session)
             snapshot = await adapter.send(
                 AdapterSendRequest(
                     request.conversation_id,
@@ -908,6 +940,9 @@ class SubagentMcpService:
                 ),
             )
             raise public from exc
+        finally:
+            if launch_guard is not None:
+                launch_guard.close()
 
     def _resolve_artifact_relay(
         self,
@@ -1250,6 +1285,7 @@ class SubagentMcpService:
     async def _action(self, request: ActionRequest, *, operation: str) -> AgentStatus:
         try:
             record = self._store.load_latest_execution(request.conversation_id)
+            record = self._recover_unowned_start(record)
             claim = self._store.claim_action_request(
                 tool=f"agent_{operation}",
                 request_id=request.request_id,
@@ -1397,6 +1433,18 @@ class SubagentMcpService:
                 category="adapter",
                 next_action="inspect_status",
             ) from exc
+
+    def _recover_unowned_start(self, record: ExecutionRecord) -> ExecutionRecord:
+        if record.execution_state != "starting":
+            return record
+        guard = self._store.try_acquire_launch_guard(record.execution_id)
+        if guard is None:
+            return record
+        try:
+            self._store.recover_incomplete_launch(record.execution_id)
+        finally:
+            guard.close()
+        return self._store.load_execution(record.execution_id)
 
     def _selection(
         self,

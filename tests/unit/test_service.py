@@ -1643,6 +1643,184 @@ def test_startup_recovery_holds_writer_until_verified_close(tmp_path: Path) -> N
     assert replacement.execution_state == "running"
 
 
+def _simulate_crashed_start(
+    service: SubagentMcpService,
+    store: StateStore,
+    request: SpawnRequest,
+    *,
+    native_invoked: bool,
+) -> None:
+    workspace_path, workspace_key = service_module._workspace(request.cwd)
+    write_set = service_module._normalize_write_set(
+        workspace_path,
+        request.permissions,
+        request.write_set,
+    )
+    variant = service._config.load()["runtimes"]["fake"]["variants"][0]
+    requested = service_module._requested_metadata(
+        request,
+        variant=variant,
+        transport="managed-sdk",
+        workspace_path=workspace_path,
+        workspace_key=workspace_key,
+        write_set=write_set,
+    )
+    claim = store.claim_execution_request(
+        tool="agent_spawn",
+        request_id=request.request_id,
+        request_payload=service_module._spawn_digest_payload(request, write_set),
+        conversation_id="crashed-conversation",
+        execution_id="crashed-execution",
+        runtime_id="fake",
+        requested=requested,
+    )
+    assert store.claim_execution_start(claim.execution_id).should_launch is True
+    store.acquire_writer_scope_leases(
+        workspace_key=workspace_key,
+        write_set=write_set,
+        execution_id=claim.execution_id,
+    )
+    if native_invoked:
+        store.record_launch_attempt(
+            claim.execution_id,
+            {
+                "model": requested["model"],
+                "reasoning": requested["reasoning"],
+                "workspace_path": workspace_path,
+                "workspace_key": workspace_key,
+                "transport": "managed-sdk",
+                "context_hash": "simulated-prior-process-context",
+                "capability_gaps": [],
+                "attestation": {"write_set": list(write_set)},
+                "native_invoked": True,
+                "evidence": {"cleanup_confirmed": False},
+            },
+        )
+
+
+def test_prior_process_start_before_native_call_recovers_without_clock(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, store = _service(tmp_path, harness)
+    request = _spawn_request(
+        workspace,
+        request_id="prior-process-before-native",
+        write=True,
+    )
+    _simulate_crashed_start(
+        service,
+        store,
+        request,
+        native_invoked=False,
+    )
+
+    recovered = asyncio.run(
+        service.agent_status(StatusRequest("crashed-conversation", refresh=False))
+    )
+    replay = asyncio.run(service.agent_spawn(request))
+
+    assert recovered.execution_state == "failed"
+    assert replay.execution_state == "failed"
+    assert recovered.recovery_required is True
+    assert recovered.result["error"]["code"] == "RECOVERY_REQUIRED"
+    assert _active_writer_leases(store) == 0
+    assert harness.call_count("spawn") == 0
+
+
+def test_prior_process_native_attempt_stays_leased_until_verified_cleanup(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _StartupRecoveryAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    request = _spawn_request(
+        workspace,
+        request_id="prior-process-after-native",
+        write=True,
+    )
+    _simulate_crashed_start(
+        service,
+        store,
+        request,
+        native_invoked=True,
+    )
+
+    recovered = asyncio.run(service.agent_spawn(request))
+
+    assert recovered.execution_state == "failed"
+    assert recovered.recovery_required is True
+    assert _active_writer_leases(store) == 1
+    with pytest.raises(ServiceError) as unverified:
+        asyncio.run(
+            service.agent_close(
+                ActionRequest("prior-process-close-unverified", recovered.conversation_id)
+            )
+        )
+    assert unverified.value.code == "RECOVERY_REQUIRED"
+
+    adapter.cleanup_confirmed = True
+    closed = asyncio.run(
+        service.agent_close(
+            ActionRequest("prior-process-close-verified", recovered.conversation_id)
+        )
+    )
+
+    assert closed.conversation_state == "closed"
+    assert _active_writer_leases(store) == 0
+    assert harness.call_count("spawn") == 0
+
+
+def test_prior_process_send_start_is_recovered_before_session_busy_check(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("done", result="initial task")
+    service, store = _service(tmp_path, harness)
+    spawned = asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+    previous = store.load_execution(spawned.execution_id)
+    request = SendRequest(
+        "prior-process-send",
+        spawned.conversation_id,
+        "Continue after restart.",
+    )
+    claim = store.claim_execution_request(
+        tool="agent_send",
+        request_id=request.request_id,
+        request_payload={
+            "conversation_id": request.conversation_id,
+            "prompt": request.prompt,
+            "reply_to": request.reply_to,
+            "answers": {},
+        },
+        conversation_id=request.conversation_id,
+        execution_id="crashed-send-execution",
+        runtime_id=None,
+        requested=previous.requested,
+    )
+    assert store.claim_execution_start(claim.execution_id).should_launch is True
+    store.acquire_writer_scope_leases(
+        workspace_key=str(previous.requested["workspace_key"]),
+        write_set=tuple(previous.requested["write_set"]),
+        execution_id=claim.execution_id,
+    )
+
+    with pytest.raises(ServiceError) as recovered:
+        asyncio.run(service.agent_send(request))
+
+    assert recovered.value.code == "RECOVERY_REQUIRED"
+    latest = store.load_execution(claim.execution_id)
+    assert latest.execution_state == "failed"
+    assert _active_writer_leases(store) == 0
+    assert harness.call_count("send") == 0
+
+
 def test_concurrent_idempotent_spawn_calls_adapter_exactly_once(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
