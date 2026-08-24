@@ -355,6 +355,10 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
         action_ref.startswith("pypa/gh-action-pypi-publish@")
         for action_ref in action_refs
     )
+    assert (
+        "pypa/gh-action-pypi-publish@"
+        "dc37677b2e1c63e2034f94d8a5b11f265b73ba33"
+    ) in action_refs
     assert run_scripts
     assert all("${{" not in script for script in run_scripts)
     assert release.index("Validate release tag input") < release.index(
