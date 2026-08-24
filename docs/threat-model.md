@@ -16,7 +16,7 @@ same-user code.
 | Pre-authorized provider balance | Exact provider/model route, explicit runtime enablement, and no purchase, reload, or limit-changing capability |
 | Recursive orchestration | Strict declared MCP and explicit client/Subagent MCP deny rules |
 | Untrusted repository execution | Preview disables project/local Claude context and hooks; later enablement requires canonical path + content-hash trust |
-| Local UI attack | Literal loopback bind, one-time fragment bootstrap for each new browser profile, bounded persistent HttpOnly strict cookie, CSRF, Host/Origin checks, restrictive CSP, and no CORS; a tokenless same-origin POST may only restore an existing valid in-memory session, so a UI restart requires a fresh bootstrap; background control endpoints additionally require a random token from the product-owned Local control record |
+| Local UI attack | Literal loopback bind, optional one-time fragment bootstrap, in-memory HttpOnly strict cookie, CSRF, Host/Origin checks, restrictive CSP, and no CORS; an exact same-origin empty POST may create, replace, or restore a browser session, while an explicitly supplied invalid bootstrap token always fails; background control endpoints additionally require a random token from the product-owned Local control record |
 | Destructive lifecycle action | Immutable runtimes, atomic pointer, ownership journal/read-back, identity-matching uninstall/rollback |
 | PID reuse | PID plus creation identity and executable digest; otherwise `RECOVERY_REQUIRED` |
 | Sensitive output | Bounded key-aware redaction; no credentials, hidden thinking, or raw provider evidence persistence |
