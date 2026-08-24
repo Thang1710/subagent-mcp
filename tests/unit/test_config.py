@@ -139,6 +139,27 @@ def test_quota_state_noop_does_not_rewrite_config_or_revision(tmp_path: Path) ->
     assert store.load()["revision"] == 1
 
 
+def test_quota_state_clear_requires_matching_reason(tmp_path: Path) -> None:
+    store = ConfigStore(_paths(tmp_path))
+    paused = store.save(_document(), expected_revision=0)
+    paused = store.set_variant_quota_state(
+        "claude-code",
+        "opus-deep",
+        paused=True,
+        reason_code="USAGE_CREDITS_FORBIDDEN",
+    )
+
+    unchanged = store.set_variant_quota_state(
+        "claude-code",
+        "opus-deep",
+        paused=False,
+        expected_reason_code="QUOTA_PAUSED",
+    )
+
+    assert unchanged == paused
+    assert store.load() == paused
+
+
 def test_concurrent_writers_with_same_revision_have_exactly_one_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

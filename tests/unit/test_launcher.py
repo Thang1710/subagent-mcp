@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -227,6 +229,74 @@ def test_windows_launcher_has_bom_and_only_fixed_execution_argv(tmp_path: Path) 
         "-File",
         str(launcher.resolve(strict=False)),
     )
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows launcher contract")
+@pytest.mark.parametrize(
+    ("mutation", "expected_message"),
+    [
+        ("tamper", "runtime file digest mismatch"),
+        ("extra", "runtime tree differs from manifest"),
+        ("missing", "runtime tree differs from manifest"),
+    ],
+)
+def test_windows_launcher_rejects_runtime_tree_drift_before_exec(
+    tmp_path: Path,
+    mutation: str,
+    expected_message: str,
+) -> None:
+    data = tmp_path / "data"
+    runtime_parent = data / "runtimes"
+    runtime_parent.mkdir(parents=True)
+    source = _runtime_source(tmp_path, "1.0.0", b"not-a-real-python")
+    record, _ = stage_runtime(source, runtime_parent, version="1.0.0")
+    activate_pointer(
+        data / "current.json",
+        record,
+        runtime_parent=runtime_parent,
+        transaction_path=data / "pointer-transaction.json",
+        rollback_path=data / "rollback.json",
+    )
+    launcher = data / "bin" / "subagent-harness-mcp.ps1"
+    launcher.parent.mkdir()
+    launcher.write_bytes(render_windows_launcher(launcher))
+    package = (
+        record.root
+        / "Lib"
+        / "site-packages"
+        / "subagent_harness_mcp"
+        / "cli.py"
+    )
+    if mutation == "tamper":
+        package.write_text("# tampered after activation\n", encoding="utf-8")
+    elif mutation == "extra":
+        (package.parent / "unexpected.pth").write_text(
+            "import unexpected\n",
+            encoding="utf-8",
+        )
+    else:
+        package.unlink()
+
+    completed = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-NonInteractive",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(launcher),
+        ],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+
+    assert completed.returncode != 0
+    assert expected_message in (completed.stdout + completed.stderr).casefold()
 
 
 def test_lifecycle_cli_registers_the_public_mcp_identity(

@@ -81,7 +81,11 @@ async def run_adapter_conformance(
         )
     )
     operations.append("spawn")
-    _require_snapshot(spawned, context)
+    _require_snapshot(
+        spawned,
+        context,
+        expected_execution_id="conformance-execution-1",
+    )
     session = AdapterSessionRequest(
         conversation_id="conformance-conversation",
         execution_id="conformance-execution-1",
@@ -92,11 +96,21 @@ async def run_adapter_conformance(
     try:
         reopened = await adapter.open_session(session)
         operations.append("open_session")
-        _require_snapshot(reopened, context, spawned.external_session_id)
+        _require_snapshot(
+            reopened,
+            context,
+            spawned.external_session_id,
+            "conformance-execution-1",
+        )
 
         current = await adapter.snapshot(session)
         operations.append("snapshot")
-        _require_snapshot(current, context, spawned.external_session_id)
+        _require_snapshot(
+            current,
+            context,
+            spawned.external_session_id,
+            "conformance-execution-1",
+        )
 
         sent = await adapter.send(
             AdapterSendRequest(
@@ -110,7 +124,12 @@ async def run_adapter_conformance(
             )
         )
         operations.append("send")
-        _require_snapshot(sent, context, spawned.external_session_id)
+        _require_snapshot(
+            sent,
+            context,
+            spawned.external_session_id,
+            "conformance-execution-2",
+        )
         session = AdapterSessionRequest(
             conversation_id=session.conversation_id,
             execution_id="conformance-execution-2",
@@ -120,12 +139,22 @@ async def run_adapter_conformance(
 
         interrupted = await adapter.interrupt(session)
         operations.append("interrupt")
-        _require_snapshot(interrupted, context, spawned.external_session_id)
+        _require_snapshot(
+            interrupted,
+            context,
+            spawned.external_session_id,
+            "conformance-execution-2",
+        )
 
         final = await adapter.close(session)
         operations.append("close")
         closed = True
-        _require_snapshot(final, context, spawned.external_session_id)
+        _require_snapshot(
+            final,
+            context,
+            spawned.external_session_id,
+            "conformance-execution-2",
+        )
         if final.conversation_state != "closed":
             raise ValueError("close must return conversation_state='closed'")
     finally:
@@ -174,6 +203,7 @@ def _require_snapshot(
     snapshot: object,
     context: ResolvedContext,
     external_session_id: str | None = None,
+    expected_execution_id: str | None = None,
 ) -> None:
     if not isinstance(snapshot, AdapterSnapshot):
         raise TypeError("adapter operation must return AdapterSnapshot")
@@ -181,6 +211,11 @@ def _require_snapshot(
         raise ValueError("adapter snapshot identities must be non-empty")
     if external_session_id is not None and snapshot.external_session_id != external_session_id:
         raise ValueError("adapter changed external_session_id within one conversation")
+    if (
+        expected_execution_id is not None
+        and snapshot.external_execution_id != expected_execution_id
+    ):
+        raise ValueError("adapter changed the normalized controller execution identity")
     expected = (
         context.effective_model,
         dict(context.effective_reasoning),

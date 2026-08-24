@@ -73,7 +73,7 @@ class SampleEchoAdapter:
         snapshot = _completed_snapshot(
             request.context,
             session_id,
-            f"sample-execution-{request.execution_id}",
+            request.execution_id,
             "sample adapter completed",
         )
         self._sessions[session_id] = snapshot
@@ -84,7 +84,7 @@ class SampleEchoAdapter:
         snapshot = _completed_snapshot(
             request.context,
             request.external_session_id,
-            f"sample-execution-{request.execution_id}",
+            request.execution_id,
             f"echo: {request.prompt}",
         )
         self._sessions[request.external_session_id] = snapshot

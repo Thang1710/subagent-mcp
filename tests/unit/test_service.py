@@ -4,11 +4,14 @@ import asyncio
 import hashlib
 import itertools
 import json
+import os
 import sqlite3
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+import subagent_harness_mcp.service as service_module
 
 from subagent_harness_mcp.adapters.base import (
     AdapterFailure,
@@ -37,6 +40,61 @@ from subagent_harness_mcp.contracts import (
 from subagent_harness_mcp.paths import resolve_paths
 from subagent_harness_mcp.service import SubagentMcpService
 from subagent_harness_mcp.store import StateStore
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity contract")
+def test_workspace_extended_path_uses_one_canonical_lease_key(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    ordinary_display, ordinary_key = service_module._workspace(str(workspace))
+    extended = "\\\\?\\" + str(workspace.resolve(strict=True))
+
+    extended_display, extended_key = service_module._workspace(extended)
+
+    assert extended_display == ordinary_display
+    assert extended_key == ordinary_key
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path identity contract")
+def test_extended_workspace_alias_cannot_bypass_writer_lease(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    service, _ = _service(tmp_path, harness)
+
+    first = asyncio.run(
+        service.agent_spawn(_spawn_request(workspace, write=True))
+    )
+    extended = "\\\\?\\" + str(workspace.resolve(strict=True))
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                replace(
+                    _spawn_request(
+                        workspace,
+                        request_id="extended-workspace-overlap",
+                        write=True,
+                    ),
+                    cwd=extended,
+                )
+            )
+        )
+
+    assert first.execution_state == "running"
+    assert captured.value.code == "WRITE_SET_BUSY"
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [
+        (r"\\?\C:\work\tree", r"C:\work\tree"),
+        (r"\\?\UNC\server\share\tree", r"\\server\share\tree"),
+    ],
+)
+def test_windows_extended_prefix_normalization(value: str, expected: str) -> None:
+    assert service_module._without_windows_extended_prefix(value) == expected
 
 
 class _Ids:
@@ -216,6 +274,79 @@ class _StartupRecoveryAdapter(FakeAdapter):
     async def orphan_cleanup_confirmed(self, request, context):
         del request, context
         return self.cleanup_confirmed
+
+
+class _PostNativeFailureAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.fail_spawn = False
+        self.fail_send = False
+
+    async def spawn(self, request):
+        if self.fail_spawn:
+            raise ServiceError(
+                "PROVIDER_ERROR",
+                "native spawn failed after invocation",
+                category="provider",
+            )
+        return await super().spawn(request)
+
+    async def send(self, request):
+        if self.fail_send:
+            raise ServiceError(
+                "PROVIDER_ERROR",
+                "native send failed after invocation",
+                category="provider",
+            )
+        return await super().send(request)
+
+
+class _PreNativeContextFailureAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.fail_context = True
+
+    async def resolve_context(self, request):
+        if self.fail_context:
+            raise ServiceError("CONTEXT_DRIFT", "context resolution failed")
+        return await super().resolve_context(request)
+
+
+class _StaleExecutionSnapshotAdapter(FakeAdapter):
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(snapshot, external_execution_id="stale-controller-execution")
+
+
+class _StaleCloseSnapshotAdapter(FakeAdapter):
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            evidence={**dict(snapshot.evidence), "cleanup_confirmed": False},
+        )
+
+    async def close(self, request):
+        snapshot = await super().close(request)
+        return replace(
+            snapshot,
+            external_execution_id="stale-controller-execution",
+            evidence={**dict(snapshot.evidence), "cleanup_confirmed": True},
+        )
+
+
+class _RestartClosePlaceholderAdapter(FakeAdapter):
+    async def close(self, request):
+        snapshot = await super().close(request)
+        return replace(
+            snapshot,
+            effective_model="unavailable-without-resume",
+            effective_reasoning={},
+            workspace_path="",
+            workspace_key="",
+            context_hash="",
+            evidence={"source": "persisted-session-id"},
+        )
 
 
 def _service(
@@ -634,6 +765,127 @@ def test_safe_task_response_reopens_an_explicit_quota_pause_without_extra_probe(
     assert adapter.quota_calls == 1
 
 
+def test_explicit_task_rechecks_non_probe_quota_pause(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness)
+    service._config.set_variant_quota_state(
+        "fake",
+        "future-deep",
+        paused=True,
+        reason_code="QUOTA_PAUSED",
+    )
+    harness.enqueue("done", result="current provider task succeeded")
+
+    task = asyncio.run(
+        service.agent_spawn(
+            _spawn_request(workspace, request_id="spawn-half-open-non-probe")
+        )
+    )
+
+    assert task.execution_state == "succeeded"
+    assert harness.call_count("spawn") == 1
+    variant = service._config.load()["runtimes"]["fake"]["variants"][0]
+    assert "availability" not in variant
+
+
+def test_non_probe_usage_credits_stop_remains_forbidden(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness)
+    service._config.set_variant_quota_state(
+        "fake",
+        "future-deep",
+        paused=True,
+        reason_code="USAGE_CREDITS_FORBIDDEN",
+    )
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _spawn_request(workspace, request_id="spawn-credit-stop-non-probe")
+            )
+        )
+
+    assert captured.value.code == "USAGE_CREDITS_FORBIDDEN"
+    assert harness.call_count("spawn") == 0
+
+
+def test_safe_task_clears_config_only_pause_on_ready_circuit(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def run():
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "ready-circuit-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+        service._config.set_variant_quota_state(
+            "fake",
+            "future-deep",
+            paused=True,
+            reason_code="QUOTA_PAUSED",
+        )
+        harness.enqueue("done", result="safe current provider task")
+        return await service.agent_spawn(
+            _spawn_request(workspace, request_id="spawn-config-only-recovery")
+        )
+
+    task = asyncio.run(run())
+
+    assert task.execution_state == "succeeded"
+    assert store.load_circuit("fake", "future-deep").state == "ready"
+    variant = service._config.load()["runtimes"]["fake"]["variants"][0]
+    assert "availability" not in variant
+
+
+def test_background_success_clears_non_probe_quota_pause(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    service, store = _service(tmp_path, harness)
+    service._config.set_variant_quota_state(
+        "fake",
+        "future-deep",
+        paused=True,
+        reason_code="QUOTA_PAUSED",
+    )
+
+    async def run():
+        started = await service.agent_spawn(
+            _spawn_request(workspace, request_id="spawn-half-open-background")
+        )
+        session = harness._sessions[str(started.external_session_id)]
+        session.snapshot = replace(
+            session.snapshot,
+            conversation_state="idle",
+            execution_state="succeeded",
+            result_text="current provider task succeeded",
+        )
+
+        while True:
+            record = store.load_execution(started.execution_id)
+            if record.execution_state == "succeeded":
+                return
+            await asyncio.sleep(0)
+
+    asyncio.run(asyncio.wait_for(run(), timeout=0.1))
+
+    variant = service._config.load()["runtimes"]["fake"]["variants"][0]
+    assert "availability" not in variant
+
+
 def _prepare_ready_quota_circuit(service: SubagentMcpService) -> None:
     async def run() -> None:
         await service.runtime_check("fake")
@@ -657,6 +909,186 @@ def _active_writer_leases(store: StateStore) -> int:
                 "WHERE kind = 'writer' AND released_at_utc IS NULL"
             ).fetchone()[0]
         )
+
+
+def test_post_native_spawn_service_error_retains_writer_until_cleanup(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _PostNativeFailureAdapter(harness)
+    adapter.fail_spawn = True
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+
+    failed = asyncio.run(
+        service.agent_status(StatusRequest("conversation-1", refresh=False))
+    )
+    assert captured.value.code == "PROVIDER_ERROR"
+    assert failed.recovery_required is True
+    assert failed.result["error"]["code"] == "PROVIDER_ERROR"
+    assert store.load_execution("execution-2").observed["evidence"][
+        "cleanup_confirmed"
+    ] is False
+    assert _active_writer_leases(store) == 1
+
+    with pytest.raises(ServiceError) as overlap:
+        asyncio.run(
+            service.agent_spawn(
+                _spawn_request(
+                    workspace,
+                    request_id="post-native-spawn-overlap",
+                    write=True,
+                )
+            )
+        )
+    assert overlap.value.code == "WRITE_SET_BUSY"
+
+
+def test_post_native_send_service_error_retains_writer_until_cleanup(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _PostNativeFailureAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    spawned = asyncio.run(
+        service.agent_spawn(_spawn_request(workspace, write=True))
+    )
+    assert _active_writer_leases(store) == 0
+    adapter.fail_send = True
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    "post-native-send-failure",
+                    spawned.conversation_id,
+                    "Continue the bounded writer task.",
+                )
+            )
+        )
+
+    failed = asyncio.run(
+        service.agent_status(StatusRequest(spawned.conversation_id, refresh=False))
+    )
+    assert captured.value.code == "PROVIDER_ERROR"
+    assert failed.recovery_required is True
+    assert failed.result["error"]["code"] == "PROVIDER_ERROR"
+    assert _active_writer_leases(store) == 1
+
+    with pytest.raises(ServiceError) as overlap:
+        asyncio.run(
+            service.agent_spawn(
+                _spawn_request(
+                    workspace,
+                    request_id="post-native-send-overlap",
+                    write=True,
+                )
+            )
+        )
+    assert overlap.value.code == "WRITE_SET_BUSY"
+
+
+def test_pre_native_context_failure_releases_writer_lease(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _PreNativeContextFailureAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+
+    assert captured.value.code == "CONTEXT_DRIFT"
+    assert _active_writer_leases(store) == 0
+
+    adapter.fail_context = False
+    replacement = asyncio.run(
+        service.agent_spawn(
+            _spawn_request(
+                workspace,
+                request_id="pre-native-context-repaired",
+                write=True,
+            )
+        )
+    )
+    assert replacement.execution_state == "succeeded"
+
+
+def test_adapter_cannot_bind_a_stale_controller_execution_snapshot(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, store = _service(
+        tmp_path,
+        harness,
+        adapter=_StaleExecutionSnapshotAdapter(harness),
+    )
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+
+    assert captured.value.code == "CONTEXT_DRIFT"
+    record = store.load_execution("execution-2")
+    assert record.external_execution_id is None
+    assert record.observed["evidence"]["cleanup_confirmed"] is False
+    assert _active_writer_leases(store) == 1
+
+
+def test_close_rejects_stale_cleanup_identity_before_releasing_writer(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, store = _service(
+        tmp_path,
+        harness,
+        adapter=_StaleCloseSnapshotAdapter(harness),
+    )
+    started = asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_close(
+                ActionRequest("stale-close-identity", started.conversation_id)
+            )
+        )
+
+    assert captured.value.code == "CONTEXT_DRIFT"
+    record = store.load_execution(started.execution_id)
+    assert record.observed["evidence"]["cleanup_confirmed"] is False
+    assert _active_writer_leases(store) == 1
+
+
+def test_close_allows_exact_terminal_placeholder_when_cleanup_was_not_unverified(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    service, store = _service(
+        tmp_path,
+        harness,
+        adapter=_RestartClosePlaceholderAdapter(harness),
+    )
+    started = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+
+    closed = asyncio.run(
+        service.agent_close(
+            ActionRequest("restart-placeholder-close", started.conversation_id)
+        )
+    )
+
+    assert closed.conversation_state == "closed"
+    assert _active_writer_leases(store) == 0
 
 
 def test_concurrent_circuit_recovery_never_masks_terminal_provider_quota(
@@ -697,8 +1129,8 @@ def test_concurrent_circuit_recovery_never_masks_terminal_provider_quota(
     assert adapter.spawn_calls == 1
     record = store.load_execution("execution-2")
     assert record.result["error"]["code"] == "USAGE_CREDITS_FORBIDDEN"
-    assert (record.observed or {}).get("evidence", {}).get("cleanup_confirmed") is not False
-    assert _active_writer_leases(store) == 0
+    assert (record.observed or {}).get("evidence", {}).get("cleanup_confirmed") is False
+    assert _active_writer_leases(store) == 1
     assert store.load_circuit("fake", "future-deep").state == "recovery_required"
     variant = ConfigStore(
         resolve_paths(
@@ -743,7 +1175,7 @@ def test_quota_pause_retries_only_local_state_three_times_without_provider_repla
     assert store.load_circuit("fake", "future-deep").state == "auto_paused"
 
 
-def test_exhausted_local_pause_repair_surfaces_warning_and_releases_lease(
+def test_exhausted_local_pause_repair_surfaces_warning_and_retains_lease(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -781,7 +1213,7 @@ def test_exhausted_local_pause_repair_surfaces_warning_and_releases_lease(
     assert error.next_action is not None and "Do not retry this task" in error.next_action
     assert attempts == 3
     assert adapter.spawn_calls == 1
-    assert _active_writer_leases(store) == 0
+    assert _active_writer_leases(store) == 1
 
 
 def test_quota_pause_persistence_never_swallows_cancellation(
@@ -1469,9 +1901,20 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     harness = FakeHarness()
+    pem_secret = (
+        "-----BEGIN PRIVATE KEY-----\n"
+        "cGVtLXNlY3JldC1tYXJrZXI=\n"
+        "-----END PRIVATE KEY-----"
+    )
+    aws_key_id = "AKIAIOSFODNN7EXAMPLE"
+    signed_value = "0123456789abcdef0123456789abcdef"
     harness.enqueue(
         "done",
-        result="Bearer abcdefghijklmnopqrstuvwxyz user@example.com finished",
+        result=(
+            "Bearer abcdefghijklmnopqrstuvwxyz user@example.com "
+            f"{pem_secret} {aws_key_id} "
+            f"https://example.invalid/object?X-Amz-Signature={signed_value} finished"
+        ),
     )
     service, store = _service(tmp_path, harness)
     prompt = "private transcript credential-marker hidden-thinking"
@@ -1480,9 +1923,12 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
         service.agent_spawn(_spawn_request(workspace, prompt=prompt))
     )
 
-    assert status.result == {
-        "text": "Bearer [REDACTED] [REDACTED_EMAIL] finished"
-    }
+    public_result = str(status.result["text"])
+    assert "Bearer [REDACTED]" in public_result
+    assert "[REDACTED_EMAIL]" in public_result
+    assert pem_secret not in public_result
+    assert aws_key_id not in public_result
+    assert signed_value not in public_result
     with store.transaction() as database:
         durable = json.dumps(
             {
@@ -1499,6 +1945,126 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     assert "user@example.com" not in durable
     assert "hidden-thinking" not in durable
     assert "private transcript" not in durable
+    assert pem_secret not in durable
+    assert aws_key_id not in durable
+    assert signed_value not in durable
+
+
+def test_redact_text_covers_private_keys_cloud_ids_and_assigned_secrets() -> None:
+    pem = (
+        "-----BEGIN RSA PRIVATE KEY-----\n"
+        "bGl0ZXJhbC1wZW0tc2VjcmV0\n"
+        "-----END RSA PRIVATE KEY-----"
+    )
+    escaped_pem = pem.replace("\n", "\\n")
+    aws_key_id = "ASIAIOSFODNN7EXAMPLE"
+    signature = "abcdef0123456789abcdef0123456789"
+    access_token = "ya29.abcdefghijklmnopqrstuvwxyz"
+    client_secret = "client-secret-value-123456"
+    basic = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
+    raw = (
+        f"{pem}\n{escaped_pem}\n{aws_key_id}\n"
+        f"https://example.invalid/?X-Amz-Signature={signature}"
+        f"&access_token={access_token}\n"
+        f"client_secret={client_secret}\n"
+        f"Authorization: Basic {basic}"
+    )
+
+    redacted = service_module._redact_text(raw)
+
+    for secret in (
+        "bGl0ZXJhbC1wZW0tc2VjcmV0",
+        aws_key_id,
+        signature,
+        access_token,
+        client_secret,
+        basic,
+    ):
+        assert secret not in redacted
+    assert "[REDACTED" in redacted
+
+
+def test_redact_text_preserves_identity_and_token_metrics() -> None:
+    raw = (
+        "rough_tokens_full=12345 token_count=4096 "
+        "total_tokens=12345678901 tokens_used=42 signature_verified=true "
+        "pair_key=abc123def456 normal prose"
+    )
+
+    assert service_module._redact_text(raw) == raw
+
+
+def test_redact_text_scrubs_secret_crossing_the_output_boundary() -> None:
+    secret = "sk-ant-api03-" + ("a" * 32)
+    raw = ("x" * (service_module._REDACTED_TEXT_MAX_CHARS - 4)) + secret
+
+    redacted = service_module._redact_text(raw)
+
+    assert "sk-ant" not in redacted
+    assert len(redacted) <= service_module._REDACTED_TEXT_MAX_CHARS
+
+
+def test_redact_text_covers_serialized_and_compound_credentials() -> None:
+    secrets = {
+        "json_signature": "deadbeefcafe1234",
+        "json_basic": "dXNlcjpwYXNzd29yZA==",
+        "session_token": "session-token-value-1234",
+        "x_amz_signature": "zzzyyyyxxxxwwww",
+        "digest_response": "abcdef123456",
+        "negotiate": "TlRMTVNTUAABAAAAB4IIog==",
+        "userinfo": "S3cretPass",
+        "query_auth": "abcd1234ABCD==",
+    }
+    raw = (
+        f'{{"signature": "{secrets["json_signature"]}", '
+        f'"authorization": "Basic {secrets["json_basic"]}"}}\n'
+        f'session_token={secrets["session_token"]}\n'
+        f'x_amz_signature={secrets["x_amz_signature"]}\n'
+        'Authorization: Digest username="x", '
+        f'response="{secrets["digest_response"]}", nonce="bbccdd00"\n'
+        f'Authorization: Negotiate {secrets["negotiate"]}\n'
+        f'postgres://admin:{secrets["userinfo"]}@127.0.0.1:5432/prod\n'
+        f'https://example.invalid/?auth=Basic+{secrets["query_auth"]}'
+    )
+
+    redacted = service_module._redact_text(raw)
+
+    for secret in secrets.values():
+        assert secret not in redacted
+
+
+def test_redact_normalizes_only_exact_sensitive_mapping_keys() -> None:
+    secret = "opaque-secret-value-123456"
+    redacted = service_module._redact(
+        {
+            "x-api-key": secret,
+            "Set-Cookie": secret,
+            "client_secret": secret,
+            "session_key": secret,
+            "refresh_token": secret,
+            "private_key": secret,
+            "aws_secret_access_key": secret,
+            "proxy-authorization": secret,
+            "pair_key": "abc123def456",
+            "workspace_key": "workspace-123",
+            "token_count": 4096,
+        }
+    )
+
+    for key in (
+        "x-api-key",
+        "Set-Cookie",
+        "client_secret",
+        "session_key",
+        "refresh_token",
+        "private_key",
+        "aws_secret_access_key",
+        "proxy-authorization",
+    ):
+        assert redacted[key] == "[REDACTED]"
+    assert redacted["pair_key"] == "abc123def456"
+    assert redacted["workspace_key"] == "workspace-123"
+    assert redacted["token_count"] == 4096
 
 
 def test_task_title_is_redacted_bounded_and_prompt_is_not_persisted(

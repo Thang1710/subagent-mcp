@@ -31,10 +31,13 @@ from .ui_process import (
     CONTROL_HEADER,
     CONTROL_OPEN_PATH,
     CONTROL_PROOF_HEADER,
+    CONTROL_STATUS_PATH,
     CONTROL_STOP_PATH,
     UiProcessError,
     control_open_request_proof,
     control_open_response_proof,
+    control_status_request_proof,
+    control_status_response_proof,
 )
 
 
@@ -45,6 +48,7 @@ _ASSETS = {
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
 _SESSION_COOKIE = "smcp_session"
+_SESSION_COOKIE_MAX_AGE_SECONDS = 30 * 24 * 60 * 60
 _MAX_BODY_BYTES = 256 * 1024
 _MAX_HEADER_BYTES = 16 * 1024
 _MAX_RESPONSE_BYTES = 1024 * 1024
@@ -343,13 +347,6 @@ class _UiState:
             self.sessions[session_id] = csrf
             return session_id, csrf
 
-    def create_session(self) -> tuple[str, str]:
-        with self.lock:
-            session_id = secrets.token_urlsafe(32)
-            csrf = secrets.token_urlsafe(32)
-            self.sessions[session_id] = csrf
-            return session_id, csrf
-
     def csrf_for(self, session_id: str) -> str | None:
         with self.lock:
             return self.sessions.get(session_id)
@@ -374,6 +371,20 @@ class _UiState:
             return False
         try:
             expected_proof = control_open_request_proof(expected, challenge)
+        except UiProcessError:
+            return False
+        return hmac.compare_digest(supplied_proof, expected_proof)
+
+    def control_status_allowed(self, challenge: str, supplied_proof: str) -> bool:
+        expected = self.control_token
+        if (
+            expected is None
+            or len(supplied_proof) != 64
+            or any(character not in "0123456789abcdef" for character in supplied_proof)
+        ):
+            return False
+        try:
+            expected_proof = control_status_request_proof(expected, challenge)
         except UiProcessError:
             return False
         return hmac.compare_digest(supplied_proof, expected_proof)
@@ -671,6 +682,24 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
             path = self._request_path(require_origin=True)
             if path is None:
                 return
+            if path == CONTROL_STATUS_PATH:
+                status_control = self._status_control()
+                if status_control is None:
+                    self._discard_bounded_body()
+                    return
+                if not self._require_empty_body():
+                    return
+                challenge, control_token = status_control
+                self._send_json(
+                    HTTPStatus.OK,
+                    {
+                        "state": "managed",
+                        "proof": control_status_response_proof(
+                            control_token, challenge
+                        ),
+                    },
+                )
+                return
             if path == CONTROL_OPEN_PATH:
                 open_control = self._open_control()
                 if open_control is None:
@@ -748,11 +777,12 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                         return
                     self._send_json(HTTPStatus.OK, {"csrf_token": csrf})
                     return
-                exchanged = state.create_session()
+                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
+                return
             session_id, csrf = exchanged
             cookie = (
                 f"{_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; "
-                "SameSite=Strict"
+                f"SameSite=Strict; Max-Age={_SESSION_COOKIE_MAX_AGE_SECONDS}"
             )
             self._send_json(
                 HTTPStatus.OK,
@@ -779,6 +809,19 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                 len(challenges) != 1
                 or len(proofs) != 1
                 or not state.control_open_allowed(challenges[0], proofs[0])
+                or state.control_token is None
+            ):
+                self._json_error(HTTPStatus.UNAUTHORIZED, "CONTROL_REJECTED")
+                return None
+            return challenges[0], state.control_token
+
+        def _status_control(self) -> tuple[str, str] | None:
+            challenges = self.headers.get_all(CONTROL_CHALLENGE_HEADER, [])
+            proofs = self.headers.get_all(CONTROL_PROOF_HEADER, [])
+            if (
+                len(challenges) != 1
+                or len(proofs) != 1
+                or not state.control_status_allowed(challenges[0], proofs[0])
                 or state.control_token is None
             ):
                 self._json_error(HTTPStatus.UNAUTHORIZED, "CONTROL_REJECTED")

@@ -57,6 +57,12 @@ def test_background_start_uses_the_installed_module_without_a_shell(
 
     def popen(argv, **kwargs):
         calls.append((tuple(argv), dict(kwargs)))
+        publish_control_record(
+            paths.ui_control_file,
+            pid=process.pid,
+            port=8765,
+            token="startup-control-token-with-enough-entropy",
+        )
         return process
 
     result = start_background_ui(
@@ -66,6 +72,7 @@ def test_background_start_uses_the_installed_module_without_a_shell(
         executable="C:/Python/python.exe",
         popen_factory=popen,
         probe=lambda _port: next(probes),
+        verify_control=lambda _record: True,
         sleeper=lambda _seconds: None,
         timeout_seconds=1,
         platform="nt",
@@ -102,6 +109,12 @@ def test_background_start_is_idempotent_when_product_ui_is_healthy(
     tmp_path: Path,
 ) -> None:
     paths = _paths(tmp_path)
+    publish_control_record(
+        paths.ui_control_file,
+        pid=77,
+        port=8765,
+        token="idempotent-control-token-with-enough-entropy",
+    )
     called = False
 
     def popen(*_args, **_kwargs):
@@ -115,11 +128,58 @@ def test_background_start_is_idempotent_when_product_ui_is_healthy(
         open_browser=True,
         popen_factory=popen,
         probe=lambda _port: True,
+        verify_control=lambda _record: True,
     )
 
     assert result.changed is False
+    assert result.managed is True
     assert result.port == 8765
+    assert result.pid == 77
     assert called is False
+
+
+def test_background_start_rejects_a_counterfeit_or_unmanaged_ui(
+    tmp_path: Path,
+) -> None:
+    called = False
+
+    def popen(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("must not spawn")
+
+    with pytest.raises(UiProcessError) as caught:
+        start_background_ui(
+            _paths(tmp_path),
+            port=8765,
+            open_browser=True,
+            popen_factory=popen,
+            probe=lambda _port: True,
+        )
+
+    assert caught.value.code == "UI_UNMANAGED"
+    assert called is False
+
+
+def test_background_start_rejects_a_port_squatter_during_startup(
+    tmp_path: Path,
+) -> None:
+    process = _Process()
+    probes = iter((False, True))
+
+    with pytest.raises(UiProcessError) as caught:
+        start_background_ui(
+            _paths(tmp_path),
+            port=8765,
+            open_browser=False,
+            popen_factory=lambda *_args, **_kwargs: process,
+            probe=lambda _port: next(probes),
+            sleeper=lambda _seconds: None,
+            timeout_seconds=1,
+        )
+
+    assert caught.value.code == "UI_UNMANAGED"
+    assert process.terminated is True
 
 
 def test_background_start_rejects_an_ephemeral_port(tmp_path: Path) -> None:
@@ -161,6 +221,63 @@ def test_control_stop_is_authenticated_and_removes_its_exact_record(
     assert not thread.is_alive()
     assert not paths.ui_control_file.exists()
     assert record.endswith(b"\n")
+
+
+def test_status_requires_exact_control_identity_for_a_matching_record(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    publish_control_record(
+        paths.ui_control_file,
+        pid=77,
+        port=8765,
+        token="matching-record-control-token-with-enough-entropy",
+    )
+
+    counterfeit = status_background_ui(
+        paths,
+        port=8765,
+        probe=lambda _port: True,
+        verify_control=lambda _record: False,
+    )
+    managed = status_background_ui(
+        paths,
+        port=8765,
+        probe=lambda _port: True,
+        verify_control=lambda _record: True,
+    )
+
+    assert counterfeit == BackgroundUiResult(False, True, False, 8765, None)
+    assert managed == BackgroundUiResult(False, True, True, 8765, 77)
+
+
+def test_status_proves_the_real_managed_ui_control_identity(tmp_path: Path) -> None:
+    paths = _paths(tmp_path)
+    control_token = "real-status-control-token-with-enough-entropy"
+    server = LoopbackUiServer(
+        lambda: {},
+        lambda _patch, revision: {"revision": revision},
+        control_token=control_token,
+    )
+    server.start()
+    publish_control_record(
+        paths.ui_control_file,
+        pid=123,
+        port=server.bound_port,
+        token=control_token,
+    )
+    try:
+        result = status_background_ui(paths, port=server.bound_port)
+    finally:
+        server.close()
+
+    assert result == BackgroundUiResult(
+        False,
+        True,
+        True,
+        server.bound_port,
+        123,
+    )
 
 
 def test_control_open_passes_one_validated_bootstrap_directly_to_browser(
@@ -330,7 +447,12 @@ def test_status_distinguishes_managed_running_and_stopped(tmp_path: Path) -> Non
         port=8765,
         token="another-control-token-with-enough-entropy",
     )
-    running = status_background_ui(paths, port=8765, probe=lambda _port: True)
+    running = status_background_ui(
+        paths,
+        port=8765,
+        probe=lambda _port: True,
+        verify_control=lambda _record: True,
+    )
     assert running == BackgroundUiResult(False, True, True, 8765, 77)
 
 

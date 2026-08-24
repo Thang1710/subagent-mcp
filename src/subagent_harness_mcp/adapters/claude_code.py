@@ -114,6 +114,7 @@ class _ManagedTurn:
     execution_id: str
     client: Any
     rate_seen: bool
+    rate_safe: bool | None = None
     task: asyncio.Task[None] | None = None
     interrupted: bool = False
     interrupt_ambiguous: bool = False
@@ -622,6 +623,7 @@ class ClaudeCodeAdapter:
             request.context,
             session_id=session_id,
             execution_id=request.execution_id,
+            rate_seen=rate_seen,
         )
         session = _ManagedSession(request.context, snapshot)
         self._sessions[session_id] = session
@@ -653,6 +655,7 @@ class ClaudeCodeAdapter:
                     request.context,
                     session_id=session_id,
                     execution_id=request.execution_id,
+                    rate_seen=rate_seen,
                 )
                 existing.snapshot = snapshot
                 self._start_background_turn(
@@ -673,6 +676,7 @@ class ClaudeCodeAdapter:
             request.context,
             session_id=session_id,
             execution_id=request.execution_id,
+            rate_seen=rate_seen,
         )
         session = _ManagedSession(request.context, snapshot)
         self._sessions[session_id] = session
@@ -927,7 +931,12 @@ class ClaudeCodeAdapter:
         execution_id: str,
         rate_seen: bool,
     ) -> None:
-        turn = _ManagedTurn(execution_id, client, rate_seen)
+        turn = _ManagedTurn(
+            execution_id,
+            client,
+            rate_seen,
+            rate_safe=True if rate_seen else None,
+        )
         turn.task = asyncio.create_task(
             self._finish_background_turn(
                 session,
@@ -954,7 +963,7 @@ class ClaudeCodeAdapter:
                 context=session.context,
                 session_id=session.snapshot.external_session_id,
                 external_execution_id=turn.execution_id,
-                rate_seen=turn.rate_seen,
+                turn=turn,
             )
         except BaseException as exc:
             failure = exc
@@ -981,6 +990,8 @@ class ClaudeCodeAdapter:
                     execution_id=turn.execution_id,
                     failure=reported_failure,
                     cleanup_confirmed=False,
+                    rate_seen=turn.rate_seen,
+                    rate_safe=turn.rate_safe,
                     result_text=None if snapshot is None else snapshot.result_text,
                 )
             elif turn.interrupt_ambiguous:
@@ -994,17 +1005,21 @@ class ClaudeCodeAdapter:
                         category="adapter",
                     ),
                     cleanup_confirmed=True,
+                    rate_seen=turn.rate_seen,
+                    rate_safe=turn.rate_safe,
                     result_text=None if snapshot is None else snapshot.result_text,
                 )
             elif turn.interrupted and snapshot is None:
                 session.snapshot = _terminal_snapshot(
                     session.context,
                     session_id=session.snapshot.external_session_id,
-                    execution_id=f"claude-turn-{turn.execution_id}",
+                    execution_id=turn.execution_id,
                     execution_state="interrupted",
                     error=AdapterFailure(
                         "INTERRUPTED", "cancelled", False, "Claude turn interrupted"
                     ),
+                    rate_seen=turn.rate_seen,
+                    rate_safe=turn.rate_safe,
                 )
             elif failure is not None:
                 session.snapshot = _failed_snapshot(
@@ -1013,6 +1028,8 @@ class ClaudeCodeAdapter:
                     execution_id=turn.execution_id,
                     failure=failure,
                     cleanup_confirmed=True,
+                    rate_seen=turn.rate_seen,
+                    rate_safe=turn.rate_safe,
                 )
             else:
                 assert snapshot is not None
@@ -1033,7 +1050,7 @@ class ClaudeCodeAdapter:
         rate_session_id: str | None = None
         rate_seen = False
         buffered: list[Any] = []
-        while session_id is None or not rate_seen:
+        while session_id is None:
             message = await asyncio.wait_for(messages.__anext__(), timeout=self._canary_timeout)
             if isinstance(message, (AssistantMessage, ResultMessage)):
                 buffered.append(message)
@@ -1081,7 +1098,7 @@ class ClaudeCodeAdapter:
                     )
                 rate_session_id = candidate
                 rate_seen = True
-        if rate_session_id != session_id:
+        if rate_seen and rate_session_id != session_id:
             await _interrupt_or_recovery(
                 client,
                 AdapterFailure(
@@ -1102,7 +1119,7 @@ class ClaudeCodeAdapter:
         context: ResolvedContext,
         session_id: str,
         external_execution_id: str,
-        rate_seen: bool,
+        turn: _ManagedTurn,
     ) -> AdapterSnapshot:
         from claude_agent_sdk import (
             AssistantMessage,
@@ -1122,10 +1139,23 @@ class ClaudeCodeAdapter:
                 else await asyncio.wait_for(pending, timeout=self._turn_timeout)
             )
             if isinstance(message, RateLimitEvent):
+                if message.session_id != session_id:
+                    await _interrupt_or_recovery(
+                        client,
+                        AdapterFailure(
+                            "CONTEXT_DRIFT",
+                            "adapter",
+                            False,
+                            "Claude rate status did not match the native session",
+                        ),
+                        self._canary_timeout,
+                    )
+                turn.rate_seen = True
                 unsafe = _unsafe_rate(message.rate_limit_info)
                 if unsafe is not None:
+                    turn.rate_safe = False
                     await _interrupt_or_recovery(client, unsafe, self._canary_timeout)
-                rate_seen = True
+                turn.rate_safe = True
                 continue
             if isinstance(message, AssistantMessage):
                 if message.error is not None:
@@ -1150,7 +1180,7 @@ class ClaudeCodeAdapter:
             elif isinstance(message, ResultMessage):
                 if message.session_id != session_id:
                     raise ServiceError("CONTEXT_DRIFT", "Claude terminal session changed")
-                if not rate_seen:
+                if not turn.rate_seen:
                     raise ServiceError(
                         "CAPABILITY_MISSING",
                         "Claude task response did not publish exact rate status",
@@ -1166,7 +1196,7 @@ class ClaudeCodeAdapter:
                 return _terminal_snapshot(
                     context,
                     session_id=session_id,
-                    execution_id=f"claude-turn-{external_execution_id}",
+                    execution_id=external_execution_id,
                     execution_state="succeeded",
                     result_text=result_text,
                 )
@@ -1620,10 +1650,25 @@ def _running_snapshot(
     *,
     session_id: str,
     execution_id: str,
+    rate_seen: bool,
 ) -> AdapterSnapshot:
+    evidence: dict[str, Any] = {
+        "source": "claude-code-managed-sdk",
+        "background_lifecycle": True,
+        "quota_guard": "exact-task-response-and-live-monitor",
+        "rate_evidence_seen": rate_seen,
+        "cleanup_confirmed": False,
+    }
+    if rate_seen:
+        evidence.update(
+            {
+                "is_using_overage": False,
+                "overage_blocked": True,
+            }
+        )
     return AdapterSnapshot(
         external_session_id=session_id,
-        external_execution_id=f"claude-turn-{execution_id}",
+        external_execution_id=execution_id,
         conversation_state="active",
         execution_state="running",
         effective_model=context.effective_model,
@@ -1631,15 +1676,7 @@ def _running_snapshot(
         workspace_path=context.workspace_path,
         workspace_key=context.workspace_key,
         context_hash=context.context_hash,
-        evidence={
-            "source": "claude-code-managed-sdk",
-            "background_lifecycle": True,
-            "quota_guard": "exact-task-response-and-live-monitor",
-            "rate_evidence_seen": True,
-            "is_using_overage": False,
-            "overage_blocked": True,
-            "cleanup_confirmed": False,
-        },
+        evidence=evidence,
     )
 
 
@@ -1650,6 +1687,8 @@ def _failed_snapshot(
     execution_id: str,
     failure: BaseException,
     cleanup_confirmed: bool,
+    rate_seen: bool,
+    rate_safe: bool | None,
     result_text: str | None = None,
 ) -> AdapterSnapshot:
     if isinstance(failure, ServiceError):
@@ -1666,9 +1705,23 @@ def _failed_snapshot(
             False,
             f"Claude terminal turn outcome is ambiguous ({type(failure).__name__})",
         )
+    evidence: dict[str, Any] = {
+        "source": "claude-code-managed-sdk",
+        "background_lifecycle": True,
+        "quota_guard": "exact-task-response-and-live-monitor",
+        "rate_evidence_seen": rate_seen,
+        "cleanup_confirmed": cleanup_confirmed,
+    }
+    if rate_safe is True:
+        evidence.update(
+            {
+                "is_using_overage": False,
+                "overage_blocked": True,
+            }
+        )
     return AdapterSnapshot(
         external_session_id=session_id,
-        external_execution_id=f"claude-turn-{execution_id}",
+        external_execution_id=execution_id,
         conversation_state="idle",
         execution_state="failed",
         effective_model=context.effective_model,
@@ -1678,15 +1731,7 @@ def _failed_snapshot(
         context_hash=context.context_hash,
         result_text=result_text,
         error=error,
-        evidence={
-            "source": "claude-code-managed-sdk",
-            "background_lifecycle": True,
-            "quota_guard": "exact-task-response-and-live-monitor",
-            "rate_evidence_seen": error.code not in {"CAPABILITY_MISSING", "CONTEXT_DRIFT"},
-            "is_using_overage": False,
-            "overage_blocked": True,
-            "cleanup_confirmed": cleanup_confirmed,
-        },
+        evidence=evidence,
     )
 
 
@@ -1698,7 +1743,23 @@ def _terminal_snapshot(
     execution_state: str,
     result_text: str | None = None,
     error: AdapterFailure | None = None,
+    rate_seen: bool = True,
+    rate_safe: bool | None = True,
 ) -> AdapterSnapshot:
+    evidence: dict[str, Any] = {
+        "source": "claude-code-managed-sdk",
+        "background_lifecycle": True,
+        "quota_guard": "exact-task-response-and-live-monitor",
+        "rate_evidence_seen": rate_seen,
+        "cleanup_confirmed": True,
+    }
+    if rate_safe is True:
+        evidence.update(
+            {
+                "is_using_overage": False,
+                "overage_blocked": True,
+            }
+        )
     return AdapterSnapshot(
         external_session_id=session_id,
         external_execution_id=execution_id,
@@ -1711,15 +1772,7 @@ def _terminal_snapshot(
         context_hash=context.context_hash,
         result_text=result_text,
         error=error,
-        evidence={
-            "source": "claude-code-managed-sdk",
-            "background_lifecycle": True,
-            "quota_guard": "exact-task-response-and-live-monitor",
-            "rate_evidence_seen": True,
-            "is_using_overage": False,
-            "overage_blocked": True,
-            "cleanup_confirmed": True,
-        },
+        evidence=evidence,
     )
 
 

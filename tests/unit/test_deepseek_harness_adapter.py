@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import replace
 from pathlib import Path
 import sys
@@ -22,10 +23,12 @@ from subagent_harness_mcp.adapters.deepseek_harness import (
     DshLaunch,
     _StdioAcpClient,
     _bounded_result,
+    _dsh_pair_key,
     _windows_process_inventory,
     render_dsh_config,
     _node_path,
     _dsh_env,
+    _file_identity,
     _source_root,
 )
 from subagent_harness_mcp.contracts import ServiceError, TaskPacket
@@ -84,8 +87,10 @@ class _FakeAcpClient:
 def _binding(tmp_path: Path) -> DshBinding:
     node = tmp_path / "node.exe"
     binary = tmp_path / "bin.js"
-    node.write_bytes(b"node")
-    binary.write_bytes(b"acp")
+    if not node.exists():
+        node.write_bytes(b"node")
+    if not binary.exists():
+        binary.write_bytes(b"acp")
     plugins: dict[str, Path] = {}
     for name in (
         "settings-file",
@@ -109,9 +114,12 @@ def _binding(tmp_path: Path) -> DshBinding:
     ):
         plugin = tmp_path / "plugins" / name / "lib" / "index.js"
         plugin.parent.mkdir(parents=True, exist_ok=True)
-        plugin.write_bytes(name.encode())
+        if not plugin.exists():
+            plugin.write_bytes(name.encode())
         plugins[name] = plugin
-    return DshBinding(node, binary, plugins, "0.1.1-rc.2", "pair-1")
+    version = "0.1.1-rc.2"
+    pair_key = _dsh_pair_key(node, binary, plugins, version)
+    return DshBinding(node, binary, plugins, version, pair_key)
 
 
 def _context_request(workspace: Path, **overrides: object) -> AdapterContextRequest:
@@ -135,8 +143,9 @@ def _context_request(workspace: Path, **overrides: object) -> AdapterContextRequ
 def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
+    binding = _binding(tmp_path)
     adapter = DeepSeekHarnessAdapter(
-        binding_locator=lambda: _binding(tmp_path),
+        binding_locator=lambda: binding,
         data_root=tmp_path / "data",
     )
 
@@ -145,7 +154,7 @@ def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None
 
     assert probe.state == "ready"
     assert probe.details == {
-        "pair_key": "pair-1",
+        "pair_key": binding.pair_key,
         "harness_version": "0.1.1-rc.2",
         "transport": "native-acp",
     }
@@ -575,6 +584,63 @@ def test_acp_wire_error_preserves_terminal_quota_detail_for_classification(
     asyncio.run(scenario())
 
 
+def test_acp_close_retries_after_partial_teardown_failure(tmp_path: Path) -> None:
+    class _Stdin:
+        def __init__(self) -> None:
+            self.close_calls = 0
+
+        def close(self) -> None:
+            self.close_calls += 1
+
+        async def wait_closed(self) -> None:
+            return None
+
+    class _Process:
+        def __init__(self) -> None:
+            self.returncode = None
+            self.stdin = _Stdin()
+            self.wait_calls = 0
+
+        async def wait(self) -> int:
+            self.wait_calls += 1
+            if self.wait_calls == 1:
+                raise RuntimeError("process wait failed")
+            self.returncode = 0
+            return 0
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate should not be needed")
+
+        def kill(self) -> None:
+            raise AssertionError("kill should not be needed")
+
+    async def scenario() -> None:
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            tmp_path / "persistence",
+            tmp_path / "config.yml",
+        )
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        process = _Process()
+        client._process = process
+
+        with pytest.raises(RuntimeError, match="process wait failed"):
+            await client.close()
+        assert client._closed is False
+
+        await client.close()
+
+        assert client._closed is True
+        assert process.wait_calls == 2
+        assert process.stdin.close_calls == 2
+
+    asyncio.run(scenario())
+
+
 def test_acp_prompt_uses_the_long_turn_budget_not_the_operation_budget(
     tmp_path: Path,
 ) -> None:
@@ -714,7 +780,90 @@ def test_adapter_closes_provider_process_after_turn_timeout(
         assert snapshot.execution_state == "failed"
         assert snapshot.error is not None
         assert snapshot.error.code == "RECOVERY_REQUIRED"
+        assert snapshot.evidence["cleanup_confirmed"] is True
         assert clients[0].cancelled == ["dsh-session-1"]
+        assert clients[0].closed is True
+
+    asyncio.run(scenario())
+
+
+def test_turn_timeout_marks_cleanup_unconfirmed_when_close_fails(
+    tmp_path: Path,
+) -> None:
+    class CloseFailsAcpClient(_FakeAcpClient):
+        def __init__(self, launch: DshLaunch) -> None:
+            super().__init__(launch)
+            self.close_calls = 0
+
+        async def close(self) -> None:
+            self.close_calls += 1
+            if self.close_calls == 1:
+                raise RuntimeError("ACP close failed")
+            await super().close()
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[CloseFailsAcpClient] = []
+
+        def factory(launch: DshLaunch) -> CloseFailsAcpClient:
+            client = CloseFailsAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=0.1,
+            turn_timeout_seconds=0.01,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-close-fails",
+                "execution-close-fails",
+                TaskPacket(
+                    title="Timeout review",
+                    prompt="Keep working until the local deadline.",
+                    acceptance_criteria=("Stop safely",),
+                    role="reviewer",
+                ),
+                context,
+            )
+        )
+
+        for _ in range(50):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-close-fails",
+                    "execution-close-fails",
+                    "dsh-session-1",
+                    "execution-close-fails",
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0.005)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "RECOVERY_REQUIRED"
+        assert snapshot.evidence["cleanup_confirmed"] is False
+        assert clients[0].closed is False
+        closed = await adapter.close(
+            AdapterSessionRequest(
+                "conversation-close-fails",
+                "execution-close-fails",
+                "dsh-session-1",
+                "execution-close-fails",
+            )
+        )
+        assert closed.conversation_state == "closed"
+        assert closed.evidence["process_closed"] is True
+        assert closed.evidence["cleanup_confirmed"] is True
+        assert clients[0].close_calls == 2
         assert clients[0].closed is True
 
     asyncio.run(scenario())
@@ -948,15 +1097,201 @@ def test_source_locator_infers_checkout_from_native_dsh_profile_link(
     assert _source_root() == source_root.resolve()
 
 
-def test_native_dsh_auth_environment_is_inherited_without_persistence(
+def test_native_dsh_child_environment_excludes_ambient_credentials(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("PATH", r"C:\\Windows\\System32")
+    monkeypatch.setenv("SystemRoot", r"C:\\Windows")
+    monkeypatch.setenv("TEMP", r"C:\\Temp")
+    monkeypatch.setenv("USERPROFILE", r"C:\\Users\\operator")
+    monkeypatch.setenv("DSH_HOME", r"C:\\Users\\operator\\.dsh")
+    monkeypatch.setenv("SSL_CERT_FILE", r"C:\\Trust\\corporate.pem")
+    monkeypatch.setenv("HTTPS_PROXY", "http://private-proxy:8080")
     monkeypatch.setenv("DEEPSEEK_API_KEY", "configured-by-user")
     monkeypatch.setenv("OX_PROVIDER_API_KEY", "configured-by-user")
+    monkeypatch.setenv("DATABASE_URL", "postgres://private")
+    monkeypatch.setenv("SESSION_COOKIE", "private-cookie")
+    monkeypatch.setenv("SERVICE_JWT", "private-jwt")
+    monkeypatch.setenv("GITHUB_TOKEN", "private-token")
+    monkeypatch.setenv("NODE_OPTIONS", "--require=C:\\private\\hook.js")
+    monkeypatch.setenv("PSModulePath", r"C:\\private\\modules")
+    monkeypatch.setenv("DSH_BUNDLED_SKILL_DIR", r"C:\\private\\skills")
+    monkeypatch.setenv("DSH_TEST_SECRET", "private-dsh-secret")
+    monkeypatch.setenv("SUBAGENT_MCP_DSH_SECRET", "private-controller-secret")
 
     env = _dsh_env("read-only")
+    normalized = {name.upper(): value for name, value in env.items()}
 
-    assert env["DEEPSEEK_API_KEY"] == "configured-by-user"
-    assert env["OX_PROVIDER_API_KEY"] == "configured-by-user"
-    assert env["DSH_PERMISSION_MODE"] == "read-only"
-    assert env["DSH_TELEMETRY_DISABLED"] == "1"
+    assert normalized["PATH"] == r"C:\\Windows\\System32"
+    assert normalized["SYSTEMROOT"] == r"C:\\Windows"
+    assert normalized["TEMP"] == r"C:\\Temp"
+    assert normalized["USERPROFILE"] == r"C:\\Users\\operator"
+    assert normalized["DSH_HOME"] == r"C:\\Users\\operator\\.dsh"
+    assert normalized["SSL_CERT_FILE"] == r"C:\\Trust\\corporate.pem"
+    for name in (
+        "DEEPSEEK_API_KEY",
+        "OX_PROVIDER_API_KEY",
+        "DATABASE_URL",
+        "SESSION_COOKIE",
+        "SERVICE_JWT",
+        "GITHUB_TOKEN",
+        "HTTPS_PROXY",
+        "NODE_OPTIONS",
+        "PSMODULEPATH",
+        "DSH_BUNDLED_SKILL_DIR",
+        "DSH_TEST_SECRET",
+        "SUBAGENT_MCP_DSH_SECRET",
+    ):
+        assert name not in normalized
+    assert normalized["DSH_PERMISSION_MODE"] == "read-only"
+    assert normalized["DSH_TELEMETRY_DISABLED"] == "1"
+
+
+def test_file_identity_changes_for_same_size_same_mtime_content_swap(
+    tmp_path: Path,
+) -> None:
+    executable = tmp_path / "entry.js"
+    executable.write_bytes(b"first-entry")
+    original = executable.stat()
+    before = _file_identity(executable)
+
+    executable.write_bytes(b"other-entry")
+    os.utime(executable, ns=(original.st_atime_ns, original.st_mtime_ns))
+    after = _file_identity(executable)
+
+    assert before["path"] == after["path"]
+    assert before["size"] == after["size"]
+    assert before["mtime_ns"] == after["mtime_ns"]
+    assert before["sha256"] != after["sha256"]
+
+
+def test_acp_boots_from_product_state_not_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / ".env").write_text("DATABASE_URL=private\n", encoding="utf-8")
+        state = tmp_path / "product-state"
+        state.mkdir()
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(workspace),
+            "read-only",
+            state / "sessions",
+            state / "cordis.yml",
+        )
+        captured: dict[str, object] = {}
+
+        async def create_process(*args: object, **kwargs: object) -> object:
+            captured.update(kwargs)
+            return object()
+
+        async def no_io() -> None:
+            return None
+
+        async def request(*args: object, **kwargs: object) -> object:
+            return {}
+
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+        monkeypatch.setattr(client, "_read_stdout", no_io)
+        monkeypatch.setattr(client, "_drain_stderr", no_io)
+        monkeypatch.setattr(client, "_request", request)
+
+        await client.start()
+
+        assert Path(str(captured["cwd"])) == state
+        assert Path(str(captured["cwd"])) != workspace
+
+    asyncio.run(scenario())
+
+
+def test_acp_revalidates_binding_before_process_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        binding = _binding(tmp_path)
+        original = binding.node_path.stat()
+        binding.node_path.write_bytes(b"evil")
+        os.utime(
+            binding.node_path,
+            ns=(original.st_atime_ns, original.st_mtime_ns),
+        )
+        state = tmp_path / "state"
+        state.mkdir()
+        launch = DshLaunch(
+            binding,
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            state / "sessions",
+            state / "cordis.yml",
+        )
+        launched = False
+
+        async def create_process(*args: object, **kwargs: object) -> object:
+            nonlocal launched
+            launched = True
+            return object()
+
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+
+        with pytest.raises(ServiceError) as captured:
+            await client.start()
+
+        assert captured.value.code == "CONTEXT_DRIFT"
+        assert launched is False
+
+    asyncio.run(scenario())
+
+
+def test_acp_holds_launch_files_read_only_through_process_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        binding = _binding(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        launch = DshLaunch(
+            binding,
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            state / "sessions",
+            state / "cordis.yml",
+        )
+        swap_blocked = False
+
+        async def create_process(*args: object, **kwargs: object) -> object:
+            nonlocal swap_blocked
+            with pytest.raises(OSError):
+                binding.node_path.write_bytes(b"evil")
+            swap_blocked = True
+            return object()
+
+        async def no_io() -> None:
+            return None
+
+        async def request(*args: object, **kwargs: object) -> object:
+            return {}
+
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+        monkeypatch.setattr(client, "_read_stdout", no_io)
+        monkeypatch.setattr(client, "_drain_stderr", no_io)
+        monkeypatch.setattr(client, "_request", request)
+
+        await client.start()
+
+        assert swap_blocked is True
+
+    asyncio.run(scenario())

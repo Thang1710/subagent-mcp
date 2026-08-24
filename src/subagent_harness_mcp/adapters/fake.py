@@ -176,7 +176,7 @@ class FakeAdapter:
         snapshot = _snapshot_for_outcome(
             request.context,
             external_session_id=session_id,
-            external_execution_id=f"fake-execution-{request.execution_id}",
+            external_execution_id=request.execution_id,
             outcome=self._harness._next_outcome(),
         )
         self._harness._sessions[session_id] = _FakeSession(request.context, snapshot)
@@ -192,7 +192,7 @@ class FakeAdapter:
         snapshot = _snapshot_for_outcome(
             session.context,
             external_session_id=request.external_session_id,
-            external_execution_id=f"fake-execution-{request.execution_id}",
+            external_execution_id=request.execution_id,
             outcome=self._harness._next_outcome(),
         )
         session.snapshot = snapshot

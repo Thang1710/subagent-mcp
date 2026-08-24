@@ -16,15 +16,22 @@ jobs:
     runs-on: windows-latest
     env:
       UV_PROJECT_ENVIRONMENT: .preview/runtime/release
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Validate release tag input
+        shell: pwsh
+        run: |
+          if ($env:RELEASE_TAG -cnotmatch '^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:(?:a|b|rc)(?:0|[1-9]\d*))?$') {
+            throw "release tag has an unsupported format"
+          }
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ env.RELEASE_TAG }}
           fetch-depth: 0
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.10"
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@7edac99f961f18b581bbd960d59d049f04c0002f # v6.4.1
         with:
           version: "0.11.14"
           enable-cache: true
@@ -34,9 +41,9 @@ jobs:
           $versionMatches = @(Select-String -Path pyproject.toml -Pattern '^version = "([^"]+)"$')
           if ($versionMatches.Count -ne 1) { throw "project version is missing or ambiguous" }
           $version = $versionMatches[0].Matches[0].Groups[1].Value
-          if ("v$version" -ne "${{ inputs.tag }}") { throw "tag does not match project version" }
+          if ("v$version" -ne $env:RELEASE_TAG) { throw "tag does not match project version" }
           $tags = @(git tag --points-at HEAD)
-          if ($tags -notcontains "${{ inputs.tag }}") { throw "checkout is not the requested tag" }
+          if ($tags -notcontains $env:RELEASE_TAG) { throw "checkout is not the requested tag" }
       - name: Sync, build, and verify deterministic release inputs
         shell: pwsh
         run: |
@@ -74,10 +81,14 @@ jobs:
           manifest = {"schema_version": 1, "distribution": "subagent-harness-mcp", "version": version, "artifacts": records}
           manifest_path = root / "release-manifest.json"
           manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8", newline="\n")
-          checksum_records = records + [{"file": manifest_path.name, "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()}]
+          checksum_records = [
+              {"file": f"packages/{item['file']}", "sha256": item["sha256"]}
+              for item in records
+          ]
+          checksum_records.append({"file": manifest_path.name, "sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest()})
           (root / "SHA256SUMS.txt").write_text("".join(f"{item['sha256']}  {item['file']}\n" for item in checksum_records), encoding="utf-8", newline="\n")
           '@ | uv run --frozen python -
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: subagent-harness-mcp-${{ inputs.tag }}
           path: dist/**
@@ -92,12 +103,15 @@ jobs:
       contents: write
       id-token: write
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: subagent-harness-mcp-${{ inputs.tag }}
           path: dist
+      - name: Verify release artifact checksums
+        working-directory: dist
+        run: sha256sum --check --strict SHA256SUMS.txt
       - name: Publish with PyPI trusted publishing
-        uses: pypa/gh-action-pypi-publish@release/v1
+        uses: pypa/gh-action-pypi-publish@a892a5a61159132606e93a2fa6f4358831b04d26 # v1.14.2
         with:
           packages-dir: dist/packages/
       - name: Publish matching GitHub release

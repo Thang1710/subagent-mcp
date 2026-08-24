@@ -9,9 +9,10 @@ import os
 import re
 import shutil
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Iterable, Iterator, Mapping, Protocol, Sequence
 
 from .. import __version__
 from ..contracts import ADAPTER_API_VERSION, AdapterManifest, ServiceError
@@ -63,6 +64,48 @@ _PACKAGES = {
     "tool-fs": "@deepseek-ai/dsh-tool-fs",
     "tool-pwsh": "@deepseek-ai/dsh-tool-pwsh",
 }
+_DSH_CHILD_ENV_NAMES = frozenset(
+    {
+        # Windows process, profile, and temporary-directory discovery.
+        "ALLUSERSPROFILE",
+        "APPDATA",
+        "COMSPEC",
+        "HOME",
+        "HOMEDRIVE",
+        "HOMEPATH",
+        "LOCALAPPDATA",
+        "PATH",
+        "PATHEXT",
+        "PROGRAMDATA",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "PROGRAMW6432",
+        "PUBLIC",
+        "SYSTEMDRIVE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERNAME",
+        "USERPROFILE",
+        "WINDIR",
+        # Native-harness configuration and model-visible skill discovery.
+        "DSH_AGENTS_HOME",
+        "DSH_HOME",
+        # Explicit certificate trust. Provider and proxy credentials stay DSH-owned.
+        "CURL_CA_BUNDLE",
+        "NODE_EXTRA_CA_CERTS",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        # Locale and terminal behavior do not carry authentication authority.
+        "COLORTERM",
+        "LANG",
+        "LC_ALL",
+        "NO_COLOR",
+        "TERM",
+        "TZ",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,7 +509,12 @@ class DeepSeekHarnessAdapter:
             context_hash=current.context_hash,
             result_text=current.result_text,
             error=current.error,
-            evidence={"source": "deepseek-harness-native-acp", "process_closed": True},
+            evidence={
+                **dict(current.evidence),
+                "source": "deepseek-harness-native-acp",
+                "process_closed": True,
+                "cleanup_confirmed": True,
+            },
         )
         return session.snapshot
 
@@ -603,6 +651,7 @@ class DeepSeekHarnessAdapter:
                             else "DeepSeek ACP turn timed out and process cleanup was not confirmed"
                         ),
                     ),
+                    cleanup_confirmed=bool(timeout_cleanup_confirmed),
                 )
                 return
             if turn.interrupted:
@@ -707,37 +756,59 @@ class _StdioAcpClient:
         self._next_id = 1
         self._pending: dict[int, asyncio.Future[Any]] = {}
         self._buffers: dict[str, list[str]] = {}
+        self._close_lock = asyncio.Lock()
         self._closed = False
 
     async def start(self) -> None:
         if self._process is not None:
             raise RuntimeError("ACP client already started")
         env = _dsh_env(self._launch.permission_mode)
-        self._process = await asyncio.create_subprocess_exec(
-            str(self._launch.binding.node_path),
-            str(self._launch.binding.acp_bin_path),
-            "--config",
-            str(self._launch.config_path),
-            cwd=self._launch.workspace_path,
-            env=env,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=MAX_WIRE_LINE_BYTES + 1,
-        )
-        self._reader_task = asyncio.create_task(self._read_stdout())
-        self._stderr_task = asyncio.create_task(self._drain_stderr())
-        result = await asyncio.wait_for(
-            self._request(
-                "initialize",
-                {
-                    "protocolVersion": 1,
-                    "clientCapabilities": {},
-                    "clientInfo": {"name": "subagent-mcp", "version": __version__},
-                },
-            ),
-            timeout=self._timeout,
-        )
+        with _locked_dsh_binding(self._launch.binding):
+            try:
+                pair_key = _dsh_pair_key(
+                    self._launch.binding.node_path,
+                    self._launch.binding.acp_bin_path,
+                    self._launch.binding.plugins,
+                    self._launch.binding.harness_version,
+                )
+            except OSError as exc:
+                raise ServiceError(
+                    "CONTEXT_DRIFT",
+                    "DeepSeek Harness launch files changed before process start",
+                ) from exc
+            if pair_key != self._launch.binding.pair_key:
+                raise ServiceError(
+                    "CONTEXT_DRIFT",
+                    "DeepSeek Harness identity changed before process start",
+                )
+            self._process = await asyncio.create_subprocess_exec(
+                str(self._launch.binding.node_path),
+                str(self._launch.binding.acp_bin_path),
+                "--config",
+                str(self._launch.config_path),
+                cwd=str(self._launch.config_path.parent.resolve(strict=True)),
+                env=env,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=MAX_WIRE_LINE_BYTES + 1,
+            )
+            self._reader_task = asyncio.create_task(self._read_stdout())
+            self._stderr_task = asyncio.create_task(self._drain_stderr())
+            result = await asyncio.wait_for(
+                self._request(
+                    "initialize",
+                    {
+                        "protocolVersion": 1,
+                        "clientCapabilities": {},
+                        "clientInfo": {
+                            "name": "subagent-mcp",
+                            "version": __version__,
+                        },
+                    },
+                ),
+                timeout=self._timeout,
+            )
         if not isinstance(result, Mapping):
             raise RuntimeError("ACP initialize response is invalid")
 
@@ -772,9 +843,13 @@ class _StdioAcpClient:
         await self._notification("session/cancel", {"sessionId": session_id})
 
     async def close(self) -> None:
-        if self._closed:
-            return
-        self._closed = True
+        async with self._close_lock:
+            if self._closed:
+                return
+            await self._close_once()
+            self._closed = True
+
+    async def _close_once(self) -> None:
         process = self._process
         if process is not None and process.returncode is None:
             if process.stdin is not None:
@@ -1115,17 +1190,15 @@ def locate_dsh_binding() -> DshBinding | None:
         }
     except (OSError, KeyError, TypeError, ValueError, json.JSONDecodeError):
         return None
-    pair_payload = {
-        "version": version,
-        "node": _file_identity(node_path),
-        "bin": _file_identity(acp_bin),
-        "plugins": {
-            key: _file_identity(value) for key, value in sorted(resolved_plugins.items())
-        },
-    }
-    pair_key = hashlib.sha256(
-        json.dumps(pair_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
+    try:
+        pair_key = _dsh_pair_key(
+            node_path,
+            acp_bin,
+            resolved_plugins,
+            version,
+        )
+    except OSError:
+        return None
     return DshBinding(node_path, acp_bin, resolved_plugins, version, pair_key)
 
 
@@ -1330,7 +1403,11 @@ def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> b
 def _dsh_env(permission_mode: str) -> dict[str, str]:
     if permission_mode not in {"read-only", "workspace-write"}:
         raise ValueError("unsupported DeepSeek permission mode")
-    env = dict(os.environ)
+    env = {
+        name: value
+        for name, value in os.environ.items()
+        if name.upper() in _DSH_CHILD_ENV_NAMES
+    }
     env.update(
         {
             "DSH_PERMISSION_MODE": permission_mode,
@@ -1348,8 +1425,15 @@ def _snapshot(
     execution_state: str,
     result_text: str | None = None,
     error: AdapterFailure | None = None,
+    cleanup_confirmed: bool | None = None,
 ) -> AdapterSnapshot:
     conversation_state = "active" if execution_state == "running" else "idle"
+    evidence: dict[str, Any] = {
+        "source": "deepseek-harness-native-acp",
+        "connection_owned_session": True,
+    }
+    if cleanup_confirmed is not None:
+        evidence["cleanup_confirmed"] = cleanup_confirmed
     return AdapterSnapshot(
         external_session_id=session_id,
         external_execution_id=execution_id,
@@ -1362,10 +1446,7 @@ def _snapshot(
         context_hash=context.context_hash,
         result_text=result_text,
         error=error,
-        evidence={
-            "source": "deepseek-harness-native-acp",
-            "connection_owned_session": True,
-        },
+        evidence=evidence,
     )
 
 
@@ -1558,12 +1639,105 @@ def _package_entries(source_root: Path) -> dict[str, Path] | None:
 
 
 def _file_identity(path: Path) -> Mapping[str, Any]:
-    stat = path.stat()
+    with path.open("rb") as stream:
+        before = os.fstat(stream.fileno())
+        hasher = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            hasher.update(chunk)
+        digest = hasher.hexdigest()
+        after = os.fstat(stream.fileno())
+    current = path.stat()
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns")
+    if any(
+        getattr(before, field) != getattr(after, field)
+        or getattr(after, field) != getattr(current, field)
+        for field in stable_fields
+    ):
+        raise OSError(f"executable changed while hashing: {path}")
     return {
         "path": os.path.normcase(str(path)),
-        "size": stat.st_size,
-        "mtime_ns": stat.st_mtime_ns,
+        "size": current.st_size,
+        "mtime_ns": current.st_mtime_ns,
+        "sha256": digest,
     }
+
+
+def _dsh_pair_key(
+    node_path: Path,
+    acp_bin_path: Path,
+    plugins: Mapping[str, Path],
+    harness_version: str,
+) -> str:
+    payload = {
+        "version": harness_version,
+        "node": _file_identity(node_path),
+        "bin": _file_identity(acp_bin_path),
+        "plugins": {
+            key: _file_identity(value) for key, value in sorted(plugins.items())
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+@contextmanager
+def _locked_dsh_binding(binding: DshBinding) -> Iterator[None]:
+    if sys.platform != "win32":
+        yield
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    invalid_handle = ctypes.c_void_p(-1).value
+    paths = (
+        binding.node_path,
+        binding.acp_bin_path,
+        *(value for _, value in sorted(binding.plugins.items())),
+    )
+    handles: list[int] = []
+    try:
+        for path in paths:
+            handle = create_file(
+                str(path.resolve(strict=True)),
+                0x80000000,  # GENERIC_READ
+                0x00000001,  # FILE_SHARE_READ
+                None,
+                3,  # OPEN_EXISTING
+                0x00000080,  # FILE_ATTRIBUTE_NORMAL
+                None,
+            )
+            if handle == invalid_handle:
+                raise OSError(ctypes.get_last_error(), "CreateFileW failed")
+            handles.append(handle)
+    except OSError as exc:
+        for handle in reversed(handles):
+            close_handle(handle)
+        raise ServiceError(
+            "CONTEXT_DRIFT",
+            "DeepSeek Harness launch files could not be locked",
+        ) from exc
+    try:
+        yield
+    finally:
+        for handle in reversed(handles):
+            close_handle(handle)
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:

@@ -60,7 +60,12 @@ def create_server(service: object) -> MCPServer:
             "Respect model_policy.ordered_variants for future delegations. After an "
             "explicit QUOTA_PAUSED result, the failed delegation stays terminal; model "
             "priority changes apply only to future delegations, never an automatic retry "
-            "or model switch for the failed task. An ambiguous failure never proves quota. "
+            "or model switch for the failed task. Never infer or schedule a provider reset "
+            "time from a cached pause. Before a later user-requested future delegation, call "
+            "runtime_check(refresh_quota=true). If the provider state remains unknown because "
+            "the native harness exposes no stable pre-request balance endpoint, do not invent "
+            "exhaustion: one new explicit task is the live availability check. An ambiguous "
+            "failure never proves quota. "
             "Never silently abandon a failed delegation: inspect retryable, next_action, "
             "and recovery on every error before deciding anything. Perform at most the "
             "advertised recovery maximum and never more than three total retry, refresh, "
@@ -92,7 +97,7 @@ def create_server(service: object) -> MCPServer:
         refresh_quota: bool = False,
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Check locally by default; explicitly probe provider quota when requested."""
+        """Check locally by default; refresh asks the harness and never guesses reset time."""
 
         return await _invoke(
             "runtime_check",

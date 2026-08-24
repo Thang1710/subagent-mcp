@@ -25,6 +25,11 @@ raw transcript/tool output. Do not write the config/database, invent sessions,
 parse private daemon state, load repository MCP configuration, or target a
 process from PID alone.
 
+Every snapshot must preserve the controller `execution_id` exactly in
+`external_execution_id`. Put a provider-native turn identifier in bounded
+evidence when one exists; never replace the normalized controller identity or
+reuse a snapshot from another execution.
+
 An adapter that can bootstrap a live compatibility check may also implement
 `CanaryAdapter.runtime_canary`. A canary must bind the exact adapter/runtime
 identity and cannot mark another model, reasoning policy, or transport ready.

@@ -626,6 +626,7 @@ class _OutputBeforeRateClient(_UnsafeClient):
 class _ControlledLifecycleClient(_UnsafeClient):
     def __init__(self, options) -> None:
         super().__init__(options)
+        self.rate_session_id = "controlled-session"
         self.rate_release = asyncio.Event()
         self.terminal_release = asyncio.Event()
         self.disconnect_started = asyncio.Event()
@@ -658,7 +659,7 @@ class _ControlledLifecycleClient(_UnsafeClient):
                 raw={"isUsingOverage": False},
             ),
             uuid="controlled-rate",
-            session_id="controlled-session",
+            session_id=self.rate_session_id,
         )
         await self.terminal_release.wait()
         if self.interrupt_calls and not self.complete_during_interrupt:
@@ -707,6 +708,51 @@ class _ControlledLifecycleClient(_UnsafeClient):
             self.disconnect_failures -= 1
             raise RuntimeError("disconnect failed")
         await super().disconnect()
+
+
+class _NoRateLifecycleClient(_ControlledLifecycleClient):
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "controlled-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        await self.terminal_release.wait()
+        if self.interrupt_calls:
+            yield ResultMessage(
+                subtype="error_during_execution",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="controlled-session",
+                result="interrupted without rate evidence",
+                terminal_reason="aborted_streaming",
+                uuid="controlled-interrupted-without-rate",
+            )
+            return
+        yield AssistantMessage(
+            content=[TextBlock("must not be accepted")],
+            model="vendor/future-model",
+            session_id="controlled-session",
+        )
+        yield ResultMessage(
+            subtype="success",
+            duration_ms=1,
+            duration_api_ms=1,
+            is_error=False,
+            num_turns=1,
+            session_id="controlled-session",
+            result="must not be accepted",
+            terminal_reason="completed",
+            uuid="controlled-result-without-rate",
+        )
 
 
 async def _controlled_context(
@@ -826,7 +872,7 @@ def test_orphan_cleanup_rejects_changed_runtime_binding(tmp_path: Path) -> None:
     assert asyncio.run(run()) is False
 
 
-def test_spawn_returns_running_after_safe_rate_and_finishes_in_background(
+def test_spawn_returns_running_after_init_before_rate_and_finishes_in_background(
     tmp_path: Path,
 ) -> None:
     cli = tmp_path / "claude.exe"
@@ -864,15 +910,17 @@ def test_spawn_returns_running_after_safe_rate_and_finishes_in_background(
         while not clients:
             await asyncio.sleep(0)
         await asyncio.sleep(0)
-        assert spawn_task.done() is False
-        clients[0].rate_release.set()
         try:
             started = await asyncio.wait_for(asyncio.shield(spawn_task), timeout=0.1)
         except (TimeoutError, asyncio.TimeoutError):
+            clients[0].rate_release.set()
             clients[0].terminal_release.set()
             await spawn_task
-            pytest.fail("Claude spawn waited for the terminal model result")
+            pytest.fail("Claude spawn waited for rate evidence after native init")
         assert started.execution_state == "running"
+        assert started.evidence["rate_evidence_seen"] is False
+        assert "is_using_overage" not in started.evidence
+        assert "overage_blocked" not in started.evidence
         assert clients[0].disconnected is False
         request = AdapterSessionRequest(
             "conversation-controlled",
@@ -880,6 +928,7 @@ def test_spawn_returns_running_after_safe_rate_and_finishes_in_background(
             started.external_session_id,
             started.external_execution_id,
         )
+        clients[0].rate_release.set()
         clients[0].terminal_release.set()
         finished = await asyncio.wait_for(
             _terminal_adapter_snapshot(adapter, request), timeout=1
@@ -891,6 +940,118 @@ def test_spawn_returns_running_after_safe_rate_and_finishes_in_background(
     assert started.external_session_id == "controlled-session"
     assert finished.execution_state == "succeeded"
     assert finished.result_text == "controlled result"
+    assert clients[0].disconnected is True
+
+
+def test_terminal_result_without_rate_evidence_is_rejected_after_running_start(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_NoRateLifecycleClient] = []
+
+    def factory(options):
+        client = _NoRateLifecycleClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-no-rate",
+                "execution-no-rate",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        request = AdapterSessionRequest(
+            "conversation-no-rate",
+            "execution-no-rate",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        clients[0].terminal_release.set()
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
+
+    started, finished = asyncio.run(run())
+
+    assert started.execution_state == "running"
+    assert finished.execution_state == "failed"
+    assert finished.result_text is None
+    assert finished.error is not None
+    assert finished.error.code == "CAPABILITY_MISSING"
+    assert clients[0].disconnected is True
+
+
+def test_late_rate_event_must_match_the_initialized_native_session(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_ControlledLifecycleClient] = []
+
+    def factory(options):
+        client = _ControlledLifecycleClient(options)
+        client.rate_session_id = "different-session"
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-rate-drift",
+                "execution-rate-drift",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        request = AdapterSessionRequest(
+            "conversation-rate-drift",
+            "execution-rate-drift",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        clients[0].rate_release.set()
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
+
+    started, finished = asyncio.run(run())
+
+    assert started.execution_state == "running"
+    assert finished.execution_state == "failed"
+    assert finished.result_text is None
+    assert finished.error is not None
+    assert finished.error.code == "CONTEXT_DRIFT"
+    assert clients[0].interrupt_calls == 1
     assert clients[0].disconnected is True
 
 
@@ -947,6 +1108,58 @@ def test_interrupt_stops_a_running_background_claude_turn(tmp_path: Path) -> Non
     interrupted = asyncio.run(run())
 
     assert interrupted.execution_state == "interrupted"
+    assert clients[0].interrupt_calls == 1
+    assert clients[0].disconnected is True
+
+
+def test_interrupt_before_rate_does_not_fabricate_safe_quota_evidence(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_NoRateLifecycleClient] = []
+
+    def factory(options):
+        client = _NoRateLifecycleClient(options)
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-interrupt-no-rate",
+                "execution-interrupt-no-rate",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
+            )
+        )
+        return await adapter.interrupt(
+            AdapterSessionRequest(
+                "conversation-interrupt-no-rate",
+                "execution-interrupt-no-rate",
+                started.external_session_id,
+                started.external_execution_id,
+            )
+        )
+
+    interrupted = asyncio.run(run())
+
+    assert interrupted.execution_state == "interrupted"
+    assert interrupted.evidence["rate_evidence_seen"] is False
+    assert "is_using_overage" not in interrupted.evidence
+    assert "overage_blocked" not in interrupted.evidence
     assert clients[0].interrupt_calls == 1
     assert clients[0].disconnected is True
 
@@ -1207,20 +1420,36 @@ def test_output_before_unsafe_rate_is_never_accepted(tmp_path: Path) -> None:
 
     async def run():
         context = await _controlled_context(adapter, workspace)
-        with pytest.raises(ServiceError) as captured:
-            await adapter.spawn(
-                AdapterSpawnRequest(
-                    "conversation-unsafe-early-output",
-                    "execution-unsafe-early-output",
-                    TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
-                    context,
-                )
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-unsafe-early-output",
+                "execution-unsafe-early-output",
+                TaskPacket("Review", "Review only.", ("Return one result.",), "reviewer"),
+                context,
             )
-        return captured.value
+        )
+        request = AdapterSessionRequest(
+            "conversation-unsafe-early-output",
+            "execution-unsafe-early-output",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        finished = await asyncio.wait_for(
+            _terminal_adapter_snapshot(adapter, request), timeout=1
+        )
+        return started, finished
 
-    failure = asyncio.run(run())
+    started, finished = asyncio.run(run())
 
-    assert failure.code == "USAGE_CREDITS_FORBIDDEN"
+    assert started.execution_state == "running"
+    assert started.evidence["rate_evidence_seen"] is False
+    assert finished.execution_state == "failed"
+    assert finished.result_text is None
+    assert finished.error is not None
+    assert finished.error.code == "USAGE_CREDITS_FORBIDDEN"
+    assert finished.evidence["rate_evidence_seen"] is True
+    assert "is_using_overage" not in finished.evidence
+    assert "overage_blocked" not in finished.evidence
     assert clients[0].interrupt_calls == 1
     assert clients[0].disconnected is True
 

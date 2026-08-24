@@ -92,6 +92,7 @@ class ConfigStore:
         *,
         paused: bool,
         reason_code: str | None = None,
+        expected_reason_code: str | None = None,
     ) -> dict[str, Any]:
         """Persist one exact model's quota state and demote it when paused."""
 
@@ -101,6 +102,17 @@ class ConfigStore:
             raise ConfigError("CONFIG_INVALID", "paused must be boolean")
         if paused:
             _require_bounded_text(reason_code, "quota reason code", 128)
+        if expected_reason_code is not None:
+            if paused:
+                raise ConfigError(
+                    "CONFIG_INVALID",
+                    "expected quota reason is valid only when clearing a pause",
+                )
+            _require_bounded_text(
+                expected_reason_code,
+                "expected quota reason code",
+                128,
+            )
         try:
             with _PROCESS_CONFIG_LOCK:
                 with _exclusive_file_lock(
@@ -134,6 +146,15 @@ class ConfigStore:
                             variants.append(variants.pop(index))
                     else:
                         availability = variant.get("availability")
+                        if (
+                            expected_reason_code is not None
+                            and (
+                                not isinstance(availability, dict)
+                                or availability.get("reason_code")
+                                != expected_reason_code
+                            )
+                        ):
+                            return copy.deepcopy(current)
                         if (
                             isinstance(availability, dict)
                             and availability.get("state") == "quota_paused"

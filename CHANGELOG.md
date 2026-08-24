@@ -2,6 +2,25 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.8 - 2026-08-24
+
+- Recheck a previously quota-paused model on each later explicit delegation
+  instead of caching a reset time. Unknown provider state remains unknown and
+  never becomes inferred exhaustion.
+- Preserve native session ownership and writer leases across ambiguous startup,
+  cleanup, and controller-restart paths until cleanup is verified.
+- Redact additional credential and account-identity forms before external agent
+  output reaches public status, durable activity, or artifact relays.
+- Authenticate localhost UI control messages and reject forged start, stop, or
+  session-bootstrap requests while keeping the fixed loopback UI available.
+- Pin privileged release actions by commit and validate exact release tags
+  before checkout, build, PyPI publication, GitHub release, or registry publish.
+- Isolate DeepSeek Harness child environments and hold verified executable
+  identities across native ACP startup.
+- Normalize Windows extended-path aliases for writer leases and verify the
+  exact staged runtime tree before the stable PowerShell launcher executes
+  Python.
+
 ## 1.0.7 - 2026-08-23
 
 - Preserve explicit Claude quota/no-overage failures when a concurrent MCP or

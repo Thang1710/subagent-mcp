@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -301,6 +301,39 @@ def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:
 def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     release = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    registry_release = (
+        ROOT / ".github/workflows/publish-mcp-registry.yml"
+    ).read_text(encoding="utf-8")
+    dependabot = (ROOT / ".github/dependabot.yml").read_text(encoding="utf-8")
+    action_refs = re.findall(
+        r"^\s*(?:-\s+)?uses:\s+([^#\s]+)",
+        release,
+        re.MULTILINE,
+    )
+    registry_action_refs = re.findall(
+        r"^\s*(?:-\s+)?uses:\s+([^#\s]+)",
+        registry_release,
+        re.MULTILINE,
+    )
+    run_scripts: list[str] = []
+    lines = release.splitlines()
+    for index, line in enumerate(lines):
+        indent = len(line) - len(line.lstrip())
+        match = re.fullmatch(r"run:\s*(.*)", line.strip())
+        if match is None:
+            continue
+        scalar = match.group(1)
+        if not re.fullmatch(r"[|>][+-]?", scalar):
+            run_scripts.append(scalar)
+            continue
+        block: list[str] = []
+        for following in lines[index + 1 :]:
+            if following.strip():
+                following_indent = len(following) - len(following.lstrip())
+                if following_indent <= indent:
+                    break
+            block.append(following)
+        run_scripts.append("\n".join(block))
 
     assert 'not real_git_worktree' in ci
     assert "runtime_canary" not in ci
@@ -308,7 +341,26 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "environment: pypi" in release
     assert "id-token: write" in release
     assert "actions: write" in release
-    assert "pypa/gh-action-pypi-publish@release/v1" in release
+    assert len(action_refs) == 6
+    assert all(
+        re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action_ref)
+        for action_ref in action_refs
+    )
+    assert registry_action_refs
+    assert all(
+        re.fullmatch(r"[^@\s]+@[0-9a-f]{40}", action_ref)
+        for action_ref in registry_action_refs
+    )
+    assert any(
+        action_ref.startswith("pypa/gh-action-pypi-publish@")
+        for action_ref in action_refs
+    )
+    assert run_scripts
+    assert all("${{" not in script for script in run_scripts)
+    assert release.index("Validate release tag input") < release.index(
+        "actions/checkout@"
+    )
+    assert "$env:RELEASE_TAG" in release
     assert "GH_REPO: ${{ github.repository }}" in release
     assert "tomllib" not in release
     assert "Select-String -Path pyproject.toml" in release
@@ -316,10 +368,13 @@ def test_ci_and_release_workflows_are_deterministic_and_manual() -> None:
     assert "api-token:" not in release
     assert "release-manifest.json" in release
     assert "SHA256SUMS.txt" in release
+    assert "sha256sum --check --strict SHA256SUMS.txt" in release
     assert 'item.name.endswith((".whl", ".tar.gz"))' in release
     assert "gh workflow run publish-mcp-registry.yml" in release
     assert "--ref main" in release
     assert '-f tag="$RELEASE_TAG"' in release
+    assert "package-ecosystem: github-actions" in dependabot
+    assert "directory: /" in dependabot
 
 
 def test_source_import_is_lightweight_and_typed(tmp_path: Path) -> None:

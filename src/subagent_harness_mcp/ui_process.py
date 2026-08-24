@@ -25,6 +25,7 @@ CONTROL_HEADER = "X-Subagent-MCP-Control"
 CONTROL_CHALLENGE_HEADER = "X-Subagent-MCP-Challenge"
 CONTROL_PROOF_HEADER = "X-Subagent-MCP-Proof"
 CONTROL_OPEN_PATH = "/api/v1/control/open"
+CONTROL_STATUS_PATH = "/api/v1/control/status"
 CONTROL_STOP_PATH = "/api/v1/control/stop"
 _MAX_CONTROL_BYTES = 4096
 _WINDOWS_CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -70,6 +71,7 @@ Sleeper = Callable[[float], None]
 Clock = Callable[[], float]
 StopRequester = Callable[[_ControlRecord], None]
 OpenRequester = Callable[[_ControlRecord], str]
+ControlVerifier = Callable[[_ControlRecord], bool]
 BrowserOpener = Callable[[str], bool]
 
 
@@ -129,6 +131,30 @@ def control_open_response_proof(
     ).hex()
 
 
+def control_status_request_proof(token: str, challenge: str) -> str:
+    """Prove the caller knows the control secret without sending it."""
+
+    _require_token(token)
+    _require_challenge(challenge)
+    return hmac.digest(
+        token.encode("ascii"),
+        b"status-request\0" + challenge.encode("ascii"),
+        "sha256",
+    ).hex()
+
+
+def control_status_response_proof(token: str, challenge: str) -> str:
+    """Bind a managed-status response to the request and control secret."""
+
+    _require_token(token)
+    _require_challenge(challenge)
+    return hmac.digest(
+        token.encode("ascii"),
+        b"status-response\0" + challenge.encode("ascii"),
+        "sha256",
+    ).hex()
+
+
 def start_background_ui(
     paths: ProductPaths,
     *,
@@ -139,6 +165,7 @@ def start_background_ui(
     probe: Probe = probe_ui,
     sleeper: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
+    verify_control: ControlVerifier | None = None,
     timeout_seconds: float = 10.0,
     platform: str | None = None,
 ) -> BackgroundUiResult:
@@ -151,9 +178,19 @@ def start_background_ui(
             "background UI requires a fixed loopback port",
         )
     _require_port(port)
-    if probe(port):
-        current = status_background_ui(paths, port=port, probe=probe)
-        return BackgroundUiResult(False, True, current.managed, port, current.pid)
+    current = status_background_ui(
+        paths,
+        port=port,
+        probe=probe,
+        verify_control=verify_control,
+    )
+    if current.running:
+        if not current.managed:
+            raise UiProcessError(
+                "UI_UNMANAGED",
+                "a foreground or unrelated UI owns the requested port",
+            )
+        return current
     if timeout_seconds <= 0:
         raise UiProcessError("UI_START_INVALID", "background startup timeout is invalid")
 
@@ -191,8 +228,26 @@ def start_background_ui(
 
     deadline = clock() + timeout_seconds
     while clock() < deadline:
-        if probe(port):
-            return BackgroundUiResult(True, True, True, port, int(child.pid))
+        current = status_background_ui(
+            paths,
+            port=port,
+            probe=probe,
+            verify_control=verify_control,
+        )
+        if current.running:
+            if current.managed and current.pid == int(child.pid):
+                return BackgroundUiResult(True, True, True, port, int(child.pid))
+            try:
+                child.terminate()
+                child.wait(timeout=3)
+            except (OSError, subprocess.SubprocessError):
+                pass
+            if current.managed:
+                return current
+            raise UiProcessError(
+                "UI_UNMANAGED",
+                "a foreground or unrelated UI owns the requested port",
+            )
         returncode = child.poll()
         if returncode is not None:
             raise UiProcessError(
@@ -213,6 +268,7 @@ def status_background_ui(
     *,
     port: int,
     probe: Probe = probe_ui,
+    verify_control: ControlVerifier | None = None,
 ) -> BackgroundUiResult:
     _require_paths(paths)
     _require_port(port)
@@ -223,6 +279,9 @@ def status_background_ui(
     except FileNotFoundError:
         return BackgroundUiResult(False, True, False, port, None)
     if record.port != port:
+        return BackgroundUiResult(False, True, False, port, None)
+    verifier = _verify_control_identity if verify_control is None else verify_control
+    if not verifier(record):
         return BackgroundUiResult(False, True, False, port, None)
     return BackgroundUiResult(False, True, True, port, record.pid)
 
@@ -278,6 +337,7 @@ def stop_background_ui(
     port: int,
     probe: Probe = probe_ui,
     request_stop: StopRequester | None = None,
+    verify_control: ControlVerifier | None = None,
     sleeper: Sleeper = time.sleep,
     clock: Clock = time.monotonic,
     timeout_seconds: float = 5.0,
@@ -303,6 +363,12 @@ def stop_background_ui(
     if not probe(port):
         remove_control_record(paths.ui_control_file, record.payload)
         return BackgroundUiResult(True, False, True, port, record.pid)
+    verifier = _verify_control_identity if verify_control is None else verify_control
+    if not verifier(record):
+        raise UiProcessError(
+            "UI_UNMANAGED",
+            "a foreground or unrelated UI owns the requested port",
+        )
     if timeout_seconds <= 0:
         raise UiProcessError("UI_STOP_INVALID", "background stop timeout is invalid")
 
@@ -395,6 +461,73 @@ def _request_stop(record: _ControlRecord) -> None:
         raise
     except (OSError, http.client.HTTPException) as exc:
         raise UiProcessError("UI_STOP_FAILED", "background UI stop request failed") from exc
+    finally:
+        connection.close()
+
+
+def _verify_control_identity(record: _ControlRecord) -> bool:
+    try:
+        _request_status(record)
+        return True
+    except UiProcessError:
+        return False
+
+
+def _request_status(record: _ControlRecord) -> None:
+    challenge = secrets.token_urlsafe(32)
+    request_proof = control_status_request_proof(record.token, challenge)
+    connection = http.client.HTTPConnection("127.0.0.1", record.port, timeout=2)
+    try:
+        connection.request(
+            "POST",
+            CONTROL_STATUS_PATH,
+            body=b"",
+            headers={
+                "Host": f"127.0.0.1:{record.port}",
+                "Origin": f"http://127.0.0.1:{record.port}",
+                CONTROL_CHALLENGE_HEADER: challenge,
+                CONTROL_PROOF_HEADER: request_proof,
+                "Content-Length": "0",
+            },
+        )
+        response = connection.getresponse()
+        payload = response.read(_MAX_CONTROL_BYTES + 1)
+        if response.status != 200 or not payload or len(payload) > _MAX_CONTROL_BYTES:
+            raise UiProcessError(
+                "UI_CONTROL_MISMATCH",
+                "the background UI control identity did not match",
+            )
+        try:
+            value = json.loads(
+                payload.decode("utf-8"), object_pairs_hook=_reject_duplicates
+            )
+        except (UnicodeError, json.JSONDecodeError, ValueError) as exc:
+            raise UiProcessError(
+                "UI_CONTROL_MISMATCH",
+                "the background UI control identity did not match",
+            ) from exc
+        proof = value.get("proof") if isinstance(value, Mapping) else None
+        if (
+            not isinstance(value, Mapping)
+            or set(value) != {"state", "proof"}
+            or value.get("state") != "managed"
+            or not _valid_control_proof(proof)
+            or not hmac.compare_digest(
+                proof,
+                control_status_response_proof(record.token, challenge),
+            )
+        ):
+            raise UiProcessError(
+                "UI_CONTROL_MISMATCH",
+                "the background UI control identity did not match",
+            )
+    except UiProcessError:
+        raise
+    except (OSError, http.client.HTTPException) as exc:
+        raise UiProcessError(
+            "UI_CONTROL_MISMATCH",
+            "the background UI control identity did not match",
+        ) from exc
     finally:
         connection.close()
 

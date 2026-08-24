@@ -17,7 +17,10 @@ from subagent_harness_mcp.ui_process import (
     CONTROL_HEADER,
     CONTROL_OPEN_PATH,
     CONTROL_PROOF_HEADER,
+    CONTROL_STATUS_PATH,
     CONTROL_STOP_PATH,
+    control_status_request_proof,
+    control_status_response_proof,
 )
 
 
@@ -126,6 +129,7 @@ def _open_session(server: LoopbackUiServer) -> tuple[str, str]:
     morsel = cookie["smcp_session"]
     assert morsel["httponly"] is True
     assert morsel["samesite"].casefold() == "strict"
+    assert morsel["max-age"] == "2592000"
     csrf = json.loads(body)["csrf_token"]
     return f"smcp_session={morsel.value}", csrf
 
@@ -346,6 +350,56 @@ def test_background_open_rotates_one_control_authenticated_bootstrap() -> None:
         assert thread.is_alive()
     finally:
         server.close()
+
+
+def test_control_status_proves_identity_without_rotating_the_bootstrap() -> None:
+    control_token = "managed-control-token-with-enough-entropy"
+    challenge = "status-challenge-with-enough-entropy"
+    server = _server(control_token=control_token)
+    original_bootstrap = _bootstrap_token(server)
+    server.start()
+    try:
+        rejected, _, _ = _request(
+            server,
+            "POST",
+            CONTROL_STATUS_PATH,
+            headers={
+                "Origin": server.origin,
+                CONTROL_CHALLENGE_HEADER: challenge,
+                CONTROL_PROOF_HEADER: "0" * 64,
+            },
+        )
+        accepted, _, body = _request(
+            server,
+            "POST",
+            CONTROL_STATUS_PATH,
+            headers={
+                "Origin": server.origin,
+                CONTROL_CHALLENGE_HEADER: challenge,
+                CONTROL_PROOF_HEADER: control_status_request_proof(
+                    control_token, challenge
+                ),
+            },
+        )
+        session, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/session",
+            headers={
+                "Origin": server.origin,
+                "X-Subagent-MCP-Token": original_bootstrap,
+            },
+        )
+    finally:
+        server.close()
+
+    assert rejected == 401
+    assert accepted == 200
+    assert json.loads(body) == {
+        "state": "managed",
+        "proof": control_status_response_proof(control_token, challenge),
+    }
+    assert session == 200
 
 
 def test_static_assets_have_restrictive_headers_and_no_cors() -> None:
@@ -683,25 +737,33 @@ def test_activity_detail_response_projects_only_safe_fields() -> None:
         assert sentinel not in body
 
 
-def test_managed_ui_direct_url_creates_its_first_browser_session() -> None:
-    server = _server(control_token="managed-control-token-with-enough-entropy")
+@pytest.mark.parametrize(
+    "control_token",
+    [None, "managed-control-token-with-enough-entropy"],
+)
+@pytest.mark.parametrize("cookie", [None, "smcp_session=stale-session"])
+def test_direct_url_cannot_create_or_replace_a_browser_session(
+    control_token: str | None,
+    cookie: str | None,
+) -> None:
+    server = _server(control_token=control_token)
     server.start()
     try:
+        request_headers = {"Origin": server.origin}
+        if cookie is not None:
+            request_headers["Cookie"] = cookie
         status, headers, body = _request(
             server,
             "POST",
             "/api/v1/session",
-            headers={"Origin": server.origin},
+            headers=request_headers,
         )
-        cookie = SimpleCookie()
-        cookie.load(headers.get("set-cookie", ""))
     finally:
         server.close()
 
-    assert status == 200
-    assert json.loads(body)["csrf_token"]
-    assert cookie["smcp_session"]["httponly"] is True
-    assert cookie["smcp_session"]["samesite"].casefold() == "strict"
+    assert status == 401
+    assert json.loads(body)["error"] == "SESSION_REQUIRED"
+    assert "set-cookie" not in headers
 
 
 def test_authorized_managed_tab_restores_its_existing_session() -> None:
@@ -729,27 +791,6 @@ def test_authorized_managed_tab_restores_its_existing_session() -> None:
     assert json.loads(restored_body) == {"csrf_token": csrf}
     assert "set-cookie" not in restored_headers
     assert snapshot == 200
-
-
-def test_foreground_ui_direct_url_creates_its_first_session() -> None:
-    server = _server()
-    server.start()
-    try:
-        status, headers, body = _request(
-            server,
-            "POST",
-            "/api/v1/session",
-            headers={"Origin": server.origin},
-        )
-        cookie = SimpleCookie()
-        cookie.load(headers.get("set-cookie", ""))
-    finally:
-        server.close()
-
-    assert status == 200
-    assert json.loads(body)["csrf_token"]
-    assert cookie["smcp_session"]["httponly"] is True
-    assert cookie["smcp_session"]["samesite"].casefold() == "strict"
 
 
 def test_authorized_foreground_tab_restores_its_existing_session() -> None:

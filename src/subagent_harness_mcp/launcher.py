@@ -493,15 +493,45 @@ $rootName = [string]$pointer.root
 if ([string]::IsNullOrWhiteSpace($rootName) -or $rootName -in @('.', '..') -or [IO.Path]::GetFileName($rootName) -ne $rootName) { throw 'Invalid Subagent MCP runtime root.' }
 $runtimeRoot = [IO.Path]::GetFullPath((Join-Path $runtimesRoot $rootName))
 if ([IO.Directory]::GetParent($runtimeRoot).FullName -ne $runtimesRoot) { throw 'Subagent MCP runtime escapes its owned root.' }
+$runtimeRootInfo = Get-Item -Force -LiteralPath $runtimeRoot
+if (($runtimeRootInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Subagent MCP runtime root cannot be a reparse point.' }
 $manifestPath = Join-Path $runtimeRoot 'manifest.json'
+$manifestInfo = Get-Item -Force -LiteralPath $manifestPath
+if (($manifestInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Subagent MCP runtime manifest cannot be a reparse point.' }
 $manifestDigest = Get-Sha256 $manifestPath
 if ($manifestDigest -ne ([string]$pointer.manifest_sha256).ToLowerInvariant()) { throw 'Subagent MCP runtime manifest digest mismatch.' }
 $manifest = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json
-$pythonExe = Join-Path $runtimeRoot 'Scripts\\python.exe'
-if (-not (Test-Path -LiteralPath $pythonExe -PathType Leaf)) { throw 'Subagent MCP staged Python is missing.' }
-$pythonDigest = Get-Sha256 $pythonExe
-$expectedPythonDigest = ([string]$manifest.files.'Scripts/python.exe').ToLowerInvariant()
-if ($pythonDigest -ne $expectedPythonDigest) { throw 'Subagent MCP staged Python digest mismatch.' }
+if ($manifest.schema_version -ne 1 -or [string]$manifest.version -cne $rootName) { throw 'Subagent MCP runtime manifest identity is invalid.' }
+$fileProperties = @($manifest.files.PSObject.Properties)
+if ($fileProperties.Count -eq 0) { throw 'Subagent MCP runtime manifest files are invalid.' }
+$expectedFiles = @{}
+$runtimePrefix = $runtimeRoot.TrimEnd('\\') + '\\'
+foreach ($property in $fileProperties) {
+    $relative = [string]$property.Name
+    $digest = [string]$property.Value
+    $parts = @($relative.Split([char]'/'))
+    if ([string]::IsNullOrEmpty($relative) -or $relative.Contains('\\') -or $relative.Contains(':') -or $relative -match '\\p{Cc}' -or [Text.Encoding]::UTF8.GetByteCount($relative) -gt 4096 -or $parts -contains '' -or $parts -contains '.' -or $parts -contains '..' -or [IO.Path]::IsPathRooted($relative)) { throw 'Subagent MCP runtime manifest path is invalid.' }
+    if ($digest -notmatch '^[0-9a-fA-F]{64}$' -or $expectedFiles.ContainsKey($relative)) { throw 'Subagent MCP runtime manifest files are invalid.' }
+    $candidate = [IO.Path]::GetFullPath((Join-Path $runtimeRoot $relative.Replace('/', '\\')))
+    if (-not $candidate.StartsWith($runtimePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Subagent MCP runtime manifest path escapes its root.' }
+    if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) { throw 'Subagent MCP runtime tree differs from manifest.' }
+    $candidateInfo = Get-Item -Force -LiteralPath $candidate
+    if (($candidateInfo.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Subagent MCP runtime cannot contain reparse points.' }
+    if ((Get-Sha256 $candidate) -ne $digest.ToLowerInvariant()) { throw 'Subagent MCP runtime file digest mismatch.' }
+    $expectedFiles[$relative] = $candidate
+}
+if (-not $expectedFiles.ContainsKey('Scripts/python.exe')) { throw 'Subagent MCP staged Python is absent from the manifest.' }
+$actualFiles = @{}
+foreach ($entry in Get-ChildItem -Force -Recurse -LiteralPath $runtimeRoot) {
+    if (($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw 'Subagent MCP runtime cannot contain reparse points.' }
+    if ($entry.PSIsContainer) { continue }
+    $relative = $entry.FullName.Substring($runtimePrefix.Length).Replace('\\', '/')
+    if ($relative -ieq 'manifest.json') { continue }
+    if (-not $expectedFiles.ContainsKey($relative) -or $actualFiles.ContainsKey($relative)) { throw 'Subagent MCP runtime tree differs from manifest.' }
+    $actualFiles[$relative] = $true
+}
+if ($actualFiles.Count -ne $expectedFiles.Count) { throw 'Subagent MCP runtime tree differs from manifest.' }
+$pythonExe = [string]$expectedFiles['Scripts/python.exe']
 $fixedArgs = @('-I', '-B', '-m', 'subagent_harness_mcp.cli', 'serve')
 & $pythonExe $fixedArgs
 exit [int]$LASTEXITCODE

@@ -61,18 +61,59 @@ from .store import (
 
 
 _ACTIVE_STATES = frozenset({"queued", "starting", "running", "needs_input"})
+_REDACTED_TEXT_MAX_CHARS = 16_384
+_REDACTION_SCAN_MAX_CHARS = 65_536
 _BEARER = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._~+/=-]{8,}")
 _TOKEN = re.compile(r"(?i)\b(?:sk|api|token|secret)[-_][A-Za-z0-9._-]{12,}")
 _EMAIL = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?![\w.-])")
+_PEM_PRIVATE_KEY = re.compile(
+    r"-----BEGIN ([A-Z0-9 ]{0,48}PRIVATE KEY)-----"
+    r".{0,65536}?"
+    r"(?:-----END \1-----|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_AWS_ACCESS_KEY_ID = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
+_JSON_AUTHORIZATION = re.compile(
+    r"(?i)([\"'](?:proxy[-_])?authorization[\"']\s*:\s*)"
+    r"([\"'])(?:\\.|[^\"'\\]){8,}\2"
+)
+_AUTHORIZATION_HEADER = re.compile(
+    r"(?im)\b((?:proxy[-_])?authorization\s*:\s*)[^\r\n]{8,}"
+)
+_URL_USERINFO = re.compile(
+    r"(?i)(\b[a-z][a-z0-9+.-]{1,31}://[^/\s:@]{1,256}:)"
+    r"[^@\s/]{1,1024}(@)"
+)
+_ASSIGNED_SECRET = re.compile(
+    r"(?i)(\b(?:"
+    r"x[-_]amz[-_](?:signature|credential|security[-_]token)|"
+    r"(?:x-)?api[-_]?key|client[-_]?secret|session[-_]?key|"
+    r"(?:access|refresh|auth|id)[-_]?token|"
+    r"(?:session|device|csrf|oauth)[-_]token|"
+    r"aws[-_]?secret[-_]?access[-_]?key|aws[-_]?session[-_]?token|"
+    r"set[-_]?cookie|private[-_]?key|"
+    r"password|authorization|auth|signature|sig|token|secret"
+    r")[\"']?\s*[=:]\s*)([\"']?)[A-Za-z0-9._~+/%=-]{8,}\2"
+)
 _SENSITIVE_KEYS = frozenset(
     {
         "authorization",
+        "proxy_authorization",
         "api_key",
+        "apikey",
+        "client_secret",
+        "session_key",
         "auth_token",
         "access_token",
+        "refresh_token",
+        "id_token",
         "password",
         "secret",
         "cookie",
+        "set_cookie",
+        "private_key",
+        "aws_secret_access_key",
+        "aws_session_token",
         "transcript",
         "system_prompt",
         "thinking_content",
@@ -367,6 +408,7 @@ class SubagentMcpService:
         execution_id = self._id_factory("execution")
         ready_circuit: CircuitRecord | None = None
         context: ResolvedContext | None = None
+        native_invoked = False
         try:
             workspace_path, workspace_key = _workspace(request.cwd)
             write_set = _normalize_write_set(
@@ -459,6 +501,7 @@ class SubagentMcpService:
                 )
             )
             _require_context(context, requested)
+            native_invoked = True
             snapshot = await adapter.spawn(
                 AdapterSpawnRequest(conversation_id, execution_id, request.task, context)
             )
@@ -469,7 +512,12 @@ class SubagentMcpService:
                 snapshot=snapshot,
             )
             self._start_snapshot_monitor(adapter, record, context)
-            self._resume_after_safe_result(ready_circuit, snapshot)
+            self._resume_after_safe_result(
+                request.runtime_id,
+                request.variant_id,
+                ready_circuit,
+                snapshot,
+            )
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
                 tool="agent_spawn",
@@ -479,21 +527,29 @@ class SubagentMcpService:
             return status
         except ServiceError as exc:
             public = self._pause_after_quota_error(ready_circuit, exc)
-            cleanup_unverified = public.code == "RECOVERY_REQUIRED" and context is not None
             self._record_failure(
                 execution_id,
                 public,
-                release_leases=not cleanup_unverified,
+                release_leases=not native_invoked,
                 observed=(
                     _unverified_cleanup_observation(context)
-                    if cleanup_unverified and context is not None
+                    if native_invoked and context is not None
                     else None
                 ),
             )
             raise public
         except (StateError, RegistryError, ConfigError) as exc:
             public = _public_error(exc)
-            self._record_failure(execution_id, public)
+            self._record_failure(
+                execution_id,
+                public,
+                release_leases=not native_invoked,
+                observed=(
+                    _unverified_cleanup_observation(context)
+                    if native_invoked and context is not None
+                    else None
+                ),
+            )
             raise public from exc
         except BaseException as exc:
             public = ServiceError(
@@ -505,10 +561,10 @@ class SubagentMcpService:
             self._record_failure(
                 execution_id,
                 public,
-                release_leases=context is None,
+                release_leases=not native_invoked,
                 observed=(
                     _unverified_cleanup_observation(context)
-                    if context is not None
+                    if native_invoked and context is not None
                     else None
                 ),
             )
@@ -691,6 +747,7 @@ class SubagentMcpService:
         ready_circuit: CircuitRecord | None = None
         previous: ExecutionRecord | None = None
         context: ResolvedContext | None = None
+        native_invoked = False
         try:
             previous = self._store.load_latest_execution(request.conversation_id)
             previous_evidence = (
@@ -775,6 +832,7 @@ class SubagentMcpService:
             context = _context_from_record(previous)
             session = _session_request(previous)
             await adapter.open_session(session)
+            native_invoked = True
             snapshot = await adapter.send(
                 AdapterSendRequest(
                     request.conversation_id,
@@ -793,7 +851,12 @@ class SubagentMcpService:
                 snapshot=snapshot,
             )
             self._start_snapshot_monitor(adapter, record, context)
-            self._resume_after_safe_result(ready_circuit, snapshot)
+            self._resume_after_safe_result(
+                previous.runtime_id,
+                str(previous.requested["variant_id"]),
+                ready_circuit,
+                snapshot,
+            )
             status = self._status(record, after_cursor=0)
             self._store.save_request_response(
                 tool="agent_send",
@@ -803,17 +866,16 @@ class SubagentMcpService:
             return status
         except ServiceError as exc:
             public = self._pause_after_quota_error(ready_circuit, exc)
-            cleanup_unverified = public.code == "RECOVERY_REQUIRED" and context is not None
             self._record_failure(
                 execution_id,
                 public,
-                release_leases=not cleanup_unverified,
+                release_leases=not native_invoked,
                 observed=(
                     _unverified_cleanup_observation(
                         context,
                         None if previous is None else previous.observed,
                     )
-                    if cleanup_unverified and context is not None
+                    if native_invoked and context is not None
                     else None if previous is None else previous.observed
                 ),
             )
@@ -823,7 +885,15 @@ class SubagentMcpService:
             self._record_failure(
                 execution_id,
                 public,
-                observed=None if previous is None else previous.observed,
+                release_leases=not native_invoked,
+                observed=(
+                    _unverified_cleanup_observation(
+                        context,
+                        None if previous is None else previous.observed,
+                    )
+                    if native_invoked and context is not None
+                    else None if previous is None else previous.observed
+                ),
             )
             raise public from exc
         except BaseException as exc:
@@ -836,13 +906,13 @@ class SubagentMcpService:
             self._record_failure(
                 execution_id,
                 public,
-                release_leases=context is None,
+                release_leases=not native_invoked,
                 observed=(
                     _unverified_cleanup_observation(
                         context,
                         None if previous is None else previous.observed,
                     )
-                    if context is not None
+                    if native_invoked and context is not None
                     else None if previous is None else previous.observed
                 ),
             )
@@ -1255,9 +1325,28 @@ class SubagentMcpService:
                         native_session_available = False
                     if native_session_available:
                         snapshot = await adapter.close(_session_request(record))
-                        if snapshot.conversation_state != "closed":
+                        if (
+                            snapshot.external_execution_id != record.execution_id
+                            or snapshot.external_session_id
+                            != record.external_session_id
+                        ):
                             raise ServiceError(
-                                "RECOVERY_REQUIRED", "native session did not close"
+                                "CONTEXT_DRIFT",
+                                "native close identity does not match the controller record",
+                                category="adapter",
+                            )
+                        if (
+                            snapshot.conversation_state != "closed"
+                            or snapshot.execution_state
+                            not in TERMINAL_EXECUTION_STATES
+                        ):
+                            raise ServiceError(
+                                "RECOVERY_REQUIRED",
+                                "native session did not close in a terminal state",
+                            )
+                        if cleanup_unverified:
+                            _require_snapshot_attestation(
+                                snapshot, _context_from_record(record)
                             )
                         evidence = snapshot.evidence
                         cleanup_verified = bool(
@@ -1339,16 +1428,27 @@ class SubagentMcpService:
             raise ServiceError("POLICY_REJECTED", "variant is outside runtime policy")
         adapter = self._registry.get(runtime_id)
         availability = variant.get("availability")
+        half_open = (
+            allow_quota_paused
+            and isinstance(availability, Mapping)
+            and (
+                isinstance(adapter, QuotaProbeAdapter)
+                or availability.get("reason_code") == "QUOTA_PAUSED"
+            )
+        )
         if (
             isinstance(availability, Mapping)
             and availability.get("state") == "quota_paused"
-            and (
-                not allow_quota_paused
-                or not isinstance(adapter, QuotaProbeAdapter)
-            )
+            and not half_open
         ):
+            reason_code = availability.get("reason_code")
+            code = (
+                str(reason_code)
+                if reason_code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
+                else "QUOTA_PAUSED"
+            )
             raise ServiceError(
-                "QUOTA_PAUSED",
+                code,
                 "selected model is paused after explicit quota evidence",
                 category="quota",
             )
@@ -1426,6 +1526,12 @@ class SubagentMcpService:
         context: ResolvedContext,
         snapshot: AdapterSnapshot,
     ) -> ExecutionRecord:
+        if snapshot.external_execution_id != execution_id:
+            raise ServiceError(
+                "CONTEXT_DRIFT",
+                "adapter result execution identity does not match the controller request",
+                category="adapter",
+            )
         _require_snapshot(snapshot, context)
         descriptor = AgentDescriptor.from_manifest(
             adapter.manifest,
@@ -1695,34 +1801,40 @@ class SubagentMcpService:
 
     def _resume_after_safe_result(
         self,
+        runtime_id: str,
+        variant_id: str,
         circuit: CircuitRecord | None,
         snapshot: AdapterSnapshot,
     ) -> None:
-        if (
-            circuit is None
-            or circuit.state != "auto_paused"
-            or snapshot.execution_state != "succeeded"
-            or not _safe_quota_evidence(snapshot.evidence)
-        ):
+        if snapshot.execution_state != "succeeded":
             return
+        safe_evidence = _safe_quota_evidence(snapshot.evidence)
         try:
-            current = self._store.load_circuit(circuit.runtime_id, circuit.variant_id)
-            if current.pair_key != circuit.pair_key:
-                return
-            if current.state == "auto_paused":
-                current = self._store.resume_paused_circuit(
-                    runtime_id=current.runtime_id,
-                    variant_id=current.variant_id,
-                    pair_key=current.pair_key,
-                    expected_revision=current.revision,
-                    details=dict(_redact(snapshot.evidence)),
+            if circuit is not None:
+                current = self._store.load_circuit(
+                    circuit.runtime_id,
+                    circuit.variant_id,
                 )
-            if current.state == "ready":
-                self._set_variant_quota_state(
-                    current.runtime_id,
-                    current.variant_id,
-                    paused=False,
-                )
+                if current.pair_key != circuit.pair_key:
+                    return
+                if current.state == "auto_paused":
+                    if not safe_evidence:
+                        return
+                    current = self._store.resume_paused_circuit(
+                        runtime_id=current.runtime_id,
+                        variant_id=current.variant_id,
+                        pair_key=current.pair_key,
+                        expected_revision=current.revision,
+                        details=dict(_redact(snapshot.evidence)),
+                    )
+                if current.state != "ready":
+                    return
+            self._set_variant_quota_state(
+                runtime_id,
+                variant_id,
+                paused=False,
+                expected_reason_code=(None if safe_evidence else "QUOTA_PAUSED"),
+            )
         except (StateError, ConfigError):
             return
 
@@ -1735,11 +1847,15 @@ class SubagentMcpService:
         if not isinstance(variant_id, str) or not variant_id:
             return snapshot
         try:
-            circuit = self._store.load_circuit(record.runtime_id, variant_id)
+            circuit: CircuitRecord | None = self._store.load_circuit(
+                record.runtime_id,
+                variant_id,
+            )
         except StateError:
-            return snapshot
+            circuit = None
         if (
-            snapshot.error is not None
+            circuit is not None
+            and snapshot.error is not None
             and snapshot.error.code in {"QUOTA_PAUSED", "USAGE_CREDITS_FORBIDDEN"}
         ):
             public = self._pause_after_quota_error(
@@ -1771,7 +1887,12 @@ class SubagentMcpService:
                     evidence=snapshot.evidence,
                 )
         elif snapshot.execution_state == "succeeded":
-            self._resume_after_safe_result(circuit, snapshot)
+            self._resume_after_safe_result(
+                record.runtime_id,
+                variant_id,
+                circuit,
+                snapshot,
+            )
         return snapshot
 
     def _set_variant_quota_state(
@@ -1781,6 +1902,7 @@ class SubagentMcpService:
         *,
         paused: bool,
         reason_code: str | None = None,
+        expected_reason_code: str | None = None,
     ) -> None:
         try:
             self._config.set_variant_quota_state(
@@ -1788,6 +1910,7 @@ class SubagentMcpService:
                 variant_id,
                 paused=paused,
                 reason_code=reason_code,
+                expected_reason_code=expected_reason_code,
             )
         except ConfigError:
             return
@@ -1862,10 +1985,21 @@ def _workspace(raw: str) -> tuple[str, str]:
     if not path.is_dir():
         raise ServiceError("WORKSPACE_NOT_FOUND", "workspace is not a directory")
     display = str(path)
+    if os.name == "nt":
+        display = _without_windows_extended_prefix(display)
     key = os.path.normcase(display)
     if os.name == "nt":
         key = key.casefold()
     return display, key
+
+
+def _without_windows_extended_prefix(value: str) -> str:
+    folded = value.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        return "\\\\" + value[8:]
+    if folded.startswith("\\\\?\\"):
+        return value[4:]
+    return value
 
 
 def _normalize_write_set(
@@ -1994,16 +2128,7 @@ def _require_context(context: ResolvedContext, requested: Mapping[str, Any]) -> 
 
 
 def _require_snapshot(snapshot: AdapterSnapshot, context: ResolvedContext) -> None:
-    if (
-        not snapshot.external_session_id
-        or not snapshot.external_execution_id
-        or snapshot.effective_model != context.effective_model
-        or dict(snapshot.effective_reasoning) != dict(context.effective_reasoning)
-        or snapshot.workspace_path != context.workspace_path
-        or snapshot.workspace_key != context.workspace_key
-        or snapshot.context_hash != context.context_hash
-    ):
-        raise ServiceError("CONTEXT_DRIFT", "adapter result attestation does not match request")
+    _require_snapshot_attestation(snapshot, context)
     expected_conversation = {
         "running": "active",
         "needs_input": "needs_input",
@@ -2014,6 +2139,21 @@ def _require_snapshot(snapshot: AdapterSnapshot, context: ResolvedContext) -> No
     }
     if expected_conversation.get(snapshot.execution_state) != snapshot.conversation_state:
         raise ServiceError("ADAPTER_INVALID", "adapter returned inconsistent lifecycle state")
+
+
+def _require_snapshot_attestation(
+    snapshot: AdapterSnapshot, context: ResolvedContext
+) -> None:
+    if (
+        not snapshot.external_session_id
+        or not snapshot.external_execution_id
+        or snapshot.effective_model != context.effective_model
+        or dict(snapshot.effective_reasoning) != dict(context.effective_reasoning)
+        or snapshot.workspace_path != context.workspace_path
+        or snapshot.workspace_key != context.workspace_key
+        or snapshot.context_hash != context.context_hash
+    ):
+        raise ServiceError("CONTEXT_DRIFT", "adapter result attestation does not match request")
 
 
 def _snapshot_observation(
@@ -2171,8 +2311,15 @@ def _descriptor_from_record(
 
 
 def _redact(value: Any, *, key: str | None = None) -> Any:
-    if key is not None and key.casefold() in _SENSITIVE_KEYS:
-        return "[REDACTED]"
+    if key is not None:
+        normalized_key = key.casefold().replace("-", "_")
+        compared_key = (
+            normalized_key.removeprefix("x_")
+            if normalized_key.startswith("x_")
+            else normalized_key
+        )
+        if compared_key in _SENSITIVE_KEYS:
+            return "[REDACTED]"
     if isinstance(value, Mapping):
         return {
             str(item_key): _redact(item_value, key=str(item_key))
@@ -2188,10 +2335,17 @@ def _redact(value: Any, *, key: str | None = None) -> Any:
 
 
 def _redact_text(value: str) -> str:
-    bounded = value[:16_384]
-    bounded = _BEARER.sub("Bearer [REDACTED]", bounded)
-    bounded = _TOKEN.sub("[REDACTED]", bounded)
-    return _EMAIL.sub("[REDACTED_EMAIL]", bounded)
+    scanned = value[:_REDACTION_SCAN_MAX_CHARS]
+    scanned = _PEM_PRIVATE_KEY.sub("[REDACTED_PEM]", scanned)
+    scanned = _JSON_AUTHORIZATION.sub(r"\1[REDACTED]", scanned)
+    scanned = _AUTHORIZATION_HEADER.sub(r"\1[REDACTED]", scanned)
+    scanned = _URL_USERINFO.sub(r"\1[REDACTED]\2", scanned)
+    scanned = _ASSIGNED_SECRET.sub(r"\1[REDACTED]", scanned)
+    scanned = _BEARER.sub("Bearer [REDACTED]", scanned)
+    scanned = _TOKEN.sub("[REDACTED]", scanned)
+    scanned = _AWS_ACCESS_KEY_ID.sub("[REDACTED]", scanned)
+    scanned = _EMAIL.sub("[REDACTED_EMAIL]", scanned)
+    return scanned[:_REDACTED_TEXT_MAX_CHARS]
 
 
 def _public_error(error: BaseException) -> ServiceError:
