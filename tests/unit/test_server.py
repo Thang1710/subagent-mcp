@@ -250,14 +250,23 @@ def test_runtime_check_refresh_quota_is_explicit_and_defaults_local() -> None:
     ]
 
 
-def test_changed_runtime_files_block_provider_calls_but_keep_local_status(
+def test_changed_runtime_files_warn_local_status_and_block_provider_calls(
     monkeypatch,
 ) -> None:
     service = _RecordingService()
     server = create_server(service)
     monkeypatch.setattr(server_module, "_current_package_identity", lambda: b"changed")
 
-    local = _metadata(_run(server.call_tool("runtime_list", {})))
+    local_result = _run(server.call_tool("runtime_list", {}))
+    local = _metadata(local_result)
+    local_check = _metadata(
+        _run(
+            server.call_tool(
+                "runtime_check",
+                {"runtime_id": "future-runtime"},
+            )
+        )
+    )
     blocked_refresh = _metadata(
         _run(
             server.call_tool(
@@ -290,9 +299,60 @@ def test_changed_runtime_files_block_provider_calls_but_keep_local_status(
     )
 
     assert local["ok"] is True
+    assert local["result"] == [{"runtime_id": "future-runtime", "state": "ready"}]
+    assert local["update_quarantine"]["code"] == "UPDATE_QUARANTINED"
+    assert local["update_quarantine"]["retryable"] is False
+    assert local_check["update_quarantine"] == local["update_quarantine"]
+    assert "UPDATE_QUARANTINED" in local_result.content[0].text
     assert blocked_refresh["error"]["code"] == "UPDATE_QUARANTINED"
     assert blocked_spawn["error"]["code"] == "UPDATE_QUARANTINED"
     assert "fresh Codex task" in blocked_spawn["error"]["next_action"]
+    assert service.calls == [
+        ("runtime_list", None),
+        ("runtime_check", ("future-runtime", False)),
+    ]
+
+
+def test_missing_runtime_identity_warns_local_status_and_blocks_provider_calls(
+    monkeypatch,
+) -> None:
+    service = _RecordingService()
+    server = create_server(service)
+
+    def missing_identity() -> bytes:
+        raise FileNotFoundError("identity removed during legacy update")
+
+    monkeypatch.setattr(server_module, "_current_package_identity", missing_identity)
+
+    local = _metadata(_run(server.call_tool("runtime_list", {})))
+    blocked = _metadata(
+        _run(
+            server.call_tool(
+                "agent_spawn",
+                {
+                    "request_id": "missing-identity-spawn",
+                    "runtime_id": "future-runtime",
+                    "variant_id": "future-variant",
+                    "transport": "managed-sdk",
+                    "cwd": str(Path.cwd()),
+                    "mode": "review",
+                    "required_capabilities": ["repo_read"],
+                    "task": {
+                        "title": "Read-only check",
+                        "prompt": "Return one status line.",
+                        "acceptance_criteria": ["No writes."],
+                        "role": "reviewer",
+                    },
+                },
+            )
+        )
+    )
+
+    assert local["ok"] is True
+    assert local["update_quarantine"] == blocked["error"]
+    assert local["update_quarantine"]["code"] == "UPDATE_QUARANTINED"
+    assert local["update_quarantine"]["category"] == "update"
+    assert local["update_quarantine"]["retryable"] is False
     assert service.calls == [("runtime_list", None)]
 
 

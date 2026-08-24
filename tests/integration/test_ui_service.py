@@ -14,6 +14,7 @@ from subagent_harness_mcp.adapters import claude_code as claude_code_module
 from subagent_harness_mcp.adapters import deepseek_harness as deepseek_harness_module
 from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
+from subagent_harness_mcp import server as server_module
 from subagent_harness_mcp.config import ConfigError, ConfigStore
 from subagent_harness_mcp.contracts import ServiceError, SpawnRequest, TaskPacket
 from subagent_harness_mcp.paths import resolve_paths
@@ -198,6 +199,22 @@ def test_ui_activity_detail_projects_persisted_execution_without_raw_events(
     assert "external_session" not in encoded
 
 
+def test_ui_snapshot_surfaces_resident_update_quarantine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    backend, _ = _configured_backend(tmp_path / "home")
+    monkeypatch.setattr(server_module, "_current_package_identity", lambda: b"changed")
+
+    snapshot = backend.snapshot()
+
+    assert snapshot["update"]["state"] == "quarantined"
+    assert snapshot["update"]["code"] == "UPDATE_QUARANTINED"
+    assert snapshot["update"]["retryable"] is False
+    assert snapshot["health"]["state"] == "degraded"
+    assert snapshot["runtimes"][0]["status"]["state"] == "available"
+
+
 def test_ui_activity_reads_do_not_start_a_provider(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -285,6 +302,7 @@ def test_ui_provider_refresh_is_explicit_and_uses_sanitized_quota_state(
 
 def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     _, config = _configured_backend(tmp_path / "home")
     manifest = FakeAdapter().manifest.to_dict()
@@ -309,7 +327,8 @@ def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
                 },
             )
 
-    snapshot = LocalUiBackend(config=config, service=PausedService()).snapshot()
+    service = PausedService()
+    snapshot = LocalUiBackend(config=config, service=service).snapshot()
 
     assert snapshot["runtimes"][0]["status"] == {
         "state": "auto_paused",
@@ -326,6 +345,12 @@ def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(
     configured = fields["model_priority"]["options"][0]
     assert configured["state"] == "available"
     assert configured["available"] is True
+
+    monkeypatch.setattr(server_module, "_current_package_identity", lambda: b"changed")
+    quarantined = LocalUiBackend(config=config, service=service).snapshot()
+
+    assert quarantined["update"]["state"] == "quarantined"
+    assert quarantined["health"]["state"] == "unavailable"
 
 
 def test_ui_does_not_treat_a_live_recheckable_pause_as_runtime_unavailable(

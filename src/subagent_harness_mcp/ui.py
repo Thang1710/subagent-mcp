@@ -26,6 +26,7 @@ from urllib.parse import quote, unquote, urlsplit
 from . import __version__
 from .config import ConfigError, ConfigStore
 from .contracts import ServiceError, result_artifact_metadata
+from .server import _runtime_update_quarantine
 from .ui_process import (
     CONTROL_CHALLENGE_HEADER,
     CONTROL_HEADER,
@@ -192,8 +193,11 @@ class LocalUiBackend:
         runtimes = _runtime_cards(document, records)
         circuits, activity = _read_ui_state(self._store)
         enabled_states = [item["status"]["state"] for item in runtimes if item["enabled"]]
+        update_quarantine = _runtime_update_quarantine()
         if any(state == "auto_paused" for state in enabled_states):
             health_state = "unavailable"
+        elif update_quarantine is not None:
+            health_state = "degraded"
         elif any(state in {"quarantined", "incompatible", "unhealthy"} for state in enabled_states):
             health_state = "degraded"
         elif any(state == "needs_canary" for state in enabled_states):
@@ -229,10 +233,18 @@ class LocalUiBackend:
             or _quota_presentation(
                 "check_required" if configured_runtime_ids else "configure_first"
             ),
-            "update": {
-                "state": "not_checked",
-                "label": "Not checked",
-            },
+            "update": (
+                {
+                    "state": "quarantined",
+                    "label": "Update quarantined",
+                    **update_quarantine.to_dict(),
+                }
+                if update_quarantine is not None
+                else {
+                    "state": "not_checked",
+                    "label": "Not checked",
+                }
+            ),
             "runtimes": runtimes,
             "trust": _trust_entries(document),
             "activity": activity,

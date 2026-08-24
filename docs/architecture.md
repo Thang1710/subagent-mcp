@@ -119,6 +119,16 @@ A legacy resident whose package files changed returns terminal
 retried. The exact isolated registration makes this a one-time migration
 boundary rather than a recurring update operation.
 
+Local `runtime_list` and non-refreshing `runtime_check` calls remain available
+for diagnosis, but their MCP envelope includes `update_quarantine` whenever
+provider delegation is blocked by that resident fence. The localhost UI shows
+the same resident as update-quarantined and degraded without rewriting the
+underlying adapter or circuit state.
+
+The runtime `state` values in those local results describe adapter and circuit
+observations; they are not permission to delegate. A present
+`update_quarantine` envelope is the authoritative resident-level block.
+
 Native harness transcripts remain native-harness-owned. Private client state,
 credentials, unrelated local tooling, caches, and billing settings stay outside
 product ownership and are not parsed as a control contract.

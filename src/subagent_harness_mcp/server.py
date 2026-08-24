@@ -67,6 +67,8 @@ def create_server(service: object) -> MCPServer:
             "exhaustion: one new explicit task is the live availability check. An ambiguous "
             "failure never proves quota. Never choose a wait-for-reset action from stored "
             "circuit state; only a fresh native response may describe current availability. "
+            "If local status includes update_quarantine, provider delegation is terminally "
+            "blocked for this resident; follow its next_action instead of calling a provider. "
             "Never silently abandon a failed delegation: inspect retryable, next_action, "
             "and recovery on every error before deciding anything. Perform at most the "
             "advertised recovery maximum and never more than three total retry, refresh, "
@@ -541,11 +543,11 @@ async def _call_request(
     return await getattr(service, method)(request)
 
 
-def _require_current_runtime() -> None:
+def _runtime_update_quarantine() -> ServiceError | None:
     try:
         current = _current_package_identity()
-    except OSError as exc:
-        raise ServiceError(
+    except OSError:
+        return ServiceError(
             "UPDATE_QUARANTINED",
             "Subagent MCP package identity cannot be verified.",
             category="update",
@@ -554,9 +556,9 @@ def _require_current_runtime() -> None:
                 "This already-running MCP cannot hot-reload. Do not retry it; "
                 "use the exact isolated registration from a fresh Codex task."
             ),
-        ) from exc
+        )
     if current != _RUNNING_PACKAGE_IDENTITY:
-        raise ServiceError(
+        return ServiceError(
             "UPDATE_QUARANTINED",
             "Subagent MCP was updated while this MCP server was running.",
             category="update",
@@ -566,6 +568,13 @@ def _require_current_runtime() -> None:
                 "use the exact isolated registration from a fresh Codex task."
             ),
         )
+    return None
+
+
+def _require_current_runtime() -> None:
+    quarantine = _runtime_update_quarantine()
+    if quarantine is not None:
+        raise quarantine
 
 
 def _api_version(value: int) -> int:
@@ -797,6 +806,16 @@ def _success_result(
     public_result = _json_value(result, compact=response_mode == "compact")
     metadata = {"ok": True, "result": public_result, "tool": tool}
     summary = _success_summary(tool, public_result)
+    quarantine = (
+        _runtime_update_quarantine()
+        if tool in {"runtime_list", "runtime_check"}
+        else None
+    )
+    if quarantine is not None:
+        metadata["update_quarantine"] = quarantine.to_dict()
+        summary += f"\n\n**{quarantine.code}**: {quarantine}"
+        if quarantine.next_action:
+            summary += f"\n\nNext action: {quarantine.next_action}"
     return _text_result(summary, metadata, is_error=False)
 
 

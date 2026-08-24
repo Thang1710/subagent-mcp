@@ -2,6 +2,12 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.14 - 2026-08-25
+
+- Surface a resident update quarantine in local runtime status and the
+  localhost UI before Codex attempts provider work, while preserving the
+  terminal identity fence and the real adapter/circuit state.
+
 ## 1.0.13 - 2026-08-24
 
 - Let an exact same-origin localhost page create or replace its browser session,
