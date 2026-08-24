@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.13 - 2026-08-24
+
+- Let an exact same-origin localhost page create or replace its browser session,
+  so the fixed settings URL works directly after a resident restart.
+
 ## 1.0.12 - 2026-08-24
 
 - Keep the managed localhost UI alive when a Windows Python launcher hands off

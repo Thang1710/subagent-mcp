@@ -342,10 +342,17 @@ class _UiState:
             if expected is None or not hmac.compare_digest(supplied, expected):
                 return None
             self.bootstrap_token = None
-            session_id = secrets.token_urlsafe(32)
-            csrf = secrets.token_urlsafe(32)
-            self.sessions[session_id] = csrf
-            return session_id, csrf
+            return self._issue_session()
+
+    def issue_same_origin_session(self) -> tuple[str, str]:
+        with self.lock:
+            return self._issue_session()
+
+    def _issue_session(self) -> tuple[str, str]:
+        session_id = secrets.token_urlsafe(32)
+        csrf = secrets.token_urlsafe(32)
+        self.sessions[session_id] = csrf
+        return session_id, csrf
 
     def csrf_for(self, session_id: str) -> str | None:
         with self.lock:
@@ -777,8 +784,7 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                         return
                     self._send_json(HTTPStatus.OK, {"csrf_token": csrf})
                     return
-                self._json_error(HTTPStatus.UNAUTHORIZED, "SESSION_REQUIRED")
-                return
+                exchanged = state.issue_same_origin_session()
             session_id, csrf = exchanged
             cookie = (
                 f"{_SESSION_COOKIE}={session_id}; Path=/; HttpOnly; "

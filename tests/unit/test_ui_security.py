@@ -743,7 +743,7 @@ def test_activity_detail_response_projects_only_safe_fields() -> None:
     [None, "managed-control-token-with-enough-entropy"],
 )
 @pytest.mark.parametrize("cookie", [None, "smcp_session=stale-session"])
-def test_direct_url_cannot_create_or_replace_a_browser_session(
+def test_direct_url_creates_or_replaces_a_same_origin_browser_session(
     control_token: str | None,
     cookie: str | None,
 ) -> None:
@@ -759,12 +759,25 @@ def test_direct_url_cannot_create_or_replace_a_browser_session(
             "/api/v1/session",
             headers=request_headers,
         )
+        issued = SimpleCookie()
+        if "set-cookie" in headers:
+            issued.load(headers["set-cookie"])
+        session = issued.get("smcp_session")
+        snapshot, _, _ = _request(
+            server,
+            "GET",
+            "/api/v1/snapshot",
+            headers={"Cookie": f"smcp_session={session.value}"} if session else {},
+        )
     finally:
         server.close()
 
-    assert status == 401
-    assert json.loads(body)["error"] == "SESSION_REQUIRED"
-    assert "set-cookie" not in headers
+    assert status == 200
+    assert json.loads(body)["csrf_token"]
+    assert session is not None
+    assert session["httponly"] is True
+    assert session["samesite"].casefold() == "strict"
+    assert snapshot == 200
 
 
 def test_authorized_managed_tab_restores_its_existing_session() -> None:
