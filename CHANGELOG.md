@@ -2,6 +2,11 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.12 - 2026-08-24
+
+- Keep the managed localhost UI alive when a Windows Python launcher hands off
+  to an authenticated child interpreter with a different process ID.
+
 ## 1.0.11 - 2026-08-24
 
 - Keep persisted quota-pause evidence as history without exposing it as a

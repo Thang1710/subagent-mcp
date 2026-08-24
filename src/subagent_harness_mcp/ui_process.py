@@ -235,15 +235,15 @@ def start_background_ui(
             verify_control=verify_control,
         )
         if current.running:
-            if current.managed and current.pid == int(child.pid):
-                return BackgroundUiResult(True, True, True, port, int(child.pid))
+            if current.managed:
+                # Some Windows launchers hand off to a child interpreter, so
+                # the authenticated server PID need not equal Popen.pid.
+                return BackgroundUiResult(True, True, True, port, current.pid)
             try:
                 child.terminate()
                 child.wait(timeout=3)
             except (OSError, subprocess.SubprocessError):
                 pass
-            if current.managed:
-                return current
             raise UiProcessError(
                 "UI_UNMANAGED",
                 "a foreground or unrelated UI owns the requested port",

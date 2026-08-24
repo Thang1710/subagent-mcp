@@ -105,6 +105,37 @@ def test_background_start_uses_the_installed_module_without_a_shell(
     assert int(kwargs["creationflags"]) != 0
 
 
+def test_background_start_accepts_an_authenticated_indirect_child_pid(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    launcher = _Process(pid=41)
+    probes = iter((False, True))
+
+    def popen(*_args, **_kwargs):
+        publish_control_record(
+            paths.ui_control_file,
+            pid=77,
+            port=8765,
+            token="indirect-child-control-token-with-enough-entropy",
+        )
+        return launcher
+
+    result = start_background_ui(
+        paths,
+        port=8765,
+        open_browser=False,
+        popen_factory=popen,
+        probe=lambda _port: next(probes),
+        verify_control=lambda _record: True,
+        sleeper=lambda _seconds: None,
+        timeout_seconds=1,
+    )
+
+    assert result == BackgroundUiResult(True, True, True, 8765, 77)
+    assert launcher.terminated is False
+
+
 def test_background_start_is_idempotent_when_product_ui_is_healthy(
     tmp_path: Path,
 ) -> None:
