@@ -2,6 +2,13 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.9 - 2026-08-24
+
+- Allow the deterministic background-supervision regression enough time on
+  slower Windows CI runners; runtime behavior is unchanged.
+- Replace the unpublished 1.0.8 candidate, whose build stopped before the
+  PyPI, GitHub release, and MCP Registry publication jobs.
+
 ## 1.0.8 - 2026-08-24
 
 - Recheck a previously quota-paused model on each later explicit delegation

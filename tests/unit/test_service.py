@@ -880,7 +880,7 @@ def test_background_success_clears_non_probe_quota_pause(tmp_path: Path) -> None
                 return
             await asyncio.sleep(0)
 
-    asyncio.run(asyncio.wait_for(run(), timeout=0.1))
+    asyncio.run(asyncio.wait_for(run(), timeout=2.0))
 
     variant = service._config.load()["runtimes"]["fake"]["variants"][0]
     assert "availability" not in variant
