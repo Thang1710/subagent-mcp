@@ -833,7 +833,7 @@ async def _controlled_context(
             workspace_key="workspace-1",
             transport="managed-sdk",
             permissions=("repo_read",),
-            context_policy_id="context-1",
+            context_policy_id="declared-native",
             permission_policy_id="permission-1",
         )
     )
@@ -1665,7 +1665,7 @@ def test_lifecycle_queries_after_control_connect_and_uses_response_attestation(
                 workspace_key="workspace-1",
                 transport="managed-sdk",
                 permissions=("repo_read",),
-                context_policy_id="context-1",
+                context_policy_id="declared-native",
                 permission_policy_id="permission-1",
             )
         )
@@ -1832,7 +1832,7 @@ def test_terminal_turn_has_no_product_completion_deadline(tmp_path: Path) -> Non
                 workspace_key="workspace-1",
                 transport="managed-sdk",
                 permissions=("repo_read",),
-                context_policy_id="context-1",
+                context_policy_id="declared-native",
                 permission_policy_id="permission-1",
             )
         )
@@ -2292,6 +2292,44 @@ def test_resolve_context_binds_opaque_model_workspace_and_resume_policy(
     assert "live_status_after_restart" in context.capability_gaps
     assert "declared_mcp" in context.capability_gaps
     assert "project_local_context_and_hooks" in context.capability_gaps
+    assert "exact_auto_compaction_trigger" in context.capability_gaps
+
+
+def test_resolve_context_rejects_unimplemented_context_policy(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+    asyncio.run(adapter.probe())
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            adapter.resolve_context(
+                AdapterContextRequest(
+                    runtime_id="claude-code",
+                    variant_id="future-deep",
+                    model="vendor/future-model",
+                    reasoning={"effort": "xhigh"},
+                    workspace_path=str(workspace.resolve()),
+                    workspace_key=str(workspace.resolve()),
+                    transport="managed-sdk",
+                    permissions=("repo_read",),
+                    context_policy_id="full-native",
+                    permission_policy_id="default",
+                )
+            )
+        )
+
+    assert captured.value.code == "CAPABILITY_MISSING"
+    assert captured.value.category == "capability"
+    assert captured.value.retryable is False
+    assert "declared-native" in (captured.value.next_action or "")
 
 
 def test_claude_pre_tool_hook_denies_write_outside_attested_set(tmp_path: Path) -> None:
@@ -2343,6 +2381,7 @@ def test_claude_pre_tool_hook_denies_write_outside_attested_set(tmp_path: Path) 
             )
         )
     )
+    assert clients[0].options.setting_sources == ["user"]
     hook = clients[0].options.hooks["PreToolUse"][0].hooks[0]
 
     allowed = asyncio.run(

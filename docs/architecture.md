@@ -152,6 +152,9 @@ integration are explicit capability gaps. Current Claude turns select
 only the native user setting source: project/local `CLAUDE.md`, `.claude`
 hooks, agents, skills, and declared project MCP stay disabled until the
 canonical path + content-hash trust gate exists. User skills remain available.
+The common `declared-native` policy is capability-scoped in this Windows
+release: adapters reject every other policy ID and report project/local context
+plus exact auto-compaction-trigger attestation as explicit gaps.
 
 Claude's public Agent SDK publishes typed initialization and rate-limit events.
 An explicit provider Refresh opens a connect-only session and validates native

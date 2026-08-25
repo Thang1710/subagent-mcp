@@ -554,6 +554,14 @@ class ClaudeCodeAdapter:
     async def resolve_context(self, request: AdapterContextRequest) -> ResolvedContext:
         if request.runtime_id != "claude-code" or request.transport != "managed-sdk":
             raise ServiceError("CAPABILITY_MISSING", "Claude managed-sdk context is required")
+        if request.context_policy_id != "declared-native":
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                "Claude Code does not implement the requested context policy",
+                category="capability",
+                retryable=False,
+                next_action="Use context_policy_id='declared-native' and inspect its explicit capability gaps.",
+            )
         unsupported = set(request.permissions) - self._manifest.semantic_permissions
         if unsupported:
             raise ServiceError("CAPABILITY_MISSING", "Claude permission is unsupported")
@@ -609,6 +617,7 @@ class ClaudeCodeAdapter:
                 "needs_input",
                 "declared_mcp",
                 "project_local_context_and_hooks",
+                "exact_auto_compaction_trigger",
             ),
             attestation=attestation,
         )
@@ -1405,7 +1414,7 @@ def _bound_matches_context(bound: _BoundRuntime, context: ResolvedContext) -> bo
         or not all(isinstance(item, str) for item in permissions)
         or not isinstance(write_set, list)
         or not all(isinstance(item, str) for item in write_set)
-        or not isinstance(context_policy_id, str)
+        or context_policy_id != "declared-native"
         or not isinstance(permission_policy_id, str)
     ):
         return False
@@ -1495,7 +1504,7 @@ def _build_lifecycle_options(
         or not all(isinstance(item, str) for item in permissions)
         or not isinstance(write_set, list)
         or not all(isinstance(item, str) for item in write_set)
-        or not isinstance(context_policy_id, str)
+        or context_policy_id != "declared-native"
         or not isinstance(permission_policy_id, str)
     ):
         raise ServiceError("CONTEXT_DRIFT", "Claude resume policy attestation is missing")
@@ -1518,7 +1527,7 @@ def _build_lifecycle_options(
     )
     if expected_hash != context.context_hash:
         raise ServiceError("CONTEXT_DRIFT", "Claude runtime/model/workspace context changed")
-    tools = ["Read", "Glob", "Grep"]
+    tools = ["Read", "Glob", "Grep", "Skill"]
     hooks = None
     if "workspace_write" in permissions:
         tools.extend(["Edit", "Write"])
@@ -1534,11 +1543,7 @@ def _build_lifecycle_options(
     return ClaudeAgentOptions(
         cli_path=bound.cli_path,
         system_prompt={"type": "preset", "preset": "claude_code"},
-        setting_sources=(
-            []
-            if "workspace_write" in permissions and tuple(write_set) != (".",)
-            else ["user"]
-        ),
+        setting_sources=["user"],
         skills="all",
         strict_mcp_config=True,
         mcp_servers={},

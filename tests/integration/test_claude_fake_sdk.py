@@ -325,7 +325,8 @@ def test_canary_is_single_launch_idempotent_and_gates_spawn(tmp_path: Path) -> N
     assert clients[1].options.mcp_servers == {}
     assert clients[1].options.setting_sources == ["user"]
     assert clients[1].options.skills == "all"
-    assert clients[1].options.tools == ["Read", "Glob", "Grep"]
+    assert clients[1].options.tools == ["Read", "Glob", "Grep", "Skill"]
+    assert clients[1].options.allowed_tools == ["Read", "Glob", "Grep", "Skill"]
     assert clients[1].options.env == {
         "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
         "CLAUDE_CODE_DISABLE_FAST_MODE": "1",
@@ -470,11 +471,19 @@ def test_fresh_adapter_send_resumes_exact_session_and_permission_context(
     assert len(resumed_clients) == 1
     assert resumed_clients[0].options.resume == "session-1"
     assert resumed_clients[0].options.cwd == workspace.resolve()
-    assert resumed_clients[0].options.tools == ["Read", "Glob", "Grep", "Edit", "Write"]
+    assert resumed_clients[0].options.tools == [
+        "Read",
+        "Glob",
+        "Grep",
+        "Skill",
+        "Edit",
+        "Write",
+    ]
     assert resumed_clients[0].options.allowed_tools == [
         "Read",
         "Glob",
         "Grep",
+        "Skill",
         "Edit",
         "Write",
     ]

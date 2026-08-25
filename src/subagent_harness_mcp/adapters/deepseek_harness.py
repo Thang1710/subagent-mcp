@@ -322,6 +322,14 @@ class DeepSeekHarnessAdapter:
             raise ServiceError(
                 "CAPABILITY_MISSING", "DeepSeek Harness native ACP context is required"
             )
+        if request.context_policy_id != "declared-native":
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                "DeepSeek Harness does not implement the requested context policy",
+                category="capability",
+                retryable=False,
+                next_action="Use context_policy_id='declared-native' and inspect its explicit capability gaps.",
+            )
         unsupported = set(request.permissions) - self._manifest.semantic_permissions
         if unsupported:
             raise ServiceError(
@@ -401,6 +409,7 @@ class DeepSeekHarnessAdapter:
                 "provider_quota_evidence",
                 "interactive_input",
                 "declared_mcp",
+                "exact_auto_compaction_trigger",
             ),
             attestation=attestation,
         )
@@ -1442,7 +1451,7 @@ def _binding_matches_context(binding: DshBinding, context: ResolvedContext) -> b
         isinstance(permissions, (list, tuple))
         and all(isinstance(permission, str) for permission in permissions)
         and isinstance(variant_id, str)
-        and isinstance(context_policy_id, str)
+        and context_policy_id == "declared-native"
         and isinstance(permission_policy_id, str)
     ):
         return False

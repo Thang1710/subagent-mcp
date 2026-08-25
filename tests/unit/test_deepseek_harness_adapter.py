@@ -323,6 +323,32 @@ def test_manifest_and_context_keep_provider_model_opaque(tmp_path: Path) -> None
     assert context.attestation["permission_mode"] == "workspace-write"
     assert "resume_after_restart" in context.capability_gaps
     assert "provider_quota_evidence" in context.capability_gaps
+    assert "exact_auto_compaction_trigger" in context.capability_gaps
+
+
+def test_context_rejects_unimplemented_context_policy(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    adapter = DeepSeekHarnessAdapter(
+        binding_locator=lambda: _binding(tmp_path),
+        data_root=tmp_path / "data",
+    )
+    asyncio.run(adapter.probe())
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            adapter.resolve_context(
+                _context_request(
+                    workspace,
+                    context_policy_id="full-native",
+                )
+            )
+        )
+
+    assert captured.value.code == "CAPABILITY_MISSING"
+    assert captured.value.category == "capability"
+    assert captured.value.retryable is False
+    assert "declared-native" in (captured.value.next_action or "")
 
 
 def test_write_scope_becomes_native_session_cwd_and_multi_root_fails_closed(

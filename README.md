@@ -27,7 +27,8 @@ observe, steer, and close. The core hard-codes no provider role or model name.
 
 - **Claude Code — Ready.** Uses the native Claude Code harness, provider-native
   model and reasoning settings, subscription OAuth identity, and live
-  no-overage evidence before accepting its output.
+  no-overage evidence before accepting its output. Project/local context and
+  exact auto-compaction-trigger attestation remain explicit capability gaps.
 - **DeepSeek Harness — Ready.** Uses its native ACP transport and
   harness-published model catalog for bounded tasks. Resume after an MCP restart,
   exact provider quota evidence, interactive input, and declared MCP remain
