@@ -1,6 +1,6 @@
 # Subagent MCP Explicit Wait Policy Design
 
-**Status:** Approved in conversation on 2026-08-25; written review pending.
+**Status:** Written design approved by the user on 2026-08-25.
 
 ## Problem
 
