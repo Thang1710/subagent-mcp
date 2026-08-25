@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.16 - 2026-08-25
+
+- Retry an explicit transient DeepSeek upstream HTTP 429 at most three total
+  attempts, while leaving quota, credit, billing, and ambiguous failures
+  non-retryable.
+- Report a bounded `RATE_LIMITED` result when the shared provider pool remains
+  unavailable, without exposing provider payloads or changing model priority.
+
 ## 1.0.15 - 2026-08-25
 
 - Accept valid Claude Code stream frames up to 8 MiB so large native Read

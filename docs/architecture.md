@@ -174,7 +174,11 @@ completion deadline; initialization, query submission, cancellation, and
 connection cleanup remain bounded. DeepSeek binding discovery and launch-file
 revalidation run outside the MCP event loop; discovery has a 15-second
 pre-provider deadline, and native launch still locks the exact attested files.
-That deadline never applies to a model turn. Claude managed transport accepts complete NDJSON frames up to
+That deadline never applies to a model turn. An explicit DeepSeek upstream HTTP
+429 marked temporary may retry the same prompt up to three total attempts. It
+does not demote the model; exhaustion returns `RATE_LIMITED` as retryable.
+Quota, credit, billing, timeout, and ambiguous failures are never retried.
+Claude managed transport accepts complete NDJSON frames up to
 8 MiB and still fails closed above that bound or on malformed JSON. Complete
 redacted final text is bounded to 65,536 characters in local state; compact
 controller responses carry only artifact metadata and on-demand reads are

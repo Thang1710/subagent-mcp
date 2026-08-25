@@ -1105,15 +1105,23 @@ def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
         async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
             self.prompts.append((session_id, prompt))
             raise RuntimeError(
-                "turn failed: insufficient_quota; account credits exhausted"
+                "turn failed: 429: insufficient_quota; account credits exhausted; "
+                "retry shortly"
             )
 
     async def scenario() -> None:
         workspace = tmp_path / "workspace"
         workspace.mkdir()
+        clients: list[QuotaAcpClient] = []
+
+        def factory(launch: DshLaunch) -> QuotaAcpClient:
+            client = QuotaAcpClient(launch)
+            clients.append(client)
+            return client
+
         adapter = DeepSeekHarnessAdapter(
             binding_locator=lambda: _binding(tmp_path),
-            client_factory=QuotaAcpClient,
+            client_factory=factory,
             data_root=tmp_path / "data",
             timeout_seconds=1,
         )
@@ -1142,6 +1150,130 @@ def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
         assert snapshot.error is not None
         assert snapshot.error.code == "QUOTA_PAUSED"
         assert "credit" in snapshot.error.message.lower()
+        assert len(clients[0].prompts) == 1
+
+    asyncio.run(scenario())
+
+
+def test_transient_upstream_rate_limit_retries_three_total_attempts(
+    tmp_path: Path,
+) -> None:
+    class RateLimitedThenReadyClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            if len(self.prompts) < 3:
+                raise RuntimeError(
+                    "turn failed: 429: stealth/ox-alpha is temporarily rate-limited "
+                    "upstream; limit_source=upstream_provider_shared_pool; retry shortly"
+                )
+            return "end_turn", "CAPSULE: OX_READY"
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[RateLimitedThenReadyClient] = []
+
+        def factory(launch: DshLaunch) -> RateLimitedThenReadyClient:
+            client = RateLimitedThenReadyClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+            transient_retry_delay_seconds=0,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-rate-limit",
+                "execution-rate-limit",
+                TaskPacket("Review", "Return ready.", ("Ready",), "reviewer"),
+                context,
+            )
+        )
+        for _ in range(50):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-rate-limit",
+                    "execution-rate-limit",
+                    "dsh-session-1",
+                    "execution-rate-limit",
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert snapshot.execution_state == "succeeded"
+        assert snapshot.result_text == "CAPSULE: OX_READY"
+        assert len(clients[0].prompts) == 3
+
+    asyncio.run(scenario())
+
+
+def test_transient_upstream_rate_limit_is_retryable_after_three_attempts(
+    tmp_path: Path,
+) -> None:
+    class RateLimitedClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            raise RuntimeError(
+                "turn failed: 429: stealth/ox-alpha is temporarily rate-limited "
+                "upstream; limit_source=upstream_provider_shared_pool; retry shortly"
+            )
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[RateLimitedClient] = []
+
+        def factory(launch: DshLaunch) -> RateLimitedClient:
+            client = RateLimitedClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+            transient_retry_delay_seconds=0,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-rate-limit",
+                "execution-rate-limit",
+                TaskPacket("Review", "Return ready.", ("Ready",), "reviewer"),
+                context,
+            )
+        )
+        for _ in range(50):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-rate-limit",
+                    "execution-rate-limit",
+                    "dsh-session-1",
+                    "execution-rate-limit",
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "RATE_LIMITED"
+        assert snapshot.error.retryable is True
+        assert snapshot.error.message == (
+            "DeepSeek provider is temporarily rate-limited after 3 attempts"
+        )
+        assert len(clients[0].prompts) == 3
 
     asyncio.run(scenario())
 

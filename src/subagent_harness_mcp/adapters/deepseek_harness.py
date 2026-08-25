@@ -33,6 +33,8 @@ TRANSPORT = "native-acp"
 DEFAULT_TIMEOUT_SECONDS = 300.0
 DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS = 15.0
 DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
+DEFAULT_TRANSIENT_RETRY_DELAY_SECONDS = 1.0
+MAX_TRANSIENT_PROVIDER_ATTEMPTS = 3
 DURABLE_RESULT_MAX_CHARS = 65_536
 CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 MAX_WIRE_LINE_BYTES = 1024 * 1024
@@ -44,6 +46,11 @@ _QUOTA_EXHAUSTED = re.compile(
     r"|\b(?:balance|credits?)[\s_-]+(?:exhausted|depleted)\b"
     r"|\bout[\s_-]+of[\s_-]+(?:credits?|budget)\b",
     re.IGNORECASE,
+)
+_TRANSIENT_RATE_LIMIT = re.compile(
+    r"\b429\b.*(?:temporar(?:y|ily)[\s_-]+rate[\s_-]*limit"
+    r"|upstream_provider_shared_pool|retry[\s_-]+shortly)",
+    re.IGNORECASE | re.DOTALL,
 )
 _PACKAGES = {
     "settings-file": "@deepseek-ai/dsh-settings-file",
@@ -193,11 +200,13 @@ class DeepSeekHarnessAdapter:
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         binding_probe_timeout_seconds: float = DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS,
         turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
+        transient_retry_delay_seconds: float = DEFAULT_TRANSIENT_RETRY_DELAY_SECONDS,
     ) -> None:
         self._binding_locator = binding_locator or locate_dsh_binding
         self._timeout = timeout_seconds
         self._binding_probe_timeout = binding_probe_timeout_seconds
         self._turn_timeout = turn_timeout_seconds
+        self._transient_retry_delay = transient_retry_delay_seconds
         self._client_factory = client_factory or (
             lambda launch: _StdioAcpClient(
                 launch,
@@ -656,17 +665,35 @@ class DeepSeekHarnessAdapter:
         result: tuple[str, str] | None = None
         failure: BaseException | None = None
         timeout_cleanup_confirmed: bool | None = None
-        try:
-            pending = session.client.prompt(session.snapshot.external_session_id, prompt)
-            result = (
-                await pending
-                if self._turn_timeout is None
-                else await asyncio.wait_for(pending, timeout=self._turn_timeout)
-            )
-        except BaseException as exc:
-            failure = exc
-            if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
-                timeout_cleanup_confirmed = await self._stop_timed_out_turn(session)
+        attempts = 0
+        while attempts < MAX_TRANSIENT_PROVIDER_ATTEMPTS:
+            attempts += 1
+            try:
+                pending = session.client.prompt(
+                    session.snapshot.external_session_id, prompt
+                )
+                result = (
+                    await pending
+                    if self._turn_timeout is None
+                    else await asyncio.wait_for(pending, timeout=self._turn_timeout)
+                )
+                failure = None
+                break
+            except BaseException as exc:
+                failure = exc
+                if isinstance(exc, (TimeoutError, asyncio.TimeoutError)):
+                    timeout_cleanup_confirmed = await self._stop_timed_out_turn(session)
+                    break
+                description = str(exc)
+                transient = bool(_TRANSIENT_RATE_LIMIT.search(description)) and not bool(
+                    _QUOTA_EXHAUSTED.search(description)
+                )
+                if not transient or attempts >= MAX_TRANSIENT_PROVIDER_ATTEMPTS:
+                    break
+                turn = session.turn
+                if turn is not None and turn.interrupted:
+                    break
+                await asyncio.sleep(self._transient_retry_delay * attempts)
         async with session.lock:
             turn = session.turn
             if turn is None or turn.execution_id != execution_id:
@@ -706,10 +733,20 @@ class DeepSeekHarnessAdapter:
                     code = "QUOTA_PAUSED"
                     category = "quota"
                     message = "DeepSeek provider usage credit or quota is exhausted"
+                    retryable = False
+                elif _TRANSIENT_RATE_LIMIT.search(str(failure)):
+                    code = "RATE_LIMITED"
+                    category = "provider"
+                    message = (
+                        "DeepSeek provider is temporarily rate-limited after "
+                        f"{attempts} attempts"
+                    )
+                    retryable = True
                 else:
                     code = "PROVIDER_ERROR"
                     category = "provider"
                     message = "DeepSeek ACP turn did not complete"
+                    retryable = False
                 session.snapshot = _snapshot(
                     session.context,
                     session_id=session.snapshot.external_session_id,
@@ -718,7 +755,7 @@ class DeepSeekHarnessAdapter:
                     error=AdapterFailure(
                         code,
                         category,
-                        False,
+                        retryable,
                         message,
                     ),
                 )
