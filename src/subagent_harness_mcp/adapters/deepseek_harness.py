@@ -742,11 +742,22 @@ class DeepSeekHarnessAdapter:
                         f"{attempts} attempts"
                     )
                     retryable = True
+                    next_action = (
+                        "Continue the same live conversation after provider availability "
+                        "changes; start a new conversation only after a controller or "
+                        "package restart."
+                    )
                 else:
                     code = "PROVIDER_ERROR"
                     category = "provider"
                     message = "DeepSeek ACP turn did not complete"
                     retryable = False
+                    next_action = None
+                if code == "QUOTA_PAUSED":
+                    next_action = (
+                        "Refresh current provider availability before a new task; do not "
+                        "buy, reload, or enable usage credits automatically."
+                    )
                 session.snapshot = _snapshot(
                     session.context,
                     session_id=session.snapshot.external_session_id,
@@ -757,6 +768,7 @@ class DeepSeekHarnessAdapter:
                         category,
                         retryable,
                         message,
+                        next_action,
                     ),
                 )
                 return
@@ -1534,6 +1546,22 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
         *(f"- {item}" for item in task.acceptance_criteria),
     ]
     write_set = request.context.attestation.get("write_set", ())
+    input_attestations = request.context.attestation.get("input_attestations", ())
+    if isinstance(input_attestations, (list, tuple)) and input_attestations:
+        lines.extend(
+            (
+                "Trusted input attestations computed read-only by Subagent MCP immediately before launch:",
+                *(
+                    f"- {item['path']} sha256={item['sha256']} ({item['byte_count']} bytes)"
+                    for item in input_attestations
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("path"), str)
+                    and isinstance(item.get("sha256"), str)
+                    and isinstance(item.get("byte_count"), int)
+                ),
+                "Bind the final decision to these controller-verified hashes.",
+            )
+        )
     if write_set:
         lines.extend(
             (
@@ -1552,6 +1580,22 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
 
 def _send_prompt(request: AdapterSendRequest) -> str:
     lines = [request.prompt]
+    input_attestations = request.context.attestation.get("input_attestations", ())
+    if isinstance(input_attestations, (list, tuple)) and input_attestations:
+        lines.extend(
+            (
+                "Trusted input attestations computed read-only by Subagent MCP immediately before launch:",
+                *(
+                    f"- {item['path']} sha256={item['sha256']} ({item['byte_count']} bytes)"
+                    for item in input_attestations
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("path"), str)
+                    and isinstance(item.get("sha256"), str)
+                    and isinstance(item.get("byte_count"), int)
+                ),
+                "Bind the final decision to these controller-verified hashes.",
+            )
+        )
     if request.reply_to is not None:
         lines.append(f"Reply to: {request.reply_to}")
     if request.answers:
@@ -1610,7 +1654,7 @@ def _acp_error_message(error: object) -> str:
                 details.append(value)
         data = error.get("data")
         if isinstance(data, Mapping):
-            for key in ("message", "detail", "error"):
+            for key in ("message", "detail", "details", "error"):
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     details.append(value)

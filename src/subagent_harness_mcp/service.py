@@ -10,6 +10,7 @@ import re
 import sqlite3
 import time
 import uuid
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn, Sequence
 
@@ -45,6 +46,8 @@ from .contracts import (
     SpawnRequest,
     StatusRequest,
     TERMINAL_EXECUTION_STATES,
+    TASK_INPUT_MAX_BYTES,
+    TaskInput,
     WaitRequest,
     result_artifact_metadata,
     slice_transfer_metrics,
@@ -480,6 +483,10 @@ class SubagentMcpService:
                 if launch.state == "starting":
                     self._store.recover_incomplete_launch(execution_id)
                 return self._status(self._store.load_execution(execution_id), after_cursor=0)
+            input_attestations = await _attest_task_inputs(
+                workspace_path,
+                request.task.inputs,
+            )
             if "workspace_write" in request.permissions:
                 self._store.acquire_writer_scope_leases(
                     workspace_key=workspace_key,
@@ -502,6 +509,16 @@ class SubagentMcpService:
                 )
             )
             _require_context(context, requested)
+            if input_attestations:
+                context = replace(
+                    context,
+                    attestation={
+                        **dict(context.attestation),
+                        "input_attestations": [
+                            dict(item) for item in input_attestations
+                        ],
+                    },
+                )
             self._store.record_launch_attempt(
                 execution_id,
                 _unverified_cleanup_observation(context),
@@ -818,6 +835,7 @@ class SubagentMcpService:
                 "prompt": request.prompt,
                 "reply_to": request.reply_to,
                 "answers": dict(request.answers),
+                "inputs": [item.to_dict() for item in request.inputs],
             }
             if request.artifact is not None:
                 request_payload["artifact"] = request.artifact.to_dict()
@@ -842,6 +860,10 @@ class SubagentMcpService:
                 if launch.state == "starting":
                     self._store.recover_incomplete_launch(execution_id)
                 return self._status(self._store.load_execution(execution_id), after_cursor=0)
+            input_attestations = await _attest_task_inputs(
+                str(requested["workspace_path"]),
+                request.inputs,
+            )
             if "workspace_write" in requested.get("permissions", ()):
                 self._store.acquire_writer_scope_leases(
                     workspace_key=str(requested["workspace_key"]),
@@ -849,6 +871,13 @@ class SubagentMcpService:
                     execution_id=execution_id,
                 )
             context = _context_from_record(previous)
+            current_attestation = dict(context.attestation)
+            current_attestation.pop("input_attestations", None)
+            if input_attestations:
+                current_attestation["input_attestations"] = [
+                    dict(item) for item in input_attestations
+                ]
+            context = replace(context, attestation=current_attestation)
             session = _session_request(previous)
             self._store.record_launch_attempt(
                 execution_id,
@@ -1728,6 +1757,39 @@ class SubagentMcpService:
             and isinstance(evidence, Mapping)
             and evidence.get("cleanup_confirmed") is False
         )
+        observed_attestation = observed.get("attestation")
+        if not isinstance(observed_attestation, Mapping):
+            observed_attestation = {}
+        raw_inputs = observed_attestation.get("input_attestations", ())
+        if not isinstance(raw_inputs, (list, tuple)):
+            raw_inputs = ()
+        input_attestations = tuple(
+            dict(item) for item in raw_inputs if isinstance(item, Mapping)
+        )
+        reasoning = observed.get("reasoning", record.requested.get("reasoning", {}))
+        reasoning_attestation: dict[str, Any] = {}
+        if isinstance(reasoning, Mapping) and reasoning:
+            raw_binding = observed_attestation.get("reasoning_binding", ())
+            binding = (
+                list(raw_binding)
+                if isinstance(raw_binding, (list, tuple))
+                and all(isinstance(item, str) for item in raw_binding)
+                else []
+            )
+            reasoning_attestation = {
+                "effective": dict(reasoning),
+                "source": str(
+                    observed_attestation.get(
+                        "reasoning_source",
+                        observed_attestation.get("source", "adapter-resolved-context"),
+                    )
+                ),
+                "binding": binding,
+                "provider_reported": (
+                    observed_attestation.get("reasoning_provider_reported") is True
+                ),
+                "context_hash": str(observed.get("context_hash", "")),
+            }
         return AgentStatus(
             conversation_id=record.conversation_id,
             execution_id=record.execution_id,
@@ -1742,6 +1804,8 @@ class SubagentMcpService:
             events=events,
             next_event_cursor=record.next_event_cursor,
             recovery_required=recovery,
+            input_attestations=input_attestations,
+            reasoning_attestation=reasoning_attestation,
         )
 
     def _record_failure(
@@ -2119,6 +2183,7 @@ def _requested_metadata(
         "write_set": list(write_set),
         "mode": request.mode,
         "task_title": _redact_text(request.task.title)[:240],
+        "inputs": [item.to_dict() for item in request.task.inputs],
     }
 
 
@@ -2137,6 +2202,7 @@ def _spawn_digest_payload(
             "authority": list(request.task.authority),
             "repository_base": request.task.repository_base,
             "repository_head": request.task.repository_head,
+            "inputs": [item.to_dict() for item in request.task.inputs],
         },
         "cwd": request.cwd,
         "mode": request.mode,
@@ -2219,6 +2285,10 @@ def _context_observation(context: ResolvedContext) -> dict[str, Any]:
             "permission_policy_id",
             "write_set",
             "write_root_path",
+            "input_attestations",
+            "reasoning_source",
+            "reasoning_binding",
+            "reasoning_provider_reported",
         )
         if key in context.attestation
     }
@@ -2232,6 +2302,97 @@ def _context_observation(context: ResolvedContext) -> dict[str, Any]:
         "capability_gaps": list(context.capability_gaps),
         "attestation": resume_attestation,
     }
+
+
+async def _attest_task_inputs(
+    workspace_path: str,
+    inputs: tuple[TaskInput, ...],
+) -> tuple[Mapping[str, Any], ...]:
+    if not inputs:
+        return ()
+    return await asyncio.to_thread(_attest_task_inputs_sync, workspace_path, inputs)
+
+
+def _attest_task_inputs_sync(
+    workspace_path: str,
+    inputs: tuple[TaskInput, ...],
+) -> tuple[Mapping[str, Any], ...]:
+    workspace = Path(workspace_path).resolve(strict=True)
+    attestations: list[Mapping[str, Any]] = []
+    for item in inputs:
+        relative_path = item.path.replace("\\", "/")
+        try:
+            candidate = (workspace / Path(*relative_path.split("/"))).resolve(
+                strict=True
+            )
+            candidate.relative_to(workspace)
+        except (OSError, ValueError) as exc:
+            raise ServiceError(
+                "INPUT_UNAVAILABLE",
+                f"task input {relative_path!r} is not an available workspace file",
+                retryable=False,
+            ) from exc
+        if not candidate.is_file():
+            raise ServiceError(
+                "INPUT_UNAVAILABLE",
+                f"task input {relative_path!r} is not an available workspace file",
+                retryable=False,
+            )
+        before = candidate.stat()
+        if before.st_size > TASK_INPUT_MAX_BYTES:
+            raise ServiceError(
+                "CAPABILITY_MISSING",
+                f"task input {relative_path!r} exceeds the read-only hash limit",
+                category="capability",
+                retryable=False,
+            )
+        digest = hashlib.sha256()
+        byte_count = 0
+        try:
+            with candidate.open("rb") as stream:
+                while chunk := stream.read(1024 * 1024):
+                    byte_count += len(chunk)
+                    if byte_count > TASK_INPUT_MAX_BYTES:
+                        raise ServiceError(
+                            "CAPABILITY_MISSING",
+                            f"task input {relative_path!r} exceeds the read-only hash limit",
+                            category="capability",
+                            retryable=False,
+                        )
+                    digest.update(chunk)
+        except OSError as exc:
+            raise ServiceError(
+                "INPUT_UNAVAILABLE",
+                f"task input {relative_path!r} could not be read for attestation",
+                retryable=False,
+            ) from exc
+        after = candidate.stat()
+        if (
+            before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or byte_count != after.st_size
+        ):
+            raise ServiceError(
+                "INPUT_CHANGED",
+                f"task input {relative_path!r} changed during SHA-256 attestation",
+                retryable=False,
+            )
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != item.expected_sha256:
+            raise ServiceError(
+                "INPUT_CHANGED",
+                f"task input {relative_path!r} does not match expected SHA-256",
+                retryable=False,
+            )
+        attestations.append(
+            {
+                "path": relative_path,
+                "sha256": actual_sha256,
+                "byte_count": byte_count,
+                "source": "subagent-mcp-read-only-sha256",
+            }
+        )
+    return tuple(attestations)
 
 
 def _unverified_cleanup_observation(
@@ -2270,6 +2431,10 @@ def _snapshot_result(snapshot: AdapterSnapshot) -> Mapping[str, Any] | None:
             "retryable": snapshot.error.retryable,
             "message": _redact_text(snapshot.error.message),
         }
+        if snapshot.error.next_action is not None:
+            result["error"]["next_action"] = _redact_text(
+                snapshot.error.next_action
+            )
     return result or None
 
 

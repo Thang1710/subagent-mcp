@@ -568,6 +568,12 @@ class ClaudeCodeAdapter:
         )
         attestation = {
             "source": "claude-code-managed-sdk",
+            "reasoning_source": "claude-code-managed-sdk",
+            "reasoning_binding": [
+                "ClaudeAgentOptions.effort",
+                "CLAUDE_CODE_EFFORT_LEVEL",
+            ],
+            "reasoning_provider_reported": False,
             "variant_id": request.variant_id,
             "permissions": list(request.permissions),
             "write_set": list(write_set),
@@ -1614,6 +1620,26 @@ def _spawn_prompt(request: AdapterSpawnRequest) -> str:
     context = getattr(request, "context", None)
     attestation = getattr(context, "attestation", {})
     write_set = attestation.get("write_set", ()) if isinstance(attestation, Mapping) else ()
+    input_attestations = (
+        attestation.get("input_attestations", ())
+        if isinstance(attestation, Mapping)
+        else ()
+    )
+    if isinstance(input_attestations, (list, tuple)) and input_attestations:
+        lines.extend(
+            (
+                "Trusted input attestations computed read-only by Subagent MCP immediately before launch:",
+                *(
+                    f"- {item['path']} sha256={item['sha256']} ({item['byte_count']} bytes)"
+                    for item in input_attestations
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("path"), str)
+                    and isinstance(item.get("sha256"), str)
+                    and isinstance(item.get("byte_count"), int)
+                ),
+                "Bind the final decision to these controller-verified hashes.",
+            )
+        )
     if write_set:
         lines.extend(
             (
@@ -1632,6 +1658,22 @@ def _send_prompt(request: AdapterSendRequest) -> str:
         request.prompt,
         "Return only the final result. Begin with one concise CAPSULE: line, then put complete non-redundant detail under DETAILS:; omit progress narration and hidden reasoning.",
     ]
+    input_attestations = request.context.attestation.get("input_attestations", ())
+    if isinstance(input_attestations, (list, tuple)) and input_attestations:
+        lines.extend(
+            (
+                "Trusted input attestations computed read-only by Subagent MCP immediately before launch:",
+                *(
+                    f"- {item['path']} sha256={item['sha256']} ({item['byte_count']} bytes)"
+                    for item in input_attestations
+                    if isinstance(item, Mapping)
+                    and isinstance(item.get("path"), str)
+                    and isinstance(item.get("sha256"), str)
+                    and isinstance(item.get("byte_count"), int)
+                ),
+                "Bind the final decision to these controller-verified hashes.",
+            )
+        )
     if request.reply_to is not None:
         lines.append(f"Reply to: {request.reply_to}")
     if request.answers:

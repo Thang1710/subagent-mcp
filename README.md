@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.16` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.17` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -45,8 +45,8 @@ then register the exact isolated release and start its background UI:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp ui --background
 ```
 
 Start a new Codex task after registration.
@@ -57,7 +57,7 @@ Open `http://127.0.0.1:8765` in a browser. If the background UI was stopped,
 start the same exact release again:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp ui --background
+uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp ui --background
 ```
 
 The settings and read-only activity UI stays on the fixed loopback port and
@@ -79,6 +79,17 @@ Codex chooses what to delegate, observes the result, and keeps the final
 judgment. Lifecycle responses are compact by default; full redacted reports
 remain in local product state and can be read or relayed later by hash-bound
 reference.
+
+For an approval tied to an exact file, pass `inputs` on `agent_spawn` (inside
+`task`) or `agent_send`:
+
+```json
+[{"path":"docs/specs/review.md","expected_sha256":"<lowercase SHA-256>"}]
+```
+
+The MCP hashes each repository-relative file read-only immediately before the
+native turn. Status returns the verified hash and configured reasoning
+attestation; a changed file fails before the external agent runs.
 
 ## Models and fallback order
 
@@ -152,13 +163,13 @@ circuits. Each adapter translates that contract to its native harness. See
 
 Switch versions without reinstalling an environment that may still be running.
 The first command uses the source version; the add/start commands use the target
-version. This example upgrades 1.0.15 to 1.0.16:
+version. This example upgrades 1.0.16 to 1.0.17:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.12 subagent-harness-mcp ui --stop
+uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp ui --stop
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.16 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp ui --background
 ```
 
 Start a fresh Codex task after changing the entry. Existing tasks keep their old

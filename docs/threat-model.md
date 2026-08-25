@@ -11,6 +11,7 @@ same-user code.
 | Risk | Control |
 |---|---|
 | Duplicate or wrong work | Request idempotency, exact session/model/workspace/context attestation |
+| Reviewer sees the wrong file revision | Repository-relative input paths, read-only pre-turn SHA-256 verification, symlink-escape rejection, normalized input attestation |
 | Provider/model downgrade | Explicit ordered selection, stable variant identity, pair-specific canary, and demotion only after terminal quota/credit evidence |
 | Claude billing/overage | Subscription-auth preflight, credential-source attestation, live no-overage event before output, circuit pause |
 | Pre-authorized provider balance | Exact provider/model route, explicit runtime enablement, and no purchase, reload, or limit-changing capability |

@@ -40,6 +40,15 @@ reference. Exact UTF-8 byte counts and clearly labelled rough token estimates
 make controller-versus-relay transfer costs visible without claiming provider
 billing precision.
 
+`agent_spawn.task.inputs` and `agent_send.inputs` may declare up to sixteen
+repository-relative files with exact lowercase SHA-256 values. The controller
+resolves each path inside the selected workspace, hashes it read-only off the
+event loop immediately before native work, and rejects missing, escaping, or
+changed inputs before the adapter runs. Verified path/hash/byte-count metadata
+is included in the native prompt and normalized status; no shell, write, or
+network authority is added. Execution status also distinguishes adapter-bound
+effective reasoning configuration from provider-reported telemetry.
+
 Every execution records requested/effective model, reasoning, transport,
 workspace, session, and context identity. Provider differences appear only in
 the descriptor and explicit capability gaps. Unknown or mismatched critical

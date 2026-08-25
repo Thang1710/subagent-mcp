@@ -23,6 +23,7 @@ from subagent_harness_mcp.contracts import (
     SendRequest,
     ServiceError,
     SpawnRequest,
+    TaskInput,
     TaskPacket,
     WaitRequest,
     WaitTarget,
@@ -123,6 +124,54 @@ def test_spawn_write_set_is_relative_bounded_and_requires_workspace_write() -> N
             "review",
             permissions=("repo_read",),
             write_set=("src",),
+        )
+
+
+def test_task_input_requires_safe_relative_path_and_lowercase_sha256() -> None:
+    item = TaskInput("docs/specs/review.md", "a" * 64)
+
+    assert item.to_dict() == {
+        "path": "docs/specs/review.md",
+        "expected_sha256": "a" * 64,
+    }
+    for invalid_path in (
+        "/absolute.md",
+        r"C:\absolute.md",
+        "../escape.md",
+        "docs/../escape.md",
+        "docs//empty.md",
+    ):
+        with pytest.raises(ContractError, match="repository-relative"):
+            TaskInput(invalid_path, "a" * 64)
+    for invalid_hash in ("A" * 64, "a" * 63, "g" * 64):
+        with pytest.raises(ContractError, match="lowercase SHA-256"):
+            TaskInput("docs/specs/review.md", invalid_hash)
+
+
+def test_task_packet_rejects_duplicate_or_excess_input_paths() -> None:
+    item = TaskInput("docs/specs/review.md", "a" * 64)
+    packet = TaskPacket(
+        "Review", "Review it.", ("Decide.",), "reviewer", inputs=(item,)
+    )
+
+    assert packet.inputs == (item,)
+    with pytest.raises(ContractError, match="unique"):
+        dataclasses.replace(packet, inputs=(item, item))
+    with pytest.raises(ContractError, match="at most"):
+        dataclasses.replace(
+            packet,
+            inputs=tuple(
+                TaskInput(f"docs/specs/{index}.md", "a" * 64)
+                for index in range(17)
+            ),
+        )
+
+    with pytest.raises(ContractError, match="unique"):
+        SendRequest(
+            "send-duplicate-input",
+            "conversation-1",
+            "Review again.",
+            inputs=(item, item),
         )
 
 
@@ -394,6 +443,44 @@ def test_agent_status_compact_projection_keeps_actionable_optional_state() -> No
     assert payload["recovery_required"] is True
     assert "result" not in payload
     assert WaitRequest((WaitTarget("conversation-2"),)).timeout_seconds == 240.0
+
+
+def test_agent_status_surfaces_input_and_reasoning_attestations() -> None:
+    input_attestation = {
+        "path": "docs/specs/review.md",
+        "sha256": "a" * 64,
+        "byte_count": 42,
+        "source": "subagent-mcp-read-only-sha256",
+    }
+    reasoning_attestation = {
+        "effective": {"effort": "max"},
+        "source": "claude-code-managed-sdk",
+        "binding": ["ClaudeAgentOptions.effort", "CLAUDE_CODE_EFFORT_LEVEL"],
+        "provider_reported": False,
+        "context_hash": "b" * 64,
+    }
+    status = AgentStatus(
+        conversation_id="conversation-attested",
+        execution_id="execution-attested",
+        external_session_id="native-session-attested",
+        workspace_path="workspace",
+        conversation_state="idle",
+        execution_state="succeeded",
+        state_revision=2,
+        descriptor=AgentDescriptor.from_manifest(
+            _manifest(), model="vendor/model", transport="managed-sdk"
+        ),
+        result={"text": "CAPSULE: approved"},
+        needs_input=(),
+        events=(),
+        next_event_cursor=2,
+        input_attestations=(input_attestation,),
+        reasoning_attestation=reasoning_attestation,
+    )
+
+    for payload in (status.to_compact_dict(), status.to_dict()):
+        assert payload["input_attestations"] == [input_attestation]
+        assert payload["reasoning_attestation"] == reasoning_attestation
 
 
 def test_public_schemas_cover_adapter_and_normalized_descriptor() -> None:

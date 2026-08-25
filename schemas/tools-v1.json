@@ -51,6 +51,12 @@
         "omitted_behavior": "exclusive whole-workspace scope",
         "conflict_rule": "equal, ancestor, or descendant active scopes conflict; disjoint scopes may run concurrently"
       },
+      "inputs": {
+        "optional": true,
+        "maximum_items": 16,
+        "fields": ["path", "expected_sha256"],
+        "behavior": "hash repository-relative files read-only before native work and surface verified attestations"
+      },
       "purpose": "Create one conversation and its first execution"
     },
     "agent_status": {
@@ -76,6 +82,12 @@
         "fields": ["conversation_id", "execution_id", "expected_sha256"],
         "same_verified_workspace_required": true,
         "source_state_required": "succeeded"
+      },
+      "inputs": {
+        "optional": true,
+        "maximum_items": 16,
+        "fields": ["path", "expected_sha256"],
+        "behavior": "hash repository-relative files read-only before the follow-up turn"
       },
       "purpose": "Continue one native session, optionally relaying one hash-bound result artifact"
     },

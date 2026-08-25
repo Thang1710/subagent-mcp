@@ -77,6 +77,7 @@ class AdapterFailure:
     category: str
     retryable: bool
     message: str
+    next_action: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

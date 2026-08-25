@@ -29,6 +29,8 @@ RESULT_CAPSULE_MAX_CHARS = 512
 RESULT_SLICE_DEFAULT_CHARS = 4_096
 RESULT_SLICE_MAX_CHARS = 8_192
 PROMPT_MAX_BYTES = 128 * 1024
+TASK_INPUT_MAX_FILES = 16
+TASK_INPUT_MAX_BYTES = 64 * 1024 * 1024
 _PROMPT_FORMATTING_CONTROLS = frozenset({"\t", "\n", "\r"})
 ROUGH_TOKEN_ESTIMATE_BASIS = (
     "content-only rough estimate: ceil(utf8_bytes / 3);"
@@ -413,6 +415,58 @@ class AgentDescriptor:
 
 
 @dataclass(frozen=True, slots=True)
+class TaskInput:
+    path: str
+    expected_sha256: str
+
+    def __post_init__(self) -> None:
+        validate_bounded_text(self.path, "task.inputs.path", 2048, strip=True)
+        normalized = self.path.replace("\\", "/")
+        parts = normalized.split("/")
+        if (
+            normalized.startswith("/")
+            or (len(normalized) >= 2 and normalized[0].isalpha() and normalized[1] == ":")
+            or "." in parts
+            or ".." in parts
+            or any(_unsafe_write_set_component(part) for part in parts)
+        ):
+            raise ContractError(
+                "REQUEST_INVALID", "task input paths must be repository-relative"
+            )
+        if (
+            not isinstance(self.expected_sha256, str)
+            or len(self.expected_sha256) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.expected_sha256
+            )
+        ):
+            raise ContractError(
+                "REQUEST_INVALID",
+                "task input expected_sha256 must be lowercase SHA-256",
+            )
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "path": self.path.replace("\\", "/"),
+            "expected_sha256": self.expected_sha256,
+        }
+
+
+def _validate_task_inputs(inputs: tuple[TaskInput, ...]) -> None:
+    if len(inputs) > TASK_INPUT_MAX_FILES:
+        raise ContractError(
+            "REQUEST_INVALID",
+            f"task inputs accept at most {TASK_INPUT_MAX_FILES} files",
+        )
+    if not all(isinstance(item, TaskInput) for item in inputs):
+        raise ContractError("REQUEST_INVALID", "task input entries must be objects")
+    normalized_paths = [item.path.replace("\\", "/").casefold() for item in inputs]
+    if len(normalized_paths) != len(set(normalized_paths)):
+        raise ContractError("REQUEST_INVALID", "task input paths must be unique")
+
+
+@dataclass(frozen=True, slots=True)
 class TaskPacket:
     title: str
     prompt: str
@@ -421,6 +475,7 @@ class TaskPacket:
     authority: tuple[str, ...] = ()
     repository_base: str | None = None
     repository_head: str | None = None
+    inputs: tuple[TaskInput, ...] = ()
 
     def __post_init__(self) -> None:
         validate_bounded_text(self.title, "task.title", 512, strip=False)
@@ -438,6 +493,7 @@ class TaskPacket:
             max_items=64,
         )
         _validate_text_collection(self.authority, "task.authority", max_items=64, allow_empty=True)
+        _validate_task_inputs(self.inputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -589,6 +645,7 @@ class SendRequest:
     reply_to: str | None = None
     answers: Mapping[str, Any] = field(default_factory=dict)
     artifact: ArtifactReference | None = None
+    inputs: tuple[TaskInput, ...] = ()
 
     def __post_init__(self) -> None:
         validate_identifier(self.request_id, "request_id", 256)
@@ -607,6 +664,7 @@ class SendRequest:
             raise ContractError(
                 "REQUEST_INVALID", "artifact must be an ArtifactReference"
             )
+        _validate_task_inputs(self.inputs)
 
 
 @dataclass(frozen=True, slots=True)
@@ -719,6 +777,8 @@ class AgentStatus:
     events: tuple[AgentEvent, ...]
     next_event_cursor: int
     recovery_required: bool = False
+    input_attestations: tuple[Mapping[str, Any], ...] = ()
+    reasoning_attestation: Mapping[str, Any] = field(default_factory=dict)
 
     def to_compact_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -741,10 +801,16 @@ class AgentStatus:
             payload["needs_input"] = [dict(item) for item in self.needs_input]
         if self.recovery_required:
             payload["recovery_required"] = True
+        if self.input_attestations:
+            payload["input_attestations"] = [
+                dict(item) for item in self.input_attestations
+            ]
+        if self.reasoning_attestation:
+            payload["reasoning_attestation"] = dict(self.reasoning_attestation)
         return payload
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": CONTRACT_SCHEMA_VERSION,
             "conversation_id": self.conversation_id,
             "execution_id": self.execution_id,
@@ -761,6 +827,13 @@ class AgentStatus:
             "next_event_cursor": self.next_event_cursor,
             "recovery_required": self.recovery_required,
         }
+        if self.input_attestations:
+            payload["input_attestations"] = [
+                dict(item) for item in self.input_attestations
+            ]
+        if self.reasoning_attestation:
+            payload["reasoning_attestation"] = dict(self.reasoning_attestation)
+        return payload
 
 
 def result_artifact_metadata(

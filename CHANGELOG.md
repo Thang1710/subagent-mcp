@@ -2,6 +2,17 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.17 - 2026-08-25
+
+- Hash-bind review inputs on both `agent_spawn` and `agent_send`: Subagent MCP
+  resolves repository-relative files, computes SHA-256 read-only before native
+  work, rejects drift, and surfaces the verified attestation in prompt/status.
+- Surface effective Claude reasoning as configured SDK/environment evidence,
+  explicitly distinguished from provider-reported telemetry.
+- Preserve ACP SDK `data.details` so exhausted temporary OX upstream 429s report
+  `RATE_LIMITED` with a safe continuation action instead of generic
+  `PROVIDER_ERROR`; cover successful first-turn then follow-up lifecycle.
+
 ## 1.0.16 - 2026-08-25
 
 - Retry an explicit transient DeepSeek upstream HTTP 429 at most three total

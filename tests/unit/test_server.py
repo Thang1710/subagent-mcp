@@ -421,6 +421,12 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
                     "authority": ["AGENTS.md"],
                     "repository_base": "base-commit",
                     "repository_head": "head-commit",
+                    "inputs": [
+                        {
+                            "path": "docs/specs/review.md",
+                            "expected_sha256": "a" * 64,
+                        }
+                    ],
                 },
                 "cwd": cwd,
                 "mode": "implement",
@@ -444,6 +450,9 @@ def test_spawn_maps_public_packet_without_changing_provider_native_values(
     assert request.task.authority == ("AGENTS.md",)
     assert request.task.repository_base == "base-commit"
     assert request.task.repository_head == "head-commit"
+    assert [item.to_dict() for item in request.task.inputs] == [
+        {"path": "docs/specs/review.md", "expected_sha256": "a" * 64}
+    ]
     assert request.cwd == cwd
     assert request.transport == "managed-sdk"
     assert request.permissions == ("repo_read", "workspace_write")
@@ -587,6 +596,12 @@ def test_send_accepts_one_hash_bound_artifact_reference() -> None:
                 "request_id": "relay-1",
                 "conversation_id": "target-conversation",
                 "prompt": "Review this source result.",
+                "inputs": [
+                    {
+                        "path": "docs/specs/review.md",
+                        "expected_sha256": "a" * 64,
+                    }
+                ],
                 "artifact": {
                     "conversation_id": "source-conversation",
                     "execution_id": "source-execution",
@@ -606,6 +621,9 @@ def test_send_accepts_one_hash_bound_artifact_reference() -> None:
         "execution_id": "source-execution",
         "expected_sha256": digest,
     }
+    assert [item.to_dict() for item in request.inputs] == [
+        {"path": "docs/specs/review.md", "expected_sha256": "a" * 64}
+    ]
 
 
 def test_status_is_compact_by_default_and_full_only_when_requested() -> None:

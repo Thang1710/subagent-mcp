@@ -26,6 +26,7 @@ from .contracts import (
     ServiceError,
     SpawnRequest,
     StatusRequest,
+    TaskInput,
     TaskPacket,
     WaitRequest,
     WaitTarget,
@@ -313,6 +314,7 @@ def create_server(service: object) -> MCPServer:
         reply_to: str | None = None,
         answers: dict[str, Any] | None = None,
         artifact: dict[str, Any] | None = None,
+        inputs: list[dict[str, Any]] | None = None,
         response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
@@ -331,6 +333,7 @@ def create_server(service: object) -> MCPServer:
                     reply_to,
                     answers,
                     artifact,
+                    inputs,
                 ),
                 require_current_runtime=True,
             ),
@@ -647,6 +650,7 @@ def _task_packet(task: Mapping[str, Any]) -> TaskPacket:
         )
     repository_base = _optional_text(task.get("repository_base"), "repository_base")
     repository_head = _optional_text(task.get("repository_head"), "repository_head")
+    inputs = _task_inputs(task.get("inputs", ()))
     return TaskPacket(
         title=task["title"],
         prompt=task["prompt"],
@@ -657,7 +661,24 @@ def _task_packet(task: Mapping[str, Any]) -> TaskPacket:
         authority=_string_tuple(task.get("authority", ()), "task.authority"),
         repository_base=repository_base,
         repository_head=repository_head,
+        inputs=inputs,
     )
+
+
+def _task_inputs(raw_inputs: object) -> tuple[TaskInput, ...]:
+    if not isinstance(raw_inputs, (list, tuple)):
+        raise ContractError("REQUEST_INVALID", "inputs must be an array")
+    inputs: list[TaskInput] = []
+    for item in raw_inputs:
+        if not isinstance(item, Mapping):
+            raise ContractError("REQUEST_INVALID", "input entries must be objects")
+        if set(item) != {"path", "expected_sha256"}:
+            raise ContractError(
+                "REQUEST_INVALID",
+                "input entries require only path and expected_sha256",
+            )
+        inputs.append(TaskInput(item["path"], item["expected_sha256"]))
+    return tuple(inputs)
 
 
 def _status_request(
@@ -696,6 +717,7 @@ def _send_request(
     reply_to: str | None,
     answers: Mapping[str, Any] | None,
     artifact: Mapping[str, Any] | None,
+    inputs: object = (),
 ) -> SendRequest:
     _api_version(api_version)
     return SendRequest(
@@ -705,6 +727,7 @@ def _send_request(
         reply_to=reply_to,
         answers={} if answers is None else answers,
         artifact=_artifact_reference(artifact),
+        inputs=_task_inputs(()) if inputs is None else _task_inputs(inputs),
     )
 
 

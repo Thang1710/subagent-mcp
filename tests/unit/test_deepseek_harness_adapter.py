@@ -734,6 +734,47 @@ def test_acp_wire_error_preserves_terminal_quota_detail_for_classification(
     asyncio.run(scenario())
 
 
+def test_acp_wire_error_preserves_sdk_wrapped_details_for_rate_classification(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            tmp_path / "persistence",
+            tmp_path / "config.yml",
+        )
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        future = asyncio.get_running_loop().create_future()
+        client._pending[8] = future
+
+        client._handle_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 8,
+                "error": {
+                    "code": -32603,
+                    "message": "Internal error",
+                    "data": {
+                        "details": (
+                            "turn failed: 429: stealth/ox-alpha is temporarily "
+                            "rate-limited upstream; "
+                            "limit_source=upstream_provider_shared_pool"
+                        )
+                    },
+                },
+            }
+        )
+
+        with pytest.raises(RuntimeError, match="upstream_provider_shared_pool"):
+            await future
+
+    asyncio.run(scenario())
+
+
 def test_acp_close_retries_after_partial_teardown_failure(tmp_path: Path) -> None:
     class _Stdin:
         def __init__(self) -> None:
@@ -1215,6 +1256,94 @@ def test_transient_upstream_rate_limit_retries_three_total_attempts(
     asyncio.run(scenario())
 
 
+def test_successful_first_turn_followup_retries_transient_429_to_terminal_result(
+    tmp_path: Path,
+) -> None:
+    class FollowupRateLimitedThenReadyClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            if len(self.prompts) == 1:
+                return "end_turn", "CAPSULE: ROUND_1_READY"
+            if len(self.prompts) == 2:
+                raise RuntimeError(
+                    "Internal error: turn failed: 429: stealth/ox-alpha is "
+                    "temporarily rate-limited upstream; "
+                    "limit_source=upstream_provider_shared_pool; retry shortly"
+                )
+            return "end_turn", "CAPSULE: FOLLOWUP_READY"
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[FollowupRateLimitedThenReadyClient] = []
+
+        def factory(launch: DshLaunch) -> FollowupRateLimitedThenReadyClient:
+            client = FollowupRateLimitedThenReadyClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+            transient_retry_delay_seconds=0,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-followup",
+                "execution-round-1",
+                TaskPacket("Review", "Round one.", ("Ready",), "reviewer"),
+                context,
+            )
+        )
+        for _ in range(30):
+            first = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-followup",
+                    "execution-round-1",
+                    "dsh-session-1",
+                    "execution-round-1",
+                )
+            )
+            if first.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+        assert first.execution_state == "succeeded"
+
+        await adapter.send(
+            AdapterSendRequest(
+                "conversation-followup",
+                "execution-followup",
+                "dsh-session-1",
+                "Review round two.",
+                None,
+                {},
+                context,
+            )
+        )
+        for _ in range(30):
+            followup = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-followup",
+                    "execution-followup",
+                    "dsh-session-1",
+                    "execution-followup",
+                )
+            )
+            if followup.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert followup.execution_state == "succeeded"
+        assert followup.result_text == "CAPSULE: FOLLOWUP_READY"
+        assert len(clients[0].prompts) == 3
+
+    asyncio.run(scenario())
+
+
 def test_transient_upstream_rate_limit_is_retryable_after_three_attempts(
     tmp_path: Path,
 ) -> None:
@@ -1272,6 +1401,10 @@ def test_transient_upstream_rate_limit_is_retryable_after_three_attempts(
         assert snapshot.error.retryable is True
         assert snapshot.error.message == (
             "DeepSeek provider is temporarily rate-limited after 3 attempts"
+        )
+        assert snapshot.error.next_action == (
+            "Continue the same live conversation after provider availability changes; "
+            "start a new conversation only after a controller or package restart."
         )
         assert len(clients[0].prompts) == 3
 

@@ -234,6 +234,38 @@ def test_task_prompt_requests_capsule_plus_complete_detail_without_word_cap() ->
     assert "500 words" not in prompt
 
 
+def test_task_prompt_publishes_controller_verified_input_hash() -> None:
+    digest = "a" * 64
+    prompt = _spawn_prompt(
+        SimpleNamespace(
+            task=TaskPacket(
+                "Review exact input",
+                "Inspect the change.",
+                ("Bind the decision to the trusted hash.",),
+                "reviewer",
+            ),
+            context=SimpleNamespace(
+                workspace_path=r"C:\workspace",
+                attestation={
+                    "input_attestations": [
+                        {
+                            "path": "docs/specs/review.md",
+                            "sha256": digest,
+                            "byte_count": 42,
+                            "source": "subagent-mcp-read-only-sha256",
+                        }
+                    ]
+                },
+            ),
+        )
+    )
+
+    assert "Trusted input attestations" in prompt
+    assert "docs/specs/review.md" in prompt
+    assert digest in prompt
+    assert "42 bytes" in prompt
+
+
 @pytest.mark.parametrize(
     "name",
     [
@@ -2242,6 +2274,12 @@ def test_resolve_context_binds_opaque_model_workspace_and_resume_policy(
     assert context.transport == "managed-sdk"
     assert context.attestation == {
         "source": "claude-code-managed-sdk",
+        "reasoning_source": "claude-code-managed-sdk",
+        "reasoning_binding": [
+            "ClaudeAgentOptions.effort",
+            "CLAUDE_CODE_EFFORT_LEVEL",
+        ],
+        "reasoning_provider_reported": False,
         "variant_id": "future-deep",
         "permissions": ["repo_read", "workspace_write"],
         "write_set": ["src/context", "docs/status.md"],

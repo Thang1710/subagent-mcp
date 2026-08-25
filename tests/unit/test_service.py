@@ -16,6 +16,7 @@ import subagent_harness_mcp.service as service_module
 from subagent_harness_mcp.adapters.base import (
     AdapterFailure,
     AdapterSendRequest,
+    AdapterSnapshot,
     CanaryRequest,
     CanaryResult,
     ProbeResult,
@@ -33,6 +34,7 @@ from subagent_harness_mcp.contracts import (
     ServiceError,
     SpawnRequest,
     StatusRequest,
+    TaskInput,
     TaskPacket,
     WaitRequest,
     WaitTarget,
@@ -301,6 +303,16 @@ class _PostNativeFailureAdapter(FakeAdapter):
         return await super().send(request)
 
 
+class _RecordingSpawnAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.spawn_requests = []
+
+    async def spawn(self, request):
+        self.spawn_requests.append(request)
+        return await super().spawn(request)
+
+
 class _PreNativeContextFailureAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
@@ -416,6 +428,126 @@ def _spawn_request(
         mode="implement" if write else "review",
         transport="managed-sdk",
         permissions=("repo_read", "workspace_write") if write else ("repo_read",),
+    )
+
+
+def test_spawn_hash_binds_declared_input_and_surfaces_attestations(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    input_path = workspace / "docs" / "specs" / "review.md"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text("approval input\n", encoding="utf-8")
+    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    harness = FakeHarness()
+    harness.enqueue("done", result="CAPSULE: approved")
+    adapter = _RecordingSpawnAdapter(harness)
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+    request = _spawn_request(workspace)
+    request = replace(
+        request,
+        task=replace(
+            request.task,
+            inputs=(TaskInput("docs/specs/review.md", digest),),
+        ),
+    )
+
+    status = asyncio.run(service.agent_spawn(request))
+
+    assert harness.call_count("spawn") == 1
+    assert adapter.spawn_requests[0].context.attestation["input_attestations"] == [
+        {
+            "path": "docs/specs/review.md",
+            "sha256": digest,
+            "byte_count": len(input_path.read_bytes()),
+            "source": "subagent-mcp-read-only-sha256",
+        }
+    ]
+    assert status.input_attestations == tuple(
+        adapter.spawn_requests[0].context.attestation["input_attestations"]
+    )
+    assert status.reasoning_attestation["effective"] == {
+        "provider_depth": "deep"
+    }
+    assert status.reasoning_attestation["context_hash"] == (
+        adapter.spawn_requests[0].context.context_hash
+    )
+
+
+def test_spawn_rejects_input_hash_drift_before_adapter_work(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    input_path = workspace / "docs" / "specs" / "review.md"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text("changed input\n", encoding="utf-8")
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness)
+    request = _spawn_request(workspace)
+    request = replace(
+        request,
+        task=replace(
+            request.task,
+            inputs=(TaskInput("docs/specs/review.md", "a" * 64),),
+        ),
+    )
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(service.agent_spawn(request))
+
+    assert captured.value.code == "INPUT_CHANGED"
+    assert captured.value.retryable is False
+    assert harness.call_count("resolve_context") == 0
+    assert harness.call_count("spawn") == 0
+
+
+def test_spawn_input_attestation_replay_does_not_rehash_changed_file(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    input_path = workspace / "docs" / "spec.md"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"reviewed")
+    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    harness = FakeHarness()
+    harness.enqueue("done", result="CAPSULE: approved")
+    service, _ = _service(tmp_path, harness)
+    request = _spawn_request(workspace)
+    request = replace(
+        request,
+        task=replace(
+            request.task,
+            inputs=(TaskInput("docs/spec.md", digest),),
+        ),
+    )
+
+    first = asyncio.run(service.agent_spawn(request))
+    input_path.write_bytes(b"changed after terminal result")
+    replay = asyncio.run(service.agent_spawn(request))
+
+    assert replay.execution_id == first.execution_id
+    assert replay.input_attestations == first.input_attestations
+    assert harness.call_count("spawn") == 1
+
+
+def test_snapshot_result_surfaces_bounded_adapter_next_action() -> None:
+    snapshot = AdapterSnapshot(
+        external_session_id="native-session",
+        external_execution_id="execution-1",
+        conversation_state="idle",
+        execution_state="failed",
+        effective_model="vendor/model",
+        effective_reasoning={},
+        workspace_path="workspace",
+        workspace_key="workspace",
+        context_hash="a" * 64,
+        error=AdapterFailure(
+            "RATE_LIMITED",
+            "provider",
+            True,
+            "Provider is temporarily rate-limited",
+            "Continue the same live conversation after availability changes.",
+        ),
+    )
+
+    assert service_module._snapshot_result(snapshot)["error"]["next_action"] == (
+        "Continue the same live conversation after availability changes."
     )
 
 
@@ -2397,10 +2529,90 @@ class _RecordingSendAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
         self.sent_prompts: list[str] = []
+        self.send_requests: list[AdapterSendRequest] = []
 
     async def send(self, request: AdapterSendRequest):
         self.sent_prompts.append(request.prompt)
+        self.send_requests.append(request)
         return await super().send(request)
+
+
+def test_agent_send_hash_binds_changed_input_before_followup_turn(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    input_path = workspace / "docs" / "spec.md"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"round one")
+    harness = FakeHarness()
+    adapter = _RecordingSendAdapter(harness)
+    harness.enqueue("done", result="CAPSULE: round one")
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+    started = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    input_path.write_bytes(b"round two")
+    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    harness.enqueue("done", result="CAPSULE: round two")
+
+    status = asyncio.run(
+        service.agent_send(
+            SendRequest(
+                "send-attested-round-two",
+                started.conversation_id,
+                "Review the changed input.",
+                inputs=(TaskInput("docs/spec.md", digest),),
+            )
+        )
+    )
+
+    assert harness.call_count("send") == 1
+    assert adapter.send_requests[0].context.attestation["input_attestations"] == [
+        {
+            "path": "docs/spec.md",
+            "sha256": digest,
+            "byte_count": len(b"round two"),
+            "source": "subagent-mcp-read-only-sha256",
+        }
+    ]
+    assert status.input_attestations == tuple(
+        adapter.send_requests[0].context.attestation["input_attestations"]
+    )
+
+
+def test_agent_send_without_inputs_does_not_reuse_prior_input_attestation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    input_path = workspace / "docs" / "spec.md"
+    input_path.parent.mkdir(parents=True)
+    input_path.write_bytes(b"round one")
+    digest = hashlib.sha256(input_path.read_bytes()).hexdigest()
+    harness = FakeHarness()
+    adapter = _RecordingSendAdapter(harness)
+    harness.enqueue("done", result="CAPSULE: round one")
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+    spawn_request = _spawn_request(workspace)
+    spawn_request = replace(
+        spawn_request,
+        task=replace(
+            spawn_request.task,
+            inputs=(TaskInput("docs/spec.md", digest),),
+        ),
+    )
+    started = asyncio.run(service.agent_spawn(spawn_request))
+    harness.enqueue("done", result="CAPSULE: round two")
+
+    status = asyncio.run(
+        service.agent_send(
+            SendRequest(
+                "send-without-inputs-round-two",
+                started.conversation_id,
+                "Review a different concern without a hash binding.",
+            )
+        )
+    )
+
+    assert "input_attestations" not in adapter.send_requests[0].context.attestation
+    assert status.input_attestations == ()
 
 
 def _adapter_counts(harness: FakeHarness) -> tuple[int, ...]:
@@ -2502,6 +2714,7 @@ def test_artifact_relay_expands_full_source_only_in_memory(tmp_path: Path) -> No
             "expected_sha256": digest,
         },
         "conversation_id": target.conversation_id,
+        "inputs": [],
         "prompt": request.prompt,
         "reply_to": None,
     }
