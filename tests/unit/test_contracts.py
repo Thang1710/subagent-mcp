@@ -343,6 +343,8 @@ def test_agent_status_compact_projection_uses_result_artifact_metadata() -> None
     digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
     assert payload == {
         "conversation_id": "conversation-1",
+        "execution_id": "execution-1",
+        "external_session_id": "native-session-1",
         "conversation_state": "idle",
         "execution_state": "succeeded",
         "status": "succeeded",
@@ -396,7 +398,10 @@ def test_agent_status_compact_projection_keeps_terminal_error_direct() -> None:
         next_event_cursor=1,
     )
 
-    assert status.to_compact_dict()["result"] == status.result
+    payload = status.to_compact_dict()
+    assert payload["result"] == status.result
+    assert payload["execution_id"] == "execution-error"
+    assert "external_session_id" not in payload
 
 
 def test_result_read_request_requires_exact_hash_and_bounded_character_slice() -> None:

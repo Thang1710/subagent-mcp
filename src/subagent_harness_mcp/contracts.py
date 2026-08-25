@@ -783,12 +783,15 @@ class AgentStatus:
     def to_compact_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "conversation_id": self.conversation_id,
+            "execution_id": self.execution_id,
             "conversation_state": self.conversation_state,
             "execution_state": self.execution_state,
             "status": self.execution_state,
             "state_revision": self.state_revision,
             "next_event_cursor": self.next_event_cursor,
         }
+        if self.external_session_id is not None:
+            payload["external_session_id"] = self.external_session_id
         if self.result is not None and self.execution_state in TERMINAL_EXECUTION_STATES:
             if "error" in self.result:
                 payload["result"] = dict(self.result)

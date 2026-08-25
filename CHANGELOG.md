@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.18 - 2026-08-25
+
+- Make a generic DeepSeek provider failure actionable without replaying native
+  work: read-only tasks may start a new bounded explicit attempt, while write
+  tasks remain non-retryable until their declared effects are reconciled.
+- Include execution and available native-session IDs in compact status so a
+  terminal incident can be diagnosed without requesting the full result.
+
 ## 1.0.17 - 2026-08-25
 
 - Hash-bind review inputs on both `agent_spawn` and `agent_send`: Subagent MCP

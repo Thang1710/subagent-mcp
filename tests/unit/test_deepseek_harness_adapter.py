@@ -1196,6 +1196,87 @@ def test_provider_quota_exhaustion_is_reported_without_ambiguous_retry(
     asyncio.run(scenario())
 
 
+@pytest.mark.parametrize(
+    ("permissions", "write_set", "expected_retryable"),
+    [
+        (("repo_read",), (), True),
+        (("repo_read", "workspace_write"), (".",), False),
+    ],
+)
+def test_generic_provider_error_has_permission_safe_recovery_guidance(
+    tmp_path: Path,
+    permissions: tuple[str, ...],
+    write_set: tuple[str, ...],
+    expected_retryable: bool,
+) -> None:
+    class GenericProviderErrorClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            raise RuntimeError("Provider returned error: PI_AI_ERROR")
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[GenericProviderErrorClient] = []
+
+        def factory(launch: DshLaunch) -> GenericProviderErrorClient:
+            client = GenericProviderErrorClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(
+            _context_request(
+                workspace,
+                permissions=permissions,
+                write_set=write_set,
+            )
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-provider-error",
+                "execution-provider-error",
+                TaskPacket("Review", "Return a result.", ("Report",), "reviewer"),
+                context,
+            )
+        )
+        for _ in range(30):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-provider-error",
+                    "execution-provider-error",
+                    "dsh-session-1",
+                    "execution-provider-error",
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "PROVIDER_ERROR"
+        assert snapshot.error.retryable is expected_retryable
+        assert snapshot.error.next_action is not None
+        if expected_retryable:
+            assert "new read-only conversation" in snapshot.error.next_action
+            assert "new request_id" in snapshot.error.next_action
+            assert "three total attempts" in snapshot.error.next_action
+            assert "usage credits" in snapshot.error.next_action
+        else:
+            assert "Reconcile the declared write set" in snapshot.error.next_action
+            assert "do not retry automatically" in snapshot.error.next_action
+        assert len(clients[0].prompts) == 1
+
+    asyncio.run(scenario())
+
+
 def test_transient_upstream_rate_limit_retries_three_total_attempts(
     tmp_path: Path,
 ) -> None:

@@ -751,8 +751,20 @@ class DeepSeekHarnessAdapter:
                     code = "PROVIDER_ERROR"
                     category = "provider"
                     message = "DeepSeek ACP turn did not complete"
-                    retryable = False
-                    next_action = None
+                    read_only = (
+                        session.context.attestation.get("permission_mode")
+                        == "read-only"
+                    )
+                    retryable = read_only
+                    next_action = (
+                        "Refresh current provider availability, then start one new "
+                        "read-only conversation with a new request_id; retry at most "
+                        "three total attempts. Do not reuse the failed turn, change "
+                        "models, or buy, reload, or enable usage credits automatically."
+                        if read_only
+                        else "Reconcile the declared write set and any provider-side "
+                        "effects before starting a new task; do not retry automatically."
+                    )
                 if code == "QUOTA_PAUSED":
                     next_action = (
                         "Refresh current provider availability before a new task; do not "
