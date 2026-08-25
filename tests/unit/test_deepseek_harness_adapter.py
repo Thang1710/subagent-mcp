@@ -5,9 +5,12 @@ import os
 from dataclasses import replace
 from pathlib import Path
 import sys
+import threading
 from types import SimpleNamespace
 
 import pytest
+
+import subagent_harness_mcp.adapters.deepseek_harness as deepseek_module
 
 from subagent_harness_mcp.adapters import (
     AdapterContextRequest,
@@ -51,6 +54,153 @@ def test_product_default_has_no_elapsed_turn_deadline(tmp_path: Path) -> None:
 
     assert DEFAULT_TURN_TIMEOUT_SECONDS is None
     assert adapter._turn_timeout is None
+
+
+def test_binding_probe_timeout_keeps_event_loop_responsive(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def blocked_locator() -> DshBinding | None:
+        release.wait(timeout=1)
+        return _binding(tmp_path)
+
+    async def scenario() -> None:
+        heartbeat = asyncio.Event()
+
+        async def beat() -> None:
+            await asyncio.sleep(0)
+            heartbeat.set()
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=blocked_locator,
+            client_factory=lambda launch: _FakeAcpClient(launch),
+            data_root=tmp_path / "data",
+            binding_probe_timeout_seconds=0.01,
+        )
+        beat_task = asyncio.create_task(beat())
+        try:
+            probe = await adapter.probe()
+        finally:
+            release.set()
+        await beat_task
+
+        assert heartbeat.is_set()
+        assert probe.state == "recovery_required"
+        assert probe.details == {"code": "BINDING_PROBE_TIMEOUT"}
+
+    asyncio.run(scenario())
+
+
+def test_model_catalog_binding_timeout_keeps_event_loop_responsive(
+    tmp_path: Path,
+) -> None:
+    release = threading.Event()
+
+    def blocked_locator() -> DshBinding | None:
+        release.wait(timeout=1)
+        return _binding(tmp_path)
+
+    async def scenario() -> None:
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=blocked_locator,
+            catalog_reader=lambda *_args: asyncio.sleep(0, result=({"value": "fresh"},)),
+            data_root=tmp_path / "data",
+            binding_probe_timeout_seconds=0.01,
+        )
+        adapter._catalog_cache = ({"value": "cached"},)
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            catalog = await adapter.model_catalog()
+        finally:
+            release.set()
+
+        assert loop.time() - started_at < 0.2
+        assert catalog == ({"value": "cached"},)
+
+    asyncio.run(scenario())
+
+
+def test_orphan_cleanup_binding_timeout_keeps_event_loop_responsive(
+    tmp_path: Path,
+) -> None:
+    release = threading.Event()
+    calls = 0
+    binding = _binding(tmp_path)
+
+    def locate_then_block() -> DshBinding | None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return binding
+        release.wait(timeout=1)
+        return binding
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=locate_then_block,
+            process_inventory=lambda: (),
+            data_root=tmp_path / "data",
+            binding_probe_timeout_seconds=0.1,
+        )
+        assert (await adapter.probe()).state == "ready"
+        context = await adapter.resolve_context(_context_request(workspace))
+        request = AdapterSessionRequest(
+            "conversation-timeout",
+            "execution-timeout",
+            "dsh-session-timeout",
+            "execution-timeout",
+        )
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            confirmed = await adapter.orphan_cleanup_confirmed(request, context)
+        finally:
+            release.set()
+
+        assert loop.time() - started_at < 0.5
+        assert confirmed is False
+
+    asyncio.run(scenario())
+
+
+def test_probe_binding_is_reused_until_launch_revalidation(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        binding = _binding(tmp_path)
+        calls = 0
+
+        def locate_once() -> DshBinding:
+            nonlocal calls
+            calls += 1
+            if calls > 1:
+                raise AssertionError("binding discovery repeated before native launch")
+            return binding
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=locate_once,
+            client_factory=lambda launch: _FakeAcpClient(launch),
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+        )
+        probe = await adapter.probe()
+        context = await adapter.resolve_context(_context_request(workspace))
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-binding-cache",
+                "execution-binding-cache",
+                TaskPacket("Review", "Review only.", ("Return.",), "reviewer"),
+                context,
+            )
+        )
+
+        assert probe.state == "ready"
+        assert started.execution_state == "running"
+        assert calls == 1
+
+    asyncio.run(scenario())
 
 
 class _FakeAcpClient:
@@ -1248,6 +1398,53 @@ def test_acp_revalidates_binding_before_process_launch(
 
         assert captured.value.code == "CONTEXT_DRIFT"
         assert launched is False
+
+    asyncio.run(scenario())
+
+
+def test_launch_file_hashing_keeps_event_loop_responsive(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def scenario() -> None:
+        binding = _binding(tmp_path)
+        state = tmp_path / "state"
+        state.mkdir()
+        launch = DshLaunch(
+            binding,
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            state / "sessions",
+            state / "cordis.yml",
+        )
+        release = threading.Event()
+        process_started = False
+
+        def blocked_pair_key(*_args: object) -> str:
+            release.wait(timeout=1)
+            return binding.pair_key
+
+        async def create_process(*_args: object, **_kwargs: object) -> object:
+            nonlocal process_started
+            process_started = True
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        monkeypatch.setattr(deepseek_module, "_dsh_pair_key", blocked_pair_key)
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", create_process)
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            with pytest.raises((TimeoutError, asyncio.TimeoutError)):
+                await asyncio.wait_for(client.start(), timeout=0.01)
+        finally:
+            release.set()
+
+        assert loop.time() - started_at < 0.2
+        assert process_started is False
 
     asyncio.run(scenario())
 

@@ -58,6 +58,7 @@ PROVIDER_SAFETY_ENV = {
 }
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 180.0
 DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
+CLAUDE_MAX_WIRE_BYTES = 8 * 1024 * 1024
 DURABLE_RESULT_MAX_CHARS = 65_536
 CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
 _CONTROLLER_TRUNCATION_MARKER = "\n[truncated by Subagent MCP]"
@@ -917,7 +918,7 @@ class ClaudeCodeAdapter:
             )
             raise ServiceError(
                 "RECOVERY_REQUIRED",
-                f"Claude startup outcome is ambiguous ({type(exc).__name__})",
+                f"Claude startup outcome is ambiguous ({_ambiguous_failure_label(exc)})",
                 category="adapter",
             ) from exc
         return client, messages, session_id, rate_seen
@@ -1318,6 +1319,7 @@ def _build_canary_options(request: CanaryRequest, bound: _BoundRuntime):
         thinking={"type": "adaptive", "display": "omitted"},
         fallback_model=None,
         max_turns=1,
+        max_buffer_size=CLAUDE_MAX_WIRE_BYTES,
         include_partial_messages=False,
         forward_subagent_text=False,
         env={**PROVIDER_SAFETY_ENV, "CLAUDE_CODE_EFFORT_LEVEL": str(effort)},
@@ -1545,6 +1547,7 @@ def _build_lifecycle_options(
         thinking={"type": "adaptive", "display": "omitted"},
         fallback_model=None,
         max_turns=None,
+        max_buffer_size=CLAUDE_MAX_WIRE_BYTES,
         include_partial_messages=False,
         forward_subagent_text=False,
         resume=resume,
@@ -1703,7 +1706,10 @@ def _failed_snapshot(
             "RECOVERY_REQUIRED",
             "adapter",
             False,
-            f"Claude terminal turn outcome is ambiguous ({type(failure).__name__})",
+            (
+                "Claude terminal turn outcome is ambiguous "
+                f"({_ambiguous_failure_label(failure)})"
+            ),
         )
     evidence: dict[str, Any] = {
         "source": "claude-code-managed-sdk",
@@ -1733,6 +1739,16 @@ def _failed_snapshot(
         error=error,
         evidence=evidence,
     )
+
+
+def _ambiguous_failure_label(failure: BaseException) -> str:
+    from claude_agent_sdk import CLIJSONDecodeError
+
+    if isinstance(failure, CLIJSONDecodeError):
+        if isinstance(failure.original_error, json.JSONDecodeError):
+            return "stdout frame was not valid JSON"
+        return "stdout frame exceeded managed buffer limit"
+    return type(failure).__name__
 
 
 def _terminal_snapshot(

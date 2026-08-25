@@ -2,6 +2,15 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.15 - 2026-08-25
+
+- Accept valid Claude Code stream frames up to 8 MiB so large native Read
+  results do not become ambiguous terminal JSON failures.
+- Run DeepSeek Harness binding discovery and launch-file revalidation outside
+  the MCP event loop, bound the initial pre-provider check to 15 seconds, and
+  reuse the attested binding until native launch rechecks its exact files.
+  Provider turns still have no elapsed completion deadline.
+
 ## 1.0.14 - 2026-08-25
 
 - Surface a resident update quarantine in local runtime status and the

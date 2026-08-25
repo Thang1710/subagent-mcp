@@ -171,6 +171,11 @@ connect-only Refresh that cannot confirm cleanup reports quota unknown and does
 not move a ready circuit into recovery state.
 Ordinary Claude managed and DeepSeek ACP turns have no product-imposed elapsed
 completion deadline; initialization, query submission, cancellation, and
-connection cleanup remain bounded. Complete redacted final text is bounded to
-65,536 characters in local state; compact controller responses carry only
-artifact metadata and on-demand reads are limited to 8,192 characters per call.
+connection cleanup remain bounded. DeepSeek binding discovery and launch-file
+revalidation run outside the MCP event loop; discovery has a 15-second
+pre-provider deadline, and native launch still locks the exact attested files.
+That deadline never applies to a model turn. Claude managed transport accepts complete NDJSON frames up to
+8 MiB and still fails closed above that bound or on malformed JSON. Complete
+redacted final text is bounded to 65,536 characters in local state; compact
+controller responses carry only artifact metadata and on-demand reads are
+limited to 8,192 characters per call.

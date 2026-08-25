@@ -31,6 +31,7 @@ from .base import (
 RUNTIME_ID = "deepseek-harness"
 TRANSPORT = "native-acp"
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS = 15.0
 DEFAULT_TURN_TIMEOUT_SECONDS: float | None = None
 DURABLE_RESULT_MAX_CHARS = 65_536
 CONTROLLER_RESULT_MAX_CHARS = DURABLE_RESULT_MAX_CHARS
@@ -190,10 +191,12 @@ class DeepSeekHarnessAdapter:
         settings_path_locator: SettingsPathLocator | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        binding_probe_timeout_seconds: float = DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS,
         turn_timeout_seconds: float | None = DEFAULT_TURN_TIMEOUT_SECONDS,
     ) -> None:
         self._binding_locator = binding_locator or locate_dsh_binding
         self._timeout = timeout_seconds
+        self._binding_probe_timeout = binding_probe_timeout_seconds
         self._turn_timeout = turn_timeout_seconds
         self._client_factory = client_factory or (
             lambda launch: _StdioAcpClient(
@@ -213,6 +216,7 @@ class DeepSeekHarnessAdapter:
             data_root = resolve_paths().data_dir
         self._data_root = data_root / RUNTIME_ID
         self._last_pair_key: str | None = None
+        self._last_binding: DshBinding | None = None
         self._sessions: dict[str, _Session] = {}
         self._manifest = AdapterManifest(
             adapter_api_version=ADAPTER_API_VERSION,
@@ -250,7 +254,13 @@ class DeepSeekHarnessAdapter:
         return self._manifest
 
     async def model_catalog(self) -> tuple[Mapping[str, str], ...]:
-        binding = self._binding_locator()
+        try:
+            binding = await asyncio.wait_for(
+                asyncio.to_thread(self._binding_locator),
+                timeout=self._binding_probe_timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            return self._catalog_cache
         if binding is None:
             return ()
         settings_path = self._settings_path_locator()
@@ -269,12 +279,26 @@ class DeepSeekHarnessAdapter:
     async def probe(self) -> ProbeResult:
         if sys.platform != "win32":
             self._last_pair_key = None
+            self._last_binding = None
             return ProbeResult("incompatible", {"code": "PLATFORM_UNSUPPORTED"})
-        binding = self._binding_locator()
+        try:
+            binding = await asyncio.wait_for(
+                asyncio.to_thread(self._binding_locator),
+                timeout=self._binding_probe_timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            self._last_pair_key = None
+            self._last_binding = None
+            return ProbeResult(
+                "recovery_required",
+                {"code": "BINDING_PROBE_TIMEOUT"},
+            )
         if binding is None:
             self._last_pair_key = None
+            self._last_binding = None
             return ProbeResult("not_installed", {"code": "INSTALL_REQUIRED"})
         self._last_pair_key = binding.pair_key
+        self._last_binding = binding
         return ProbeResult(
             "ready",
             {
@@ -310,9 +334,12 @@ class DeepSeekHarnessAdapter:
             request.workspace_path,
             write_set if permission_mode == "workspace-write" else (".",),
         )
-        binding = self._binding_locator()
+        binding = self._last_binding
         if binding is None:
-            raise ServiceError("INSTALL_REQUIRED", "DeepSeek Harness ACP is not installed")
+            raise ServiceError(
+                "CONTEXT_DRIFT",
+                "DeepSeek Harness binding was not attested by readiness check",
+            )
         if self._last_pair_key != binding.pair_key:
             raise ServiceError(
                 "CONTEXT_DRIFT", "DeepSeek Harness identity changed after readiness check"
@@ -535,7 +562,13 @@ class DeepSeekHarnessAdapter:
         request: AdapterSessionRequest,
         context: ResolvedContext,
     ) -> bool:
-        binding = self._binding_locator()
+        try:
+            binding = await asyncio.wait_for(
+                asyncio.to_thread(self._binding_locator),
+                timeout=self._binding_probe_timeout,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            return False
         if (
             binding is None
             or not _binding_matches_context(binding, context)
@@ -589,9 +622,12 @@ class DeepSeekHarnessAdapter:
         provider, model = _provider_model(
             context.effective_model, context.effective_reasoning
         )
-        binding = self._binding_locator()
+        binding = self._last_binding
         if binding is None:
-            raise ServiceError("INSTALL_REQUIRED", "DeepSeek Harness ACP is not installed")
+            raise ServiceError(
+                "CONTEXT_DRIFT",
+                "DeepSeek Harness binding was not attested by readiness check",
+            )
         permission_mode = context.attestation.get("permission_mode")
         if permission_mode not in {"read-only", "workspace-write"}:
             raise ServiceError("CONTEXT_DRIFT", "DeepSeek permission mode changed")
@@ -765,7 +801,8 @@ class _StdioAcpClient:
         env = _dsh_env(self._launch.permission_mode)
         with _locked_dsh_binding(self._launch.binding):
             try:
-                pair_key = _dsh_pair_key(
+                pair_key = await asyncio.to_thread(
+                    _dsh_pair_key,
                     self._launch.binding.node_path,
                     self._launch.binding.acp_bin_path,
                     self._launch.binding.plugins,

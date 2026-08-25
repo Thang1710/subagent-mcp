@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 from claude_agent_sdk import (
     AssistantMessage,
+    CLIJSONDecodeError,
     RateLimitEvent,
     RateLimitInfo,
     ResultMessage,
@@ -577,6 +578,36 @@ class _PreflightOrderingClient(_UnsafeClient):
             terminal_reason="completed",
             uuid="preflight-result",
         )
+
+
+class _TerminalDecodeFailureClient(_PreflightOrderingClient):
+    original_error: Exception = ValueError("managed frame exceeded its ceiling")
+    offending_line = "SENSITIVE_PROVIDER_FRAME"
+
+    async def receive_messages(self):
+        yield SystemMessage(
+            subtype="init",
+            data={
+                "model": "vendor/future-model",
+                "effort": "xhigh",
+                "mcp_servers": [],
+                "apiKeySource": "none",
+                "session_id": "decode-failure-session",
+                "cwd": str(self.options.cwd),
+            },
+        )
+        while not self.query_calls:
+            await asyncio.sleep(0)
+        yield RateLimitEvent(
+            rate_limit_info=RateLimitInfo(
+                status="allowed",
+                overage_status="rejected",
+                raw={"isUsingOverage": False},
+            ),
+            uuid="decode-failure-rate",
+            session_id="decode-failure-session",
+        )
+        raise CLIJSONDecodeError(self.offending_line, self.original_error)
 
 
 class _OutputBeforeRateClient(_UnsafeClient):
@@ -1636,9 +1667,90 @@ def test_lifecycle_queries_after_control_connect_and_uses_response_attestation(
     assert clients[0].query_started_before_init is True
     assert clients[0].query_calls == 1
     assert clients[0].options.max_turns is None
+    assert clients[0].options.max_buffer_size == 8 * 1024 * 1024
     assert snapshot.evidence["rate_evidence_seen"] is True
     assert snapshot.evidence["is_using_overage"] is False
     assert snapshot.evidence["cleanup_confirmed"] is True
+
+
+@pytest.mark.parametrize(
+    ("cause", "expected"),
+    [
+        (
+            ValueError("managed frame exceeded its ceiling"),
+            "Claude terminal turn outcome is ambiguous (stdout frame exceeded managed buffer limit)",
+        ),
+        (
+            json.JSONDecodeError("Expecting value", "{", 1),
+            "Claude terminal turn outcome is ambiguous (stdout frame was not valid JSON)",
+        ),
+    ],
+)
+def test_terminal_decode_failure_is_precise_without_leaking_frame(
+    tmp_path: Path,
+    cause: Exception,
+    expected: str,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    clients: list[_TerminalDecodeFailureClient] = []
+
+    def factory(options):
+        client = _TerminalDecodeFailureClient(options)
+        client.original_error = cause
+        clients.append(client)
+        return client
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        client_factory=factory,
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+        canary_timeout_seconds=1,
+    )
+
+    async def run():
+        context = await _controlled_context(adapter, workspace)
+        started = await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-decode-failure",
+                "execution-decode-failure",
+                TaskPacket("Review", "Review only.", ("Return.",), "reviewer"),
+                context,
+            )
+        )
+        return await asyncio.wait_for(
+            _terminal_adapter_snapshot(
+                adapter,
+                AdapterSessionRequest(
+                    "conversation-decode-failure",
+                    "execution-decode-failure",
+                    started.external_session_id,
+                    started.external_execution_id,
+                ),
+            ),
+            timeout=1,
+        )
+
+    finished = asyncio.run(run())
+
+    assert finished.execution_state == "failed"
+    assert finished.error is not None
+    assert finished.error.code == "RECOVERY_REQUIRED"
+    assert finished.error.category == "adapter"
+    assert finished.error.retryable is False
+    assert finished.error.message == expected
+    assert _TerminalDecodeFailureClient.offending_line not in finished.error.message
+    assert _TerminalDecodeFailureClient.offending_line not in json.dumps(
+        finished.evidence
+    )
+    assert finished.result_text is None
+    assert finished.evidence["cleanup_confirmed"] is True
+    assert finished.evidence["is_using_overage"] is False
+    assert finished.evidence["overage_blocked"] is True
 
 
 def test_max_turn_result_keeps_the_terminal_reason_and_count() -> None:
@@ -1758,6 +1870,7 @@ def test_canary_rejects_unsafe_task_rate_without_accepting_output(tmp_path: Path
 
     assert result.passed is False
     assert result.error is not None and result.error.code == "USAGE_CREDITS_FORBIDDEN"
+    assert clients[0].options.max_buffer_size == 8 * 1024 * 1024
     assert clients[0].query_calls == 1
     assert clients[0].disconnected is True
 
