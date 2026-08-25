@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.19 - 2026-08-25
+
+- Reject unsupported context policy IDs before provider work and report exact
+  project/local-context and auto-compaction attestation gaps.
+- Keep Claude user-level native settings and skills available for scoped
+  writers; explicitly expose the `Skill` tool without enabling project/local
+  settings, shell access, or broader writes.
+
 ## 1.0.18 - 2026-08-25
 
 - Make a generic DeepSeek provider failure actionable without replaying native
