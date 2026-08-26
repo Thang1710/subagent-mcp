@@ -120,6 +120,13 @@ DeepSeek routes may use an existing subscription, unlimited offer, or funded
 balance that the user authorizes. Subagent MCP never purchases, reloads, or
 increases that balance.
 
+## Long-running work
+
+`agent_wait` is a bounded local observation, not a model deadline. If it returns
+`running` with `wait_policy=continue_while_running`, the external agent may still
+be working or thinking. Keep observing the same conversation; elapsed time alone
+never triggers retry, fallback, interruption, or another provider request.
+
 ## Concurrent writers
 
 A write task can declare up to 32 repository-relative file or directory roots

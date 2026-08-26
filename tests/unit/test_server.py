@@ -556,6 +556,10 @@ def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> 
     assert "repo_write" in spawn_description
     assert "runtime_list" in spawn_description
     assert "write_root_mode" in spawn_description
+    wait_description = tools["agent_wait"].description or ""
+    assert "does not interrupt" in wait_description
+    assert "returns running" in wait_description
+    assert "continue waiting" in wait_description
 
 
 def test_result_read_is_bounded_read_only_and_parses_exact_artifact_identity() -> None:

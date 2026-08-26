@@ -1568,6 +1568,9 @@ def test_wait_timeout_returns_running_without_interrupting_agent(tmp_path: Path)
     started, waited = asyncio.run(run())
 
     assert started.execution_state == waited.execution_state == "running"
+    assert waited.to_compact_dict()["wait_policy"] == "continue_while_running"
+    assert harness.call_count("spawn") == 1
+    assert harness.call_count("send") == 0
     assert harness.call_count("interrupt") == 0
 
 

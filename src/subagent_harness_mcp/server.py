@@ -351,7 +351,7 @@ def create_server(service: object) -> MCPServer:
         response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Wait locally for up to four minutes without interrupting a running agent."""
+        """Wait locally up to four minutes. Expiry returns running, does not interrupt, and means continue waiting."""
 
         return await _invoke(
             "agent_wait",
