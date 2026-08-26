@@ -802,6 +802,52 @@ def test_acp_wire_error_preserves_sdk_wrapped_details_for_rate_classification(
     asyncio.run(scenario())
 
 
+def test_acp_wire_error_preserves_structured_provider_diagnostics(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        launch = DshLaunch(
+            _binding(tmp_path),
+            "provider",
+            "model",
+            str(tmp_path),
+            "read-only",
+            tmp_path / "persistence",
+            tmp_path / "config.yml",
+        )
+        client = _StdioAcpClient(launch, timeout_seconds=1)
+        future = asyncio.get_running_loop().create_future()
+        client._pending[9] = future
+
+        client._handle_response(
+            {
+                "jsonrpc": "2.0",
+                "id": 9,
+                "error": {
+                    "code": -32603,
+                    "message": "turn failed: Provider returned error: PI_AI_ERROR",
+                    "data": {
+                        "raw_frame": {"authorization": "Bearer do-not-copy"},
+                    },
+                },
+            }
+        )
+
+        with pytest.raises(RuntimeError) as caught:
+            await future
+
+        error = caught.value
+        assert type(error).__name__ == "_AcpResponseError"
+        assert error.rpc_code == -32603  # type: ignore[attr-defined]
+        assert error.provider_code == "PI_AI_ERROR"  # type: ignore[attr-defined]
+        assert error.detail == (  # type: ignore[attr-defined]
+            "turn failed: Provider returned error: PI_AI_ERROR"
+        )
+        assert "do-not-copy" not in str(error)
+
+    asyncio.run(scenario())
+
+
 def test_acp_close_retries_after_partial_teardown_failure(tmp_path: Path) -> None:
     class _Stdin:
         def __init__(self) -> None:
@@ -1299,6 +1345,102 @@ def test_generic_provider_error_has_permission_safe_recovery_guidance(
         else:
             assert "Reconcile the declared write set" in snapshot.error.next_action
             assert "do not retry automatically" in snapshot.error.next_action
+        assert len(clients[0].prompts) == 1
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    ("detail", "provider_code", "expected_message"),
+    (
+        (
+            "turn failed: provider route failed",
+            "PI_AI_ERROR",
+            "DeepSeek ACP provider error (PI_AI_ERROR; RPC -32603): "
+            "turn failed: provider route failed",
+        ),
+        (
+            "turn failed: quota=unknown; error: QUOTA",
+            "QUOTA",
+            "DeepSeek ACP provider error (QUOTA; RPC -32603): "
+            "turn failed: quota=unknown; error: QUOTA",
+        ),
+    ),
+)
+def test_structured_acp_provider_error_reaches_terminal_snapshot(
+    tmp_path: Path,
+    detail: str,
+    provider_code: str,
+    expected_message: str,
+) -> None:
+    class StructuredProviderErrorClient(_FakeAcpClient):
+        async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
+            self.prompts.append((session_id, prompt))
+            raise deepseek_module._AcpResponseError(
+                rpc_code=-32603,
+                detail=detail,
+                provider_code=provider_code,
+            )
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        clients: list[StructuredProviderErrorClient] = []
+
+        def factory(launch: DshLaunch) -> StructuredProviderErrorClient:
+            client = StructuredProviderErrorClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            data_root=tmp_path / "data",
+            timeout_seconds=1,
+        )
+        await adapter.probe()
+        context = await adapter.resolve_context(
+            _context_request(
+                workspace,
+                permissions=("repo_read",),
+                write_set=(),
+            )
+        )
+        await adapter.spawn(
+            AdapterSpawnRequest(
+                "conversation-structured-provider-error",
+                "execution-structured-provider-error",
+                TaskPacket("Review", "Return a result.", ("Report",), "reviewer"),
+                context,
+            )
+        )
+        for _ in range(30):
+            snapshot = await adapter.snapshot(
+                AdapterSessionRequest(
+                    "conversation-structured-provider-error",
+                    "execution-structured-provider-error",
+                    "dsh-session-1",
+                    "execution-structured-provider-error",
+                )
+            )
+            if snapshot.execution_state != "running":
+                break
+            await asyncio.sleep(0)
+
+        assert snapshot.execution_state == "failed"
+        assert snapshot.error is not None
+        assert snapshot.error.code == "PROVIDER_ERROR"
+        assert snapshot.error.category == "provider"
+        assert snapshot.error.retryable is True
+        assert snapshot.error.message == expected_message
+        assert snapshot.error.next_action is not None
+        assert "new read-only conversation" in snapshot.error.next_action
+        assert snapshot.evidence["provider_error"] == {
+            "source": "native-acp",
+            "rpc_code": -32603,
+            "provider_code": provider_code,
+            "detail": detail,
+        }
         assert len(clients[0].prompts) == 1
 
     asyncio.run(scenario())

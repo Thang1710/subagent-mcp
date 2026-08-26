@@ -2492,6 +2492,18 @@ def _snapshot_result(snapshot: AdapterSnapshot) -> Mapping[str, Any] | None:
             result["error"]["next_action"] = _redact_text(
                 snapshot.error.next_action
             )
+        provider_error = snapshot.evidence.get("provider_error")
+        if isinstance(provider_error, Mapping):
+            projected = {
+                key: provider_error[key]
+                for key in ("source", "rpc_code", "provider_code", "detail")
+                if key in provider_error
+                and not isinstance(provider_error[key], bool)
+                and isinstance(provider_error[key], (str, int))
+            }
+            safe_details = _redact(projected)
+            if isinstance(safe_details, Mapping):
+                result["error"]["details"] = dict(safe_details)
     return result or None
 
 

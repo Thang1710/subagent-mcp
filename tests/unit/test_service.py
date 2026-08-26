@@ -563,6 +563,48 @@ def test_snapshot_result_surfaces_bounded_adapter_next_action() -> None:
     )
 
 
+def test_snapshot_result_surfaces_redacted_provider_error_details() -> None:
+    secret = "provider-secret-value-123456"
+    snapshot = AdapterSnapshot(
+        external_session_id="native-session",
+        external_execution_id="execution-1",
+        conversation_state="idle",
+        execution_state="failed",
+        effective_model="vendor/model",
+        effective_reasoning={},
+        workspace_path="workspace",
+        workspace_key="workspace",
+        context_hash="a" * 64,
+        error=AdapterFailure(
+            "PROVIDER_ERROR",
+            "provider",
+            True,
+            f"DeepSeek ACP provider error: authorization=Bearer {secret}",
+        ),
+        evidence={
+            "provider_error": {
+                "source": "native-acp",
+                "rpc_code": -32603,
+                "provider_code": "PI_AI_ERROR",
+                "detail": f"authorization=Bearer {secret}",
+                "raw_frame": {"authorization": f"Bearer {secret}"},
+            }
+        },
+    )
+
+    result = service_module._snapshot_result(snapshot)
+
+    assert result is not None
+    error = result["error"]
+    assert error["details"] == {
+        "source": "native-acp",
+        "rpc_code": -32603,
+        "provider_code": "PI_AI_ERROR",
+        "detail": "authorization=Bearer [REDACTED]",
+    }
+    assert secret not in str(result)
+
+
 def _scoped_spawn_request(
     workspace: Path,
     *,

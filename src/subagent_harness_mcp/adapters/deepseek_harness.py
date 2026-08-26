@@ -52,6 +52,27 @@ _TRANSIENT_RATE_LIMIT = re.compile(
     r"|upstream_provider_shared_pool|retry[\s_-]+shortly)",
     re.IGNORECASE | re.DOTALL,
 )
+_PROVIDER_ERROR_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
+_EMBEDDED_PROVIDER_ERROR_CODE = re.compile(
+    r"\b(?:error|code)\s*[:=]\s*([A-Z][A-Z0-9_]{1,63})\b"
+)
+_STABLE_TEXT_PROVIDER_CODES = frozenset(
+    {
+        "ABORTED",
+        "AUTH",
+        "CONTEXT_WINDOW_EXCEEDED",
+        "EMPTY_RESPONSE",
+        "INVALID_REQUEST",
+        "MISSING_CREDENTIAL",
+        "PI_AI_ERROR",
+        "QUOTA",
+        "RATE_LIMIT",
+        "SERVER",
+        "TIMEOUT",
+        "TRANSPORT",
+        "UNKNOWN",
+    }
+)
 _PACKAGES = {
     "settings-file": "@deepseek-ai/dsh-settings-file",
     "credentials-local": "@deepseek-ai/dsh-credentials-local",
@@ -739,6 +760,11 @@ class DeepSeekHarnessAdapter:
                 )
                 return
             if failure is not None:
+                provider_error = (
+                    failure.to_evidence()
+                    if isinstance(failure, _AcpResponseError)
+                    else None
+                )
                 if _QUOTA_EXHAUSTED.search(str(failure)):
                     code = "QUOTA_PAUSED"
                     category = "quota"
@@ -760,7 +786,11 @@ class DeepSeekHarnessAdapter:
                 else:
                     code = "PROVIDER_ERROR"
                     category = "provider"
-                    message = "DeepSeek ACP turn did not complete"
+                    message = (
+                        failure.public_message()
+                        if isinstance(failure, _AcpResponseError)
+                        else "DeepSeek ACP turn did not complete"
+                    )
                     read_only = (
                         session.context.attestation.get("permission_mode")
                         == "read-only"
@@ -792,6 +822,7 @@ class DeepSeekHarnessAdapter:
                         message,
                         next_action,
                     ),
+                    provider_error=provider_error,
                 )
                 return
             assert result is not None
@@ -843,6 +874,40 @@ class DeepSeekHarnessAdapter:
             return False
         session.native_closed = True
         return True
+
+
+class _AcpResponseError(RuntimeError):
+    def __init__(
+        self,
+        *,
+        rpc_code: int | str | None,
+        detail: str,
+        provider_code: str | None,
+    ) -> None:
+        super().__init__(detail)
+        self.rpc_code = rpc_code
+        self.detail = detail
+        self.provider_code = provider_code
+
+    def public_message(self) -> str:
+        labels: list[str] = []
+        if self.provider_code is not None:
+            labels.append(self.provider_code)
+        if self.rpc_code is not None:
+            labels.append(f"RPC {self.rpc_code}")
+        qualifier = f" ({'; '.join(labels)})" if labels else ""
+        return f"DeepSeek ACP provider error{qualifier}: {self.detail}"
+
+    def to_evidence(self) -> dict[str, Any]:
+        evidence: dict[str, Any] = {
+            "source": "native-acp",
+            "detail": self.detail,
+        }
+        if self.rpc_code is not None:
+            evidence["rpc_code"] = self.rpc_code
+        if self.provider_code is not None:
+            evidence["provider_code"] = self.provider_code
+        return evidence
 
 
 class _StdioAcpClient:
@@ -1046,7 +1111,7 @@ class _StdioAcpClient:
         if future is None or future.done():
             return
         if "error" in message:
-            future.set_exception(RuntimeError(_acp_error_message(message.get("error"))))
+            future.set_exception(_acp_response_error(message.get("error")))
         else:
             future.set_result(message.get("result"))
 
@@ -1534,6 +1599,7 @@ def _snapshot(
     result_text: str | None = None,
     error: AdapterFailure | None = None,
     cleanup_confirmed: bool | None = None,
+    provider_error: Mapping[str, Any] | None = None,
 ) -> AdapterSnapshot:
     conversation_state = "active" if execution_state == "running" else "idle"
     evidence: dict[str, Any] = {
@@ -1542,6 +1608,8 @@ def _snapshot(
     }
     if cleanup_confirmed is not None:
         evidence["cleanup_confirmed"] = cleanup_confirmed
+    if provider_error is not None:
+        evidence["provider_error"] = dict(provider_error)
     return AdapterSnapshot(
         external_session_id=session_id,
         external_execution_id=execution_id,
@@ -1680,10 +1748,59 @@ def _acp_error_message(error: object) -> str:
                 value = data.get(key)
                 if isinstance(value, str) and value:
                     details.append(value)
+            failure = data.get("failure")
+            if isinstance(failure, Mapping):
+                for key in ("message", "detail"):
+                    value = failure.get(key)
+                    if isinstance(value, str) and value:
+                        details.append(value)
         elif isinstance(data, str) and data:
             details.append(data)
-    detail = ": ".join(details)
+    detail = ": ".join(dict.fromkeys(details))
     return detail[:2_048] if detail else "ACP request was rejected"
+
+
+def _acp_response_error(error: object) -> _AcpResponseError:
+    rpc_code: int | str | None = None
+    provider_code: str | None = None
+    if isinstance(error, Mapping):
+        candidate_rpc_code = error.get("code")
+        if (
+            isinstance(candidate_rpc_code, int)
+            and not isinstance(candidate_rpc_code, bool)
+        ) or (
+            isinstance(candidate_rpc_code, str)
+            and bool(_PROVIDER_ERROR_CODE.fullmatch(candidate_rpc_code))
+        ):
+            rpc_code = candidate_rpc_code
+
+        data = error.get("data")
+        if isinstance(data, Mapping):
+            provider_code = _mapping_provider_error_code(data)
+
+    detail = _acp_error_message(error)
+    if provider_code is None:
+        match = _EMBEDDED_PROVIDER_ERROR_CODE.search(detail)
+        if match is not None and match.group(1) in _STABLE_TEXT_PROVIDER_CODES:
+            provider_code = match.group(1)
+    return _AcpResponseError(
+        rpc_code=rpc_code,
+        detail=detail,
+        provider_code=provider_code,
+    )
+
+
+def _mapping_provider_error_code(data: Mapping[str, Any]) -> str | None:
+    for key in ("provider_code", "providerCode", "error_code", "errorCode", "code"):
+        value = data.get(key)
+        if isinstance(value, str) and _PROVIDER_ERROR_CODE.fullmatch(value):
+            return value
+    failure = data.get("failure")
+    if isinstance(failure, Mapping):
+        value = failure.get("code")
+        if isinstance(value, str) and _PROVIDER_ERROR_CODE.fullmatch(value):
+            return value
+    return None
 
 
 def _node_path() -> Path | None:
