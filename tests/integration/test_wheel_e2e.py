@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.20"
+VERSION = "1.0.21"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -320,10 +320,20 @@ def test_installed_artifact_runs_entrypoint_resources_fake_stdio_and_ui(
 import http.client
 import json
 from importlib.resources import files
+from subagent_harness_mcp.adapters.deepseek_harness import _acp_response_error
 from subagent_harness_mcp.ui import LoopbackUiServer
 from urllib.parse import parse_qs, urlsplit
 
 root = files({PACKAGE_NAME!r})
+acp_error = _acp_response_error({{
+    'code': -32603,
+    'message': 'turn failed: Provider returned error: PI_AI_ERROR',
+    'data': {{'raw_frame': {{'authorization': 'Bearer do-not-copy'}}}},
+}})
+assert acp_error.rpc_code == -32603
+assert acp_error.provider_code == 'PI_AI_ERROR'
+assert acp_error.detail == 'turn failed: Provider returned error: PI_AI_ERROR'
+assert 'do-not-copy' not in str(acp_error.to_evidence())
 assert 'Subagent MCP' in root.joinpath('static', 'index.html').read_text(encoding='utf-8')
 for name in {SCHEMAS!r}:
     document = json.loads(root.joinpath('schemas', name).read_text(encoding='utf-8'))

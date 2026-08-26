@@ -29,7 +29,7 @@ boundary:
 - the classification source (`native-acp`).
 
 The adapter exposes those facts in redacted terminal error text and structured
-snapshot evidence. It keeps the public error code `PROVIDER_ERROR` unless the
+`result.error.details`. It keeps the public error code `PROVIDER_ERROR` unless the
 native facts explicitly match the existing quota or temporary-rate-limit
 contracts. `quota=unknown` and an unclassified provider failure never become
 quota exhaustion.

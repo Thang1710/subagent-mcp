@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.21 - 2026-08-26
+
+- Preserve bounded native ACP JSON-RPC code, provider code, and redacted detail
+  in terminal `PROVIDER_ERROR` results instead of collapsing every failure to a
+  generic message.
+- Keep `quota=unknown` and conflicting/ambiguous quota text out of
+  `QUOTA_PAUSED`; only explicit exhaustion evidence changes quota state.
+
 ## 1.0.20 - 2026-08-26
 
 - Publish each runtime's native `write_root_mode` and reject unsupported file or
