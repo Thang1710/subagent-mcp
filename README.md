@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.19` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.20` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -46,8 +46,8 @@ then register the exact isolated release and start its background UI:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.19 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.19 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp ui --background
 ```
 
 Start a new Codex task after registration.
@@ -58,7 +58,7 @@ Open `http://127.0.0.1:8765` in a browser. If the background UI was stopped,
 start the same exact release again:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.19 subagent-harness-mcp ui --background
+uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp ui --background
 ```
 
 The settings and read-only activity UI stays on the fixed loopback port and
@@ -176,13 +176,13 @@ circuits. Each adapter translates that contract to its native harness. See
 
 Switch versions without reinstalling an environment that may still be running.
 The first command uses the source version; the add/start commands use the target
-version. This example upgrades 1.0.18 to 1.0.19:
+version. This example upgrades 1.0.19 to 1.0.20:
 
 ```powershell
 uvx --isolated --from subagent-harness-mcp==1.0.17 subagent-harness-mcp ui --stop
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.19 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.19 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp ui --background
 ```
 
 Start a fresh Codex task after changing the entry. Existing tasks keep their old

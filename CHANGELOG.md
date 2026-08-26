@@ -2,7 +2,7 @@
 
 All notable changes to Subagent MCP are documented here.
 
-## Unreleased
+## 1.0.20 - 2026-08-26
 
 - Publish each runtime's native `write_root_mode` and reject unsupported file or
   missing-path scopes before root-count recovery, readiness, leases, or provider
@@ -11,6 +11,8 @@ All notable changes to Subagent MCP are documented here.
 - Clarify the public `agent_spawn` contract: writable requests use
   `workspace_write` (not `repo_write`) and should inspect `runtime_list` before
   constructing `write_set`.
+- Tell fresh MCP controllers to continue waiting while an external execution is
+  running; local wait expiry does not interrupt, retry, or trigger fallback.
 
 ## 1.0.19 - 2026-08-25
 

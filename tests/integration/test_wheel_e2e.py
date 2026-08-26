@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.19"
+VERSION = "1.0.20"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -275,6 +275,15 @@ create_server(service).run('stdio')
         wait_description = tools_by_name["agent_wait"].description or ""
         assert "returns running" in wait_description
         assert "does not interrupt" in wait_description
+        interrupted = await client.call_tool(
+            "agent_interrupt",
+            {
+                "request_id": "release-interrupt-1",
+                "conversation_id": spawn["conversation_id"],
+                "response_mode": "full",
+            },
+        )
+        assert _meta(interrupted)["result"]["execution_state"] == "interrupted"
         closed = await client.call_tool(
             "agent_close",
             {
