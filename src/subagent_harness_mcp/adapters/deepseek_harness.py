@@ -52,6 +52,12 @@ _TRANSIENT_RATE_LIMIT = re.compile(
     r"|upstream_provider_shared_pool|retry[\s_-]+shortly)",
     re.IGNORECASE | re.DOTALL,
 )
+_HTTP_NOT_FOUND = re.compile(r"\b404\b")
+_MODEL_ROUTE_UNAVAILABLE = re.compile(
+    r"\bmodel\b.{0,160}\b(?:not found|no longer available|retired)\b"
+    r"|\btesting period\b.{0,512}\buse it now\b",
+    re.IGNORECASE | re.DOTALL,
+)
 _PROVIDER_ERROR_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")
 _EMBEDDED_PROVIDER_ERROR_CODE = re.compile(
     r"\b(?:error|code)\s*[:=]\s*([A-Z][A-Z0-9_]{1,63})\b"
@@ -770,6 +776,19 @@ class DeepSeekHarnessAdapter:
                     category = "quota"
                     message = "DeepSeek provider usage credit or quota is exhausted"
                     retryable = False
+                elif _HTTP_NOT_FOUND.search(str(failure)) and _MODEL_ROUTE_UNAVAILABLE.search(
+                    str(failure)
+                ):
+                    code = "CAPABILITY_MISSING"
+                    category = "provider"
+                    message = "DeepSeek configured provider model route is unavailable"
+                    retryable = False
+                    next_action = (
+                        "User decision required: wait for the exact configured route to "
+                        "return or explicitly configure another route. Do not retry or "
+                        "reuse this failed turn, substitute a model automatically, or "
+                        "buy, reload, or enable usage credits."
+                    )
                 elif _TRANSIENT_RATE_LIMIT.search(str(failure)):
                     code = "RATE_LIMITED"
                     category = "provider"

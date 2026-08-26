@@ -1351,19 +1351,54 @@ def test_generic_provider_error_has_permission_safe_recovery_guidance(
 
 
 @pytest.mark.parametrize(
-    ("detail", "provider_code", "expected_message"),
+    (
+        "detail",
+        "provider_code",
+        "expected_message",
+        "expected_code",
+        "expected_retryable",
+        "expected_next_action",
+    ),
     (
         (
             "turn failed: provider route failed",
             "PI_AI_ERROR",
             "DeepSeek ACP provider error (PI_AI_ERROR; RPC -32603): "
             "turn failed: provider route failed",
+            "PROVIDER_ERROR",
+            True,
+            "new read-only conversation",
         ),
         (
             "turn failed: quota=unknown; error: QUOTA",
             "QUOTA",
             "DeepSeek ACP provider error (QUOTA; RPC -32603): "
             "turn failed: quota=unknown; error: QUOTA",
+            "PROVIDER_ERROR",
+            True,
+            "new read-only conversation",
+        ),
+        pytest.param(
+            "Internal error: turn failed: 404: {\"message\":\"Thank you for "
+            "participating in the Stealth Ox Alpha testing period. This model "
+            "was ZAI's GLM-5.3 Flash. Use it now: https://example.invalid/model\","
+            "\"code\":404}",
+            "PI_AI_ERROR",
+            "DeepSeek configured provider model route is unavailable",
+            "CAPABILITY_MISSING",
+            False,
+            "User decision required",
+            id="retired_model_route",
+        ),
+        pytest.param(
+            "Internal error: turn failed: 404: upstream endpoint returned no body",
+            "PI_AI_ERROR",
+            "DeepSeek ACP provider error (PI_AI_ERROR; RPC -32603): "
+            "Internal error: turn failed: 404: upstream endpoint returned no body",
+            "PROVIDER_ERROR",
+            True,
+            "new read-only conversation",
+            id="generic_404",
         ),
     ),
 )
@@ -1372,6 +1407,9 @@ def test_structured_acp_provider_error_reaches_terminal_snapshot(
     detail: str,
     provider_code: str,
     expected_message: str,
+    expected_code: str,
+    expected_retryable: bool,
+    expected_next_action: str,
 ) -> None:
     class StructuredProviderErrorClient(_FakeAcpClient):
         async def prompt(self, session_id: str, prompt: str) -> tuple[str, str]:
@@ -1429,12 +1467,16 @@ def test_structured_acp_provider_error_reaches_terminal_snapshot(
 
         assert snapshot.execution_state == "failed"
         assert snapshot.error is not None
-        assert snapshot.error.code == "PROVIDER_ERROR"
+        assert snapshot.error.code == expected_code
         assert snapshot.error.category == "provider"
-        assert snapshot.error.retryable is True
+        assert snapshot.error.retryable is expected_retryable
         assert snapshot.error.message == expected_message
         assert snapshot.error.next_action is not None
-        assert "new read-only conversation" in snapshot.error.next_action
+        assert expected_next_action in snapshot.error.next_action
+        if expected_code == "CAPABILITY_MISSING":
+            assert "substitute a model automatically" in snapshot.error.next_action
+            assert "usage credits" in snapshot.error.next_action
+            assert "new read-only conversation" not in snapshot.error.next_action
         assert snapshot.evidence["provider_error"] == {
             "source": "native-acp",
             "rpc_code": -32603,
