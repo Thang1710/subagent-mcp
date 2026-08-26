@@ -10,6 +10,25 @@
 
 ---
 
+## Approved hotfix amendment: truthful native write roots
+
+Before Task 1, fix the R34 public-contract mismatch without invoking a provider:
+
+- publish a provider-neutral `write_root_mode` in every adapter manifest;
+- make DeepSeek Harness advertise `existing-directory` while adapters that can
+  enforce exact path prefixes retain the safe `path-prefix` default;
+- validate the advertised mode before the root-count repair, so exact files do
+  not receive the impossible `decompose_write_set` instruction;
+- return a bounded machine-readable repair plus an explicit warning that the
+  controller may choose a directory only when that broader write authority was
+  actually authorized, otherwise it must choose another runtime; and
+- document the accepted semantic permission name `workspace_write` and require
+  callers to inspect `runtime_list` before constructing a writable request.
+
+Cover manifest/schema serialization, public tool description, pre-provider
+ordering and DeepSeek's defensive adapter check. Do not widen a file scope to a
+parent directory, touch RTD/Unity, or run a live provider proof.
+
 ## File map
 
 - Modify `src/subagent_harness_mcp/contracts.py`: serialize the additive running wait policy.

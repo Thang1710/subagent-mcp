@@ -44,6 +44,10 @@
       "minimum": 1,
       "maximum": 32,
       "default": 1
+    },
+    "write_root_mode": {
+      "enum": ["path-prefix", "existing-directory"],
+      "default": "path-prefix"
     }
   },
   "additionalProperties": true

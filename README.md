@@ -129,13 +129,15 @@ and lane names do not affect locking.
 
 Omitting `write_set` gives the execution the whole workspace for backwards
 compatibility. Each adapter also enforces the normalized paths at its native
-harness boundary. The current DeepSeek Harness native session accepts one
-writable root; a multi-root task is decomposed by the controller into several
-disjoint writer calls rather than widened. True single-session multi-root stays
-reserved for a future harness that advertises official ACP
-`additionalDirectories` and enforces it natively. These leases coordinate
-Subagent MCP executions; they are not an operating-system sandbox for unrelated
-local processes.
+harness boundary. Inspect `runtime_list` before creating a write request:
+`write_root_mode=path-prefix` supports exact file or directory prefixes, while
+`existing-directory` requires an existing directory. The current DeepSeek
+Harness native session advertises `existing-directory` and one writable root.
+Subagent MCP never widens an exact-file scope to its parent directory; use that
+broader directory only when it is explicitly acceptable, otherwise choose a
+runtime that enforces `path-prefix`. Multiple valid directory roots are split
+into disjoint writer calls. These leases coordinate Subagent MCP executions;
+they are not an operating-system sandbox for unrelated local processes.
 
 ## How it fits together
 

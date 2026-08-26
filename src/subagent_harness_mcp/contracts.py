@@ -15,10 +15,12 @@ ADAPTER_API_VERSION = "1.0.0"
 CONTRACT_SCHEMA_VERSION = 1
 MAX_WRITE_ROOTS_PER_SESSION = 32
 DEFAULT_WRITE_ROOTS_PER_SESSION = 1
+WRITE_ROOT_MODES = frozenset({"path-prefix", "existing-directory"})
 RECOVERY_MAX_ATTEMPTS = 3
 _RECOVERY_PAIRS = frozenset(
     {
         ("repair", "decompose_write_set"),
+        ("repair", "select_supported_write_root"),
         ("retry", "transient_pre_provider"),
     }
 )
@@ -84,7 +86,7 @@ def _validated_recovery(value: Mapping[str, Any] | None) -> dict[str, Any] | Non
     if value is None:
         return None
     required = {"action", "reason", "max_attempts"}
-    allowed = required | {"max_write_roots_per_session"}
+    allowed = required | {"max_write_roots_per_session", "write_root_mode"}
     if (
         not isinstance(value, Mapping)
         or not required <= set(value)
@@ -95,6 +97,7 @@ def _validated_recovery(value: Mapping[str, Any] | None) -> dict[str, Any] | Non
     reason = value["reason"]
     attempts = value["max_attempts"]
     roots = value.get("max_write_roots_per_session")
+    write_root_mode = value.get("write_root_mode")
     if (
         not isinstance(action, str)
         or not isinstance(reason, str)
@@ -119,6 +122,23 @@ def _validated_recovery(value: Mapping[str, Any] | None) -> dict[str, Any] | Non
             "REQUEST_INVALID",
             "recovery max_write_roots_per_session must be between 1 and "
             f"{MAX_WRITE_ROOTS_PER_SESSION}",
+        )
+    if write_root_mode is not None and (
+        not isinstance(write_root_mode, str)
+        or write_root_mode not in WRITE_ROOT_MODES
+    ):
+        raise ContractError(
+            "REQUEST_INVALID", "recovery write_root_mode is unsupported"
+        )
+    if reason == "select_supported_write_root" and write_root_mode is None:
+        raise ContractError(
+            "REQUEST_INVALID",
+            "select_supported_write_root recovery requires write_root_mode",
+        )
+    if reason != "select_supported_write_root" and write_root_mode is not None:
+        raise ContractError(
+            "REQUEST_INVALID",
+            "write_root_mode is only valid for select_supported_write_root recovery",
         )
     return dict(value)
 
@@ -276,6 +296,7 @@ class AdapterManifest:
     reasoning_schema: Mapping[str, Any]
     model_schema: Mapping[str, Any] = field(default_factory=dict)
     max_write_roots_per_session: int = DEFAULT_WRITE_ROOTS_PER_SESSION
+    write_root_mode: str = "path-prefix"
 
     def __post_init__(self) -> None:
         if self.adapter_api_version != ADAPTER_API_VERSION:
@@ -305,6 +326,14 @@ class AdapterManifest:
                 "max_write_roots_per_session must be an integer between 1 and "
                 f"{MAX_WRITE_ROOTS_PER_SESSION}",
             )
+        if (
+            not isinstance(self.write_root_mode, str)
+            or self.write_root_mode not in WRITE_ROOT_MODES
+        ):
+            raise ContractError(
+                "REQUEST_INVALID",
+                "write_root_mode must be 'path-prefix' or 'existing-directory'",
+            )
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -321,6 +350,7 @@ class AdapterManifest:
             "reasoning_schema": dict(self.reasoning_schema),
             "model_schema": dict(self.model_schema),
             "max_write_roots_per_session": self.max_write_roots_per_session,
+            "write_root_mode": self.write_root_mode,
         }
 
 

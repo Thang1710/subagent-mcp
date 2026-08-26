@@ -230,6 +230,18 @@ class _OneRootFakeAdapter(FakeAdapter):
         self._manifest = replace(self._manifest, max_write_roots_per_session=1)
 
 
+class _ExistingDirectoryRootFakeAdapter(FakeAdapter):
+    """Stand-in for a harness whose native sandbox only accepts one directory."""
+
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self._manifest = replace(
+            self._manifest,
+            max_write_roots_per_session=1,
+            write_root_mode="existing-directory",
+        )
+
+
 class _RestartGapAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
@@ -2214,6 +2226,76 @@ def test_multi_root_preflight_rejects_before_readiness_idempotency_leases_or_pro
     assert harness.call_count("resolve_context") == 0
     assert harness.call_count("spawn") == 0
     assert _store_row_counts(store) == (0, 0, 0)
+
+
+def test_directory_only_preflight_rejects_files_before_impossible_decomposition(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    first_file = workspace / "src" / "first.py"
+    second_file = workspace / "src" / "second.py"
+    first_file.write_text("first\n", encoding="utf-8")
+    second_file.write_text("second\n", encoding="utf-8")
+    harness = FakeHarness()
+    service, store = _service(
+        tmp_path, harness, adapter=_ExistingDirectoryRootFakeAdapter(harness)
+    )
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="directory-root-files",
+                    write_set=("src/first.py", "src/second.py"),
+                )
+            )
+        )
+
+    error = captured.value
+    assert error.code == "CAPABILITY_MISSING"
+    assert error.category == "capability"
+    assert error.retryable is False
+    assert "existing directory" in str(error)
+    assert "broader write authority" in error.next_action
+    assert "another runtime" in error.next_action
+    assert error.recovery == {
+        "action": "repair",
+        "reason": "select_supported_write_root",
+        "max_attempts": 3,
+        "max_write_roots_per_session": 1,
+        "write_root_mode": "existing-directory",
+    }
+    assert harness.call_count("probe") == 0
+    assert harness.call_count("resolve_context") == 0
+    assert harness.call_count("spawn") == 0
+    assert _store_row_counts(store) == (0, 0, 0)
+
+
+def test_directory_only_preflight_still_decomposes_multiple_valid_directories(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "docs").mkdir()
+    harness = FakeHarness()
+    service, _ = _service(
+        tmp_path, harness, adapter=_ExistingDirectoryRootFakeAdapter(harness)
+    )
+
+    with pytest.raises(ServiceError) as captured:
+        asyncio.run(
+            service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="directory-root-directories",
+                    write_set=("src", "docs"),
+                )
+            )
+        )
+
+    assert captured.value.recovery["reason"] == "decompose_write_set"
 
 
 def test_one_root_limit_still_launches_single_and_disjoint_writers(

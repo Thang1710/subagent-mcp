@@ -221,8 +221,10 @@ def test_manifest_exposes_bounded_write_root_limit_with_safe_default() -> None:
     manifest = _manifest()
 
     assert manifest.max_write_roots_per_session == 1
+    assert manifest.write_root_mode == "path-prefix"
     payload = manifest.to_dict()
     assert payload["max_write_roots_per_session"] == 1
+    assert payload["write_root_mode"] == "path-prefix"
 
     widest = dataclasses.replace(manifest, max_write_roots_per_session=32)
     assert widest.max_write_roots_per_session == 32
@@ -231,6 +233,14 @@ def test_manifest_exposes_bounded_write_root_limit_with_safe_default() -> None:
     for invalid in (0, -1, 33, True, "2", 2.0, None):
         with pytest.raises(ContractError):
             dataclasses.replace(manifest, max_write_roots_per_session=invalid)
+
+    directory_only = dataclasses.replace(
+        manifest, write_root_mode="existing-directory"
+    )
+    assert directory_only.to_dict()["write_root_mode"] == "existing-directory"
+    for invalid in ("directory", "file", "", None, True, [], {}):
+        with pytest.raises(ContractError):
+            dataclasses.replace(manifest, write_root_mode=invalid)
 
 
 def test_built_in_fake_adapter_advertises_full_multi_root_support() -> None:
@@ -276,6 +286,22 @@ def test_service_error_recovery_directive_is_fixed_omitted_or_exact() -> None:
         recovery=retry_directive,
     )
     assert retryable.to_dict()["recovery"] == retry_directive
+
+    root_mode_directive = {
+        "action": "repair",
+        "reason": "select_supported_write_root",
+        "max_attempts": 3,
+        "max_write_roots_per_session": 1,
+        "write_root_mode": "existing-directory",
+    }
+    root_mode = ServiceError(
+        "CAPABILITY_MISSING",
+        "runtime requires an existing directory write root",
+        category="capability",
+        retryable=False,
+        recovery=root_mode_directive,
+    )
+    assert root_mode.to_dict()["recovery"] == root_mode_directive
 
     for broken in (
         {"action": "refresh", "reason": "decompose_write_set", "max_attempts": 3},

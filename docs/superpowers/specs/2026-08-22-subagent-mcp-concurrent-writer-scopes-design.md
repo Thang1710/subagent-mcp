@@ -55,6 +55,13 @@ or task title is never used as a path or collision key.
   `max_write_roots_per_session`) so the controller decomposes the task into
   multiple independent non-overlapping writer calls within the limit instead of
   silently abandoning the error.
+- Every manifest also publishes `write_root_mode` (`path-prefix` by default,
+  `existing-directory` for the current DeepSeek native ACP adapter). The shared
+  service validates this shape before the root-count bound. A file or missing
+  path sent to a directory-only runtime returns `select_supported_write_root`,
+  not `decompose_write_set`; its next action forbids automatic widening and
+  permits a parent directory only when the caller explicitly accepts that
+  broader authority.
 - Today's DeepSeek native session remains one root. Multi-root work is expressed
   as several disjoint writer calls. True single-session multi-root is reserved
   for a future harness that advertises official ACP `additionalDirectories` and

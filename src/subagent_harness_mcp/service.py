@@ -420,6 +420,14 @@ class SubagentMcpService:
                 allow_quota_paused=True,
             )
             max_roots = adapter.manifest.max_write_roots_per_session
+            _validate_write_root_mode(
+                workspace_path,
+                write_set,
+                permissions=request.permissions,
+                runtime_id=request.runtime_id,
+                write_root_mode=adapter.manifest.write_root_mode,
+                max_write_roots_per_session=max_roots,
+            )
             if (
                 "workspace_write" in request.permissions
                 and len(write_set) > max_roots
@@ -2158,6 +2166,55 @@ def _normalize_write_set(
             continue
         result.append(scope)
     return tuple(result)
+
+
+def _validate_write_root_mode(
+    workspace_path: str,
+    write_set: tuple[str, ...],
+    *,
+    permissions: tuple[str, ...],
+    runtime_id: str,
+    write_root_mode: str,
+    max_write_roots_per_session: int,
+) -> None:
+    if "workspace_write" not in permissions or write_root_mode == "path-prefix":
+        return
+    workspace = Path(workspace_path).resolve(strict=True)
+    invalid = tuple(
+        scope
+        for scope in write_set
+        if not (
+            workspace
+            if scope == "."
+            else workspace.joinpath(*scope.split("/"))
+        ).is_dir()
+    )
+    if not invalid:
+        return
+    raise ServiceError(
+        "CAPABILITY_MISSING",
+        (
+            f"runtime {runtime_id!r} requires each write_set root to be an "
+            "existing directory; exact files and missing paths cannot be "
+            "enforced by this native session."
+        ),
+        category="capability",
+        retryable=False,
+        next_action=(
+            "Use one existing directory root only if that broader write authority "
+            "is explicitly acceptable; otherwise choose another runtime whose "
+            "manifest advertises write_root_mode='path-prefix'. Never widen an "
+            "exact-file scope automatically, and use a new request_id only for a "
+            "materially changed request."
+        ),
+        recovery={
+            "action": "repair",
+            "reason": "select_supported_write_root",
+            "max_attempts": RECOVERY_MAX_ATTEMPTS,
+            "max_write_roots_per_session": max_write_roots_per_session,
+            "write_root_mode": write_root_mode,
+        },
+    )
 
 
 def _requested_metadata(

@@ -256,6 +256,7 @@ class DeepSeekHarnessAdapter:
                 "placeholder": "provider-name::model-id",
             },
             max_write_roots_per_session=1,
+            write_root_mode="existing-directory",
         )
 
     @property

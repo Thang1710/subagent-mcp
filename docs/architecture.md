@@ -92,7 +92,13 @@ Omitting `write_set` keeps the backwards-compatible exclusive whole-workspace
 scope. Each adapter attests the normalized set and must enforce it through its
 native harness boundary or return `CAPABILITY_MISSING`; the lease is
 coordination between Subagent MCP executions, not an OS sandbox against other
-same-user processes.
+same-user processes. The manifest publishes `write_root_mode`: `path-prefix`
+permits exact file or directory prefixes, while `existing-directory` requires
+an existing directory. Root-shape validation runs before root-count recovery so
+a directory-only runtime never tells a caller to split exact files into more
+requests that cannot run. The controller may select a parent directory only
+when that broader authority is explicitly accepted; the service never widens
+the request automatically.
 
 The UI is foreground by default. `ui --background` starts one detached local
 process on a fixed loopback port; `ui --status` identifies whether it is the

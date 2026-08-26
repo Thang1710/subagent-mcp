@@ -537,7 +537,8 @@ def test_non_json_service_result_is_sanitized_instead_of_breaking_protocol() -> 
 
 def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> None:
     server = create_server(_RecordingService())
-    schemas = {tool.name: tool.input_schema for tool in _run(server.list_tools())}
+    tools = {tool.name: tool for tool in _run(server.list_tools())}
+    schemas = {name: tool.input_schema for name, tool in tools.items()}
 
     for name in {
         "agent_spawn",
@@ -550,6 +551,11 @@ def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> 
         response_mode = schemas[name]["properties"]["response_mode"]
         assert response_mode["default"] == "compact"
     assert schemas["agent_wait"]["properties"]["timeout_seconds"]["default"] == 240.0
+    spawn_description = tools["agent_spawn"].description or ""
+    assert "workspace_write" in spawn_description
+    assert "repo_write" in spawn_description
+    assert "runtime_list" in spawn_description
+    assert "write_root_mode" in spawn_description
 
 
 def test_result_read_is_bounded_read_only_and_parses_exact_artifact_identity() -> None:

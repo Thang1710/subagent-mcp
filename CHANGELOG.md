@@ -2,6 +2,16 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## Unreleased
+
+- Publish each runtime's native `write_root_mode` and reject unsupported file or
+  missing-path scopes before root-count recovery, readiness, leases, or provider
+  work. DeepSeek Harness now truthfully advertises its single existing-directory
+  boundary, and recovery never widens exact-file authority automatically.
+- Clarify the public `agent_spawn` contract: writable requests use
+  `workspace_write` (not `repo_write`) and should inspect `runtime_list` before
+  constructing `write_set`.
+
 ## 1.0.19 - 2026-08-25
 
 - Reject unsupported context policy IDs before provider work and report exact

@@ -230,7 +230,11 @@ def create_server(service: object) -> MCPServer:
         response_mode: str = "compact",
         api_version: int = TOOL_API_VERSION,
     ) -> CallToolResult:
-        """Create one conversation; return compact status unless full is requested."""
+        """Create one conversation.
+
+        Writes use workspace_write, not repo_write. Inspect runtime_list
+        write_root_mode and root limit before passing write_set.
+        """
 
         return await _invoke(
             "agent_spawn",
