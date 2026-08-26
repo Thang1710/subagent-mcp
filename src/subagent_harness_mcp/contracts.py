@@ -27,6 +27,7 @@ _RECOVERY_PAIRS = frozenset(
 TERMINAL_EXECUTION_STATES = frozenset(
     {"succeeded", "failed", "cancelled", "interrupted"}
 )
+RUNNING_WAIT_POLICY = "continue_while_running"
 RESULT_CAPSULE_MAX_CHARS = 512
 RESULT_SLICE_DEFAULT_CHARS = 4_096
 RESULT_SLICE_MAX_CHARS = 8_192
@@ -840,6 +841,8 @@ class AgentStatus:
             ]
         if self.reasoning_attestation:
             payload["reasoning_attestation"] = dict(self.reasoning_attestation)
+        if self.execution_state == "running":
+            payload["wait_policy"] = RUNNING_WAIT_POLICY
         return payload
 
     def to_dict(self) -> dict[str, Any]:
@@ -866,6 +869,8 @@ class AgentStatus:
             ]
         if self.reasoning_attestation:
             payload["reasoning_attestation"] = dict(self.reasoning_attestation)
+        if self.execution_state == "running":
+            payload["wait_policy"] = RUNNING_WAIT_POLICY
         return payload
 
 

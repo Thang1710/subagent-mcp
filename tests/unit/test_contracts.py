@@ -406,6 +406,57 @@ def test_agent_status_compact_projection_uses_result_artifact_metadata() -> None
     assert len(encoded.encode()) <= 2048
 
 
+def _running_status() -> AgentStatus:
+    return AgentStatus(
+        conversation_id="conversation-running",
+        execution_id="execution-running",
+        external_session_id="native-running",
+        workspace_path="workspace",
+        conversation_state="active",
+        execution_state="running",
+        state_revision=1,
+        descriptor=AgentDescriptor.from_manifest(
+            _manifest(), model="vendor/model", transport="managed-sdk"
+        ),
+        result=None,
+        needs_input=(),
+        events=(),
+        next_event_cursor=1,
+    )
+
+
+def test_running_status_tells_fresh_controllers_to_continue_waiting() -> None:
+    status = _running_status()
+
+    assert status.to_compact_dict()["wait_policy"] == "continue_while_running"
+    assert status.to_dict()["wait_policy"] == "continue_while_running"
+
+
+@pytest.mark.parametrize(
+    ("execution_state", "conversation_state"),
+    (
+        ("queued", "open"),
+        ("starting", "active"),
+        ("needs_input", "needs_input"),
+        ("succeeded", "idle"),
+        ("failed", "idle"),
+        ("cancelled", "idle"),
+        ("interrupted", "idle"),
+    ),
+)
+def test_non_running_status_omits_wait_policy(
+    execution_state: str, conversation_state: str
+) -> None:
+    status = dataclasses.replace(
+        _running_status(),
+        execution_state=execution_state,
+        conversation_state=conversation_state,
+    )
+
+    assert "wait_policy" not in status.to_compact_dict()
+    assert "wait_policy" not in status.to_dict()
+
+
 def test_agent_status_compact_projection_keeps_terminal_error_direct() -> None:
     status = AgentStatus(
         conversation_id="conversation-error",
