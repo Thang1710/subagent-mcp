@@ -201,7 +201,7 @@ async def _fake_stdio_smoke(python: Path, run_root: Path) -> None:
     workspace.mkdir()
     _write_fake_config(home)
     server_code = """
-from subagent_harness_mcp.adapters.fake import FakeAdapter
+from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp.config import ConfigStore
 from subagent_harness_mcp.paths import resolve_paths
@@ -210,7 +210,10 @@ from subagent_harness_mcp.service import SubagentMcpService
 from subagent_harness_mcp.store import StateStore
 
 paths = resolve_paths()
-registry = AdapterRegistry(builtin_factories=(FakeAdapter,))
+harness = FakeHarness()
+harness.enqueue("done", result="installed spawn complete")
+harness.enqueue("running")
+registry = AdapterRegistry(builtin_factories=(lambda: FakeAdapter(harness),))
 registry.discover()
 service = SubagentMcpService(config=ConfigStore(paths), store=StateStore.open(paths), registry=registry)
 create_server(service).run('stdio')
@@ -262,10 +265,16 @@ create_server(service).run('stdio')
         )
         follow_up = _meta(sent)["result"]
         assert follow_up["external_session_id"] == spawn["external_session_id"]
+        assert follow_up["execution_state"] == "running"
+        assert follow_up["wait_policy"] == "continue_while_running"
         assert (
             follow_up["descriptor"]["model_display_name"]
             == "provider/model-release-smoke"
         )
+        tools_by_name = {tool.name: tool for tool in tools.tools}
+        wait_description = tools_by_name["agent_wait"].description or ""
+        assert "returns running" in wait_description
+        assert "does not interrupt" in wait_description
         closed = await client.call_tool(
             "agent_close",
             {

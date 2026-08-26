@@ -196,11 +196,17 @@ async def _exercise_protocol(
     send_meta = _meta(sent)
     assert sent.is_error is False, send_meta
     interrupt_meta = _meta(interrupted)
+    wait_result = _meta(waited)["result"][0]
     if expect_interrupt_success:
         assert send_meta["result"]["execution_state"] == "running", send_meta
+        assert send_meta["result"]["wait_policy"] == "continue_while_running"
+        assert wait_result["execution_state"] == "running"
+        assert wait_result["wait_policy"] == "continue_while_running"
         assert interrupted.is_error is False, interrupt_meta
     else:
         assert send_meta["result"]["execution_state"] == "succeeded", send_meta
+        assert "wait_policy" not in send_meta["result"]
+        assert "wait_policy" not in wait_result
         assert interrupted.is_error is True, interrupt_meta
         assert interrupt_meta["error"]["code"] == "SESSION_BUSY"
     close_meta = _meta(closed)
@@ -213,7 +219,7 @@ async def _exercise_protocol(
     return {
         "spawn": spawn_meta["result"],
         "send": send_meta["result"],
-        "wait": _meta(waited)["result"][0],
+        "wait": wait_result,
         "interrupt": interrupt_meta,
         "artifact": artifact_meta["result"],
     }
