@@ -20,7 +20,7 @@ opts into usage credits or paid overage.
 Adapters translate every native harness into the same lifecycle: delegate,
 observe, steer, and close. The core hard-codes no provider role or model name.
 
-> **Stable:** `1.0.21` targets Windows. The MCP, package, localhost UI, and
+> **Stable:** `1.0.22` targets Windows. The MCP, package, localhost UI, and
 > Claude Code and DeepSeek native-harness integrations are ready.
 
 ## Runtime status
@@ -32,7 +32,8 @@ observe, steer, and close. The core hard-codes no provider role or model name.
 - **DeepSeek Harness — Ready.** Uses its native ACP transport and
   harness-published model catalog for bounded tasks. Resume after an MCP restart,
   exact provider quota evidence, interactive input, and declared MCP remain
-  explicit capability gaps.
+  explicit capability gaps. A provider-retired model route fails terminally and
+  is never replaced without the user's explicit selection.
 
 No other runtime is supported yet. Future runtimes use adapters rather than
 provider-specific branches in the core.
@@ -46,8 +47,8 @@ then register the exact isolated release and start its background UI:
 
 ```powershell
 winget install --id=astral-sh.uv -e
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.22 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.22 subagent-harness-mcp ui --background
 ```
 
 Start a new Codex task after registration.
@@ -58,7 +59,7 @@ Open `http://127.0.0.1:8765` in a browser. If the background UI was stopped,
 start the same exact release again:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp ui --background
+uvx --isolated --from subagent-harness-mcp==1.0.22 subagent-harness-mcp ui --background
 ```
 
 The settings and read-only activity UI stays on the fixed loopback port and
@@ -178,13 +179,13 @@ circuits. Each adapter translates that contract to its native harness. See
 
 Switch versions without reinstalling an environment that may still be running.
 The first command uses the source version; the add/start commands use the target
-version. This example upgrades 1.0.20 to 1.0.21:
+version. This example upgrades 1.0.21 to 1.0.22:
 
 ```powershell
-uvx --isolated --from subagent-harness-mcp==1.0.20 subagent-harness-mcp ui --stop
+uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp ui --stop
 codex mcp remove subagent-mcp
-codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp serve
-uvx --isolated --from subagent-harness-mcp==1.0.21 subagent-harness-mcp ui --background
+codex mcp add subagent-mcp -- uvx --isolated --from subagent-harness-mcp==1.0.22 subagent-harness-mcp serve
+uvx --isolated --from subagent-harness-mcp==1.0.22 subagent-harness-mcp ui --background
 ```
 
 Start a fresh Codex task after changing the entry. Existing tasks keep their old

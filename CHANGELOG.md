@@ -2,6 +2,13 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.22 - 2026-08-26
+
+- Treat an explicit upstream 404 model-retirement signal as terminal
+  `CAPABILITY_MISSING` instead of retryable `PROVIDER_ERROR`.
+- Require an explicit user decision before selecting another model route; never
+  retry the failed turn, substitute a model, or change credits automatically.
+
 ## 1.0.21 - 2026-08-26
 
 - Preserve bounded native ACP JSON-RPC code, provider code, and redacted detail
