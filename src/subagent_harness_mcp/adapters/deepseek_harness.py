@@ -54,8 +54,13 @@ _TRANSIENT_RATE_LIMIT = re.compile(
 )
 _HTTP_NOT_FOUND = re.compile(r"\b404\b")
 _MODEL_ROUTE_UNAVAILABLE = re.compile(
-    r"\bmodel\b.{0,160}\b(?:not found|no longer available|retired)\b"
-    r"|\btesting period\b.{0,512}\buse it now\b",
+    r"\bmodel(?:\s+(?:id|route))?\s+(?:"
+    r"(?:is\s+|was\s+)?not\s+found"
+    r"|(?:is|was)\s+no\s+longer\s+available"
+    r"|(?:is|was|has\s+been)\s+retired"
+    r")\b"
+    r"|\bthank you for participating in the\b.{1,240}\btesting period\b"
+    r".{1,240}\bthis model was\b.{1,160}\buse it now:\s*https?://",
     re.IGNORECASE | re.DOTALL,
 )
 _PROVIDER_ERROR_CODE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,63}$")

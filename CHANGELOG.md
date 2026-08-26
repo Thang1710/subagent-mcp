@@ -2,6 +2,14 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.23 - 2026-08-26
+
+- Require a positive, non-negated retirement statement before treating a model
+  route as terminal; unrelated 404 diagnostics remain retryable provider
+  errors.
+- Match the completed testing-period form only when it also names the model
+  replacement route, preserving the no-silent-substitution decision boundary.
+
 ## 1.0.22 - 2026-08-26
 
 - Treat an explicit upstream 404 model-retirement signal as terminal

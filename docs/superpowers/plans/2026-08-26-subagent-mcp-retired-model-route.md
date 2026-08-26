@@ -70,7 +70,7 @@ Run:
 
 Expected: all tests pass.
 
-### Task 3: Prepare and verify release 1.0.22
+### Task 3: Prepare and verify release 1.0.23
 
 **Files:**
 - Modify: `src/subagent_harness_mcp/__init__.py`
@@ -80,7 +80,7 @@ Expected: all tests pass.
 - Modify: `CHANGELOG.md`
 - Modify: version-pinned tests and release fixtures found by the repository version scan
 
-- [ ] **Step 1: Change every package/server version marker to 1.0.22**
+- [ ] **Step 1: Change every package/server version marker to 1.0.23**
 
 Update only current-version and current-upgrade examples; preserve historical
 changelog entries.
@@ -104,14 +104,13 @@ clean tracked tree, and exact canonical/public file equality.
 
 - [ ] **Step 5: Publish through existing workflows**
 
-Mirror to the public checkout, push public main plus annotated `v1.0.22`, wait
+Mirror to the public checkout, push public main plus annotated `v1.0.23`, wait
 for deterministic CI, publish GitHub/PyPI artifacts, and publish MCP Registry.
 Verify public version, hashes, non-yanked status, and fresh exact-version stdio
 discovery without invoking a provider.
 
 - [ ] **Step 6: Relay the exact outcome**
 
-Report the 1.0.22 receipt to the source task while keeping its implementation
-status `BLOCKED_USER_DECISION`: the taxonomy is repaired, but exact OX Alpha
-cannot run unless upstream restores it or the user explicitly approves another
-route.
+Report the 1.0.23 receipt to the source task. Its user has independently chosen
+GPT-only implementation staffing, so do not retry OX Alpha or substitute the
+revealed GLM route; the package repair remains a generic truthful-taxonomy fix.

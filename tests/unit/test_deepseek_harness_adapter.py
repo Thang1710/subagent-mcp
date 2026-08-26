@@ -1400,6 +1400,26 @@ def test_generic_provider_error_has_permission_safe_recovery_guidance(
             "new read-only conversation",
             id="generic_404",
         ),
+        pytest.param(
+            "404: metadata endpoint missing; configured model is not retired",
+            "PI_AI_ERROR",
+            "DeepSeek ACP provider error (PI_AI_ERROR; RPC -32603): "
+            "404: metadata endpoint missing; configured model is not retired",
+            "PROVIDER_ERROR",
+            True,
+            "new read-only conversation",
+            id="negated_model_retirement_is_not_terminal",
+        ),
+        pytest.param(
+            "404: testing period telemetry unavailable; use it now after retry",
+            "PI_AI_ERROR",
+            "DeepSeek ACP provider error (PI_AI_ERROR; RPC -32603): "
+            "404: testing period telemetry unavailable; use it now after retry",
+            "PROVIDER_ERROR",
+            True,
+            "new read-only conversation",
+            id="unrelated_testing_period_is_not_terminal",
+        ),
     ),
 )
 def test_structured_acp_provider_error_reaches_terminal_snapshot(

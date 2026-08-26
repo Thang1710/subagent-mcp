@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.22"
+VERSION = "1.0.23"
 
 
 def _read_toml(path: Path) -> dict[str, object]:

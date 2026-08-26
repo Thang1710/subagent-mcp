@@ -18,8 +18,10 @@ change the catalog files that Subagent MCP hashes and caches.
 
 Classify only explicit model-route unavailability evidence at the shared
 DeepSeek terminal-error branch. A bounded error must include an upstream 404
-plus either an explicit model-not-found/no-longer-available statement or the
-temporary testing-period completion form that names a replacement route.
+plus either a positive, non-negated model-not-found/no-longer-available
+statement or the complete temporary testing-period form that identifies the
+replacement and includes its route. Negated or incomplete text is not
+retirement evidence.
 
 The normalized result is:
 
