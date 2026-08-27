@@ -54,6 +54,7 @@ from subagent_harness_mcp.store import StateStore
 FAKE_ACP = (
     Path(__file__).parents[1] / "fixtures" / "fake_grok_acp.py"
 ).resolve(strict=True)
+_LIFECYCLE_PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 
 def _help_text(marker: str = "") -> str:
@@ -2147,7 +2148,7 @@ def _lifecycle_adapter(
             notification_handler=notification_handler,  # type: ignore[arg-type]
             startup_timeout_seconds=1.0,
             request_timeout_seconds=float("inf"),
-            close_timeout_seconds=0.2,
+            close_timeout_seconds=_LIFECYCLE_PROCESS_CLEANUP_TIMEOUT_SECONDS,
             max_line_bytes=1_048_576,
         )
         children.append(child)
@@ -2326,6 +2327,38 @@ def test_lifecycle_spawn_unsafe_handshake_closes_child_before_prompt(
     asyncio.run(scenario())
     assert len(children) == 1
     assert children[0].closed is True
+    assert "session/prompt" not in {
+        record["method"] for record in _trace_records(trace_path)
+    }
+
+
+def test_lifecycle_spawn_unsafe_handshake_cleanup_failure_stays_ambiguous(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    adapter, trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        mutation="missing-auth",
+        close_error=True,
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    async def scenario() -> None:
+        with pytest.raises(ServiceError) as rejected:
+            await adapter.spawn(_lifecycle_spawn_request(context))
+        assert rejected.value.code == "RECOVERY_REQUIRED"
+        assert rejected.value.retryable is False
+
+    asyncio.run(scenario())
+    assert len(children) == 1
+    assert children[0].closed is True
+    assert (
+        children[0]._close_timeout
+        == _LIFECYCLE_PROCESS_CLEANUP_TIMEOUT_SECONDS
+    )
     assert "session/prompt" not in {
         record["method"] for record in _trace_records(trace_path)
     }
