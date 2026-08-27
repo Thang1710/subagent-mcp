@@ -662,6 +662,7 @@ class _GrokPublicText:
 class _GrokTurn:
     execution_id: str
     task: asyncio.Task[None]
+    write_receipt: asyncio.Event
     cancel_sent: bool = False
 
 
@@ -680,6 +681,21 @@ class _GrokSession:
     interrupt_done: asyncio.Event = field(default_factory=asyncio.Event)
     closed: bool = False
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+
+async def _wait_for_prompt_write_or_terminal(turn: _GrokTurn) -> None:
+    if turn.write_receipt.is_set() or turn.task.done():
+        return
+    receipt_wait = asyncio.create_task(turn.write_receipt.wait())
+    try:
+        await asyncio.wait(
+            {receipt_wait, turn.task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+    finally:
+        if not receipt_wait.done():
+            receipt_wait.cancel()
+        await asyncio.gather(receipt_wait, return_exceptions=True)
 
 
 BindingLocator = Callable[[], GrokBinding | None]
@@ -1469,6 +1485,38 @@ class GrokBuildAdapter:
                 return session.snapshot
             session.interrupting = True
             session.interrupt_done.clear()
+        submission_ready = False
+        try:
+            await asyncio.wait_for(
+                _wait_for_prompt_write_or_terminal(turn),
+                timeout=self._cancel_timeout,
+            )
+            submission_ready = True
+        except (TimeoutError, asyncio.TimeoutError) as exc:
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "Grok ACP prompt submission was not confirmed before cancellation",
+                category="adapter",
+            ) from exc
+        finally:
+            if not submission_ready:
+                async with session.lock:
+                    if session.turn is turn:
+                        session.interrupting = False
+                        session.interrupt_done.set()
+        async with session.lock:
+            _require_grok_action(request, session)
+            if session.turn is not turn:
+                session.interrupting = False
+                session.interrupt_done.set()
+                raise ServiceError(
+                    "CONTEXT_DRIFT", "Grok ACP turn identity changed"
+                )
+            if turn.task.done():
+                captured = session.snapshot
+                session.interrupting = False
+                session.interrupt_done.set()
+                return captured
             if not turn.cancel_sent:
                 turn.cancel_sent = True
                 try:
@@ -1616,10 +1664,16 @@ class GrokBuildAdapter:
         prompt: str,
     ) -> None:
         session.public_text.reset()
+        write_receipt = asyncio.Event()
         task = asyncio.create_task(
-            self._run_turn(session, execution_id=execution_id, prompt=prompt)
+            self._run_turn(
+                session,
+                execution_id=execution_id,
+                prompt=prompt,
+                write_receipt=write_receipt,
+            )
         )
-        session.turn = _GrokTurn(execution_id, task)
+        session.turn = _GrokTurn(execution_id, task, write_receipt)
 
     async def _run_turn(
         self,
@@ -1627,6 +1681,7 @@ class GrokBuildAdapter:
         *,
         execution_id: str,
         prompt: str,
+        write_receipt: asyncio.Event,
     ) -> None:
         result: Mapping[str, object] | None = None
         failure: AdapterFailure | None = None
@@ -1641,6 +1696,7 @@ class GrokBuildAdapter:
                     "sessionId": session.snapshot.external_session_id,
                     "prompt": [{"type": "text", "text": prompt}],
                 },
+                write_receipt=write_receipt,
             )
         except asyncio.CancelledError:
             raise

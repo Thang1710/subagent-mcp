@@ -463,6 +463,76 @@ def test_outgoing_frames_are_bounded_before_write(tmp_path: Path) -> None:
     asyncio.run(scenario())
 
 
+def test_request_write_receipt_is_set_only_after_drain(tmp_path: Path) -> None:
+    class Stdin:
+        def __init__(self) -> None:
+            self.written = asyncio.Event()
+            self.release_drain = asyncio.Event()
+            self.events: list[str] = []
+
+        def write(self, _payload: bytes) -> None:
+            self.events.append("write")
+            self.written.set()
+
+        async def drain(self) -> None:
+            self.events.append("drain-start")
+            await self.release_drain.wait()
+            self.events.append("drain-finished")
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        client = _client(tmp_path, "happy")
+        process = Process()
+        client._process = process  # type: ignore[assignment]
+        client._started = True
+        receipt = asyncio.Event()
+
+        request = asyncio.create_task(
+            client.request("session/prompt", {}, write_receipt=receipt)
+        )
+        await asyncio.wait_for(process.stdin.written.wait(), timeout=1)
+        assert receipt.is_set() is False
+
+        process.stdin.release_drain.set()
+        await asyncio.wait_for(receipt.wait(), timeout=1)
+        assert process.stdin.events == ["write", "drain-start", "drain-finished"]
+
+        await client._dispatch({"jsonrpc": "2.0", "id": 1, "result": {}})
+        assert await request == {}
+
+    asyncio.run(scenario())
+
+
+def test_request_write_receipt_stays_unset_when_drain_fails(tmp_path: Path) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            raise BrokenPipeError
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        client = _client(tmp_path, "happy")
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+        receipt = asyncio.Event()
+
+        with pytest.raises(AcpProcessError, match="connection was lost"):
+            await client.request("session/prompt", {}, write_receipt=receipt)
+        assert receipt.is_set() is False
+
+    asyncio.run(scenario())
+
+
 def test_stderr_is_drained_without_deadlock_and_keeps_only_bounded_tail(
     tmp_path: Path,
 ) -> None:

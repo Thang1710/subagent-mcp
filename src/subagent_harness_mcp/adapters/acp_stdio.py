@@ -187,6 +187,7 @@ class AcpStdioProcess:
         params: Mapping[str, object],
         *,
         timeout_seconds: float | None = None,
+        write_receipt: asyncio.Event | None = None,
     ) -> Mapping[str, object]:
         self._ensure_available()
         timeout = self._request_timeout if timeout_seconds is None else timeout_seconds
@@ -208,6 +209,8 @@ class AcpStdioProcess:
                     "params": dict(params),
                 }
             )
+            if write_receipt is not None:
+                write_receipt.set()
             try:
                 return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
             except asyncio.TimeoutError as exc:

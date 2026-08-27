@@ -4,6 +4,8 @@ All notable changes to Subagent MCP are documented here.
 
 ## Unreleased
 
+- Confirm Grok prompt submission before sending native cancellation so event-loop
+  scheduling cannot reverse `session/prompt` and `session/cancel` frames.
 - Assemble secret-shaped redaction fixtures from fragments so repository secret
   scans stay clean without weakening runtime redaction coverage.
 - Add a disabled-by-default deterministic Grok Build candidate for read-only

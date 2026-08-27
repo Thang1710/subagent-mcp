@@ -2065,6 +2065,10 @@ def _lifecycle_adapter(
     rpc_message: str | None = None,
     rpc_data: Mapping[str, object] | None = None,
     handshake_rpc_method: str | None = None,
+    prompt_write_started: asyncio.Event | None = None,
+    prompt_write_release: asyncio.Event | None = None,
+    prompt_write_error: bool = False,
+    write_order: list[str] | None = None,
 ) -> tuple[GrokBuildAdapter, Path, list[AcpStdioProcess]]:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -2106,6 +2110,21 @@ def _lifecycle_adapter(
             config["handshake_rpc_method"] = handshake_rpc_method
         names = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT")
         class LifecycleProcess(AcpStdioProcess):
+            async def _write(self, message: Mapping[str, object]) -> None:
+                method = message.get("method")
+                if method == "session/prompt" and prompt_write_release is not None:
+                    assert prompt_write_started is not None
+                    prompt_write_started.set()
+                    await prompt_write_release.wait()
+                    if prompt_write_error:
+                        raise AcpProcessError("synthetic prompt write failure")
+                await super()._write(message)
+                if write_order is not None and method in {
+                    "session/prompt",
+                    "session/cancel",
+                }:
+                    write_order.append(str(method))
+
             async def close(self) -> None:
                 if close_delay:
                     await asyncio.sleep(close_delay)
@@ -2503,6 +2522,93 @@ def test_lifecycle_interrupt_sends_cancel_once_and_reconciles_late_terminal(
     assert [record["method"] for record in _trace_records(trace_path)].count(
         "session/cancel"
     ) == 1
+
+
+def test_lifecycle_interrupt_cannot_overtake_delayed_prompt_write(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    prompt_write_started = asyncio.Event()
+    prompt_write_release = asyncio.Event()
+    write_order: list[str] = []
+    adapter, _trace_path, _children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        scenario="cancel-late-success",
+        prompt_write_started=prompt_write_started,
+        prompt_write_release=prompt_write_release,
+        write_order=write_order,
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    async def scenario() -> None:
+        started = await adapter.spawn(_lifecycle_spawn_request(context))
+        request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        await asyncio.wait_for(prompt_write_started.wait(), timeout=1)
+        interrupt = asyncio.create_task(adapter.interrupt(request))
+        for _ in range(20):
+            if write_order:
+                break
+            await asyncio.sleep(0)
+        prompt_write_release.set()
+        interrupted = await asyncio.wait_for(interrupt, timeout=1)
+        assert interrupted.execution_state == "succeeded"
+        assert write_order[:2] == ["session/prompt", "session/cancel"]
+        await adapter.close(request)
+
+    asyncio.run(scenario())
+
+
+def test_lifecycle_interrupt_does_not_cancel_when_prompt_write_fails_first(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    prompt_write_started = asyncio.Event()
+    prompt_write_release = asyncio.Event()
+    write_order: list[str] = []
+    adapter, _trace_path, _children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        scenario="long",
+        prompt_write_started=prompt_write_started,
+        prompt_write_release=prompt_write_release,
+        prompt_write_error=True,
+        write_order=write_order,
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    async def scenario() -> None:
+        started = await adapter.spawn(_lifecycle_spawn_request(context))
+        request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        await asyncio.wait_for(prompt_write_started.wait(), timeout=1)
+        interrupt = asyncio.create_task(adapter.interrupt(request))
+        for _ in range(20):
+            if write_order:
+                break
+            await asyncio.sleep(0)
+        prompt_write_release.set()
+        interrupted = await asyncio.wait_for(interrupt, timeout=1)
+        assert interrupted.execution_state == "failed"
+        assert interrupted.error is not None
+        assert interrupted.error.code == "RECOVERY_REQUIRED"
+        assert "session/cancel" not in write_order
+        await adapter.close(request)
+
+    asyncio.run(scenario())
 
 
 def test_lifecycle_close_active_is_exact_idempotent_and_restart_is_recovery_required(
