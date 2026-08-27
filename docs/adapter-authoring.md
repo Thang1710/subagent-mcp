@@ -40,6 +40,18 @@ versions quarantine only the affected runtime. Use the built-in deterministic
 fake adapter as the behavioral reference. Published resource schemas are
 available at `importlib.resources.files("subagent_harness_mcp") / "schemas"`.
 
+## The provider-neutral ACP stdio helper
+
+The package's private ACP stdio helper owns argv-array process creation,
+newline-delimited JSON-RPC framing and correlation, bounded stdout and stderr
+pumping, callback dispatch, and exact owned-process cleanup. It does not own
+models, authentication, permissions, workspaces, sessions, quota, or filesystem
+policy. Those remain the adapter's responsibility.
+
+This helper is an internal implementation seam, not part of the public adapter
+contract. Third-party adapters must not import it. DeepSeek Harness does not use
+this helper in the current release.
+
 The repository also includes a separately buildable adapter at
 [`examples/sample_adapter`](../examples/sample_adapter). It imports only the
 public adapter and contract modules. Run the public lifecycle check against a

@@ -432,6 +432,7 @@ def create_default_service() -> object:
 
     from .adapters.claude_code import ClaudeCodeAdapter
     from .adapters.deepseek_harness import DeepSeekHarnessAdapter
+    from .adapters.grok_build import GrokBuildAdapter
     from .adapters.registry import AdapterRegistry
     from .config import ConfigStore
     from .paths import resolve_paths
@@ -440,7 +441,11 @@ def create_default_service() -> object:
 
     paths = resolve_paths()
     registry = AdapterRegistry(
-        builtin_factories=(ClaudeCodeAdapter, DeepSeekHarnessAdapter)
+        builtin_factories=(
+            ClaudeCodeAdapter,
+            DeepSeekHarnessAdapter,
+            GrokBuildAdapter,
+        )
     )
     registry.discover()
     return SubagentMcpService(

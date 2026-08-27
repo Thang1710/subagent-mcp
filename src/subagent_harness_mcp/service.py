@@ -1656,7 +1656,10 @@ class SubagentMcpService:
             result=result,
             event_kind=event_kind,
             event_payload={} if result is None else {"result": result},
-            release_leases=snapshot.evidence.get("cleanup_confirmed") is not False,
+            release_leases=(
+                isinstance(observed.get("evidence"), Mapping)
+                and observed["evidence"].get("cleanup_confirmed") is not False
+            ),
         )
         if (
             snapshot.error is not None
@@ -2060,28 +2063,34 @@ def _public_model_catalog(raw: object) -> list[dict[str, str]]:
     for item in raw[:128]:
         if not isinstance(item, Mapping):
             continue
+        keys = set(item)
+        if keys not in ({"value", "label"}, {"value", "label", "provider", "model"}):
+            continue
         try:
             value = validate_model_id(item.get("value"))
             label = validate_bounded_text(
                 item.get("label"), "model label", 256, strip=True
             )
-            provider = validate_bounded_text(
-                item.get("provider"), "provider", 128, strip=True
-            )
-            model = validate_model_id(item.get("model"))
         except ContractError:
             continue
-        if value in seen or value != f"{provider}::{model}":
+        if value in seen:
             continue
         seen.add(value)
-        result.append(
-            {
-                "value": value,
-                "label": label,
-                "provider": provider,
-                "model": model,
-            }
-        )
+        row = {"value": value, "label": label}
+        if keys == {"value", "label", "provider", "model"}:
+            try:
+                provider = validate_bounded_text(
+                    item.get("provider"), "provider", 128, strip=True
+                )
+                model = validate_model_id(item.get("model"))
+            except ContractError:
+                seen.remove(value)
+                continue
+            if value != f"{provider}::{model}":
+                seen.remove(value)
+                continue
+            row.update({"provider": provider, "model": model})
+        result.append(row)
     return result
 
 
@@ -2320,15 +2329,114 @@ def _snapshot_observation(
     context: ResolvedContext,
 ) -> dict[str, Any]:
     observed = _context_observation(context)
+    evidence = _safe_snapshot_evidence(snapshot.evidence)
+    if snapshot.error is not None and snapshot.error.code == "RECOVERY_REQUIRED":
+        evidence["cleanup_confirmed"] = False
+    post_handshake = snapshot.evidence.get("post_handshake_attestation")
+    if post_handshake is not None:
+        projected = _post_handshake_reasoning(post_handshake, snapshot, context)
+        observed["attestation"].update(projected)
     observed.update(
         {
             "external_session_id": snapshot.external_session_id,
             "external_execution_id": snapshot.external_execution_id,
             "needs_input": _redact(list(snapshot.needs_input)),
-            "evidence": _redact(snapshot.evidence),
+            "evidence": evidence,
         }
     )
     return observed
+
+
+def _safe_public_scalar(value: object, limit: int) -> str | int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if not isinstance(value, str) or not value or len(value) > limit:
+        return None
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        return None
+    return value
+
+
+def _safe_provider_error(value: object) -> dict[str, str | int] | None:
+    if not isinstance(value, Mapping) or value.get("source") != "native-acp":
+        return None
+    result: dict[str, str | int] = {"source": "native-acp"}
+    limits = {"rpc_code": 128, "provider_code": 128, "detail": 2048}
+    for key, limit in limits.items():
+        scalar = _safe_public_scalar(value.get(key), limit)
+        if scalar is not None:
+            result[key] = scalar
+    return result
+
+
+def _safe_snapshot_evidence(value: Mapping[str, Any]) -> dict[str, Any]:
+    safe = dict(
+        _redact(
+            {
+                key: item
+                for key, item in value.items()
+                if key != "post_handshake_attestation"
+            }
+        )
+    )
+    provider_error = _safe_provider_error(value.get("provider_error"))
+    if provider_error is None:
+        safe.pop("provider_error", None)
+    else:
+        safe["provider_error"] = provider_error
+    return safe
+
+
+def _post_handshake_reasoning(
+    value: object,
+    snapshot: AdapterSnapshot,
+    context: ResolvedContext,
+) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ServiceError(
+            "CONTEXT_DRIFT", "adapter reasoning attestation is malformed"
+        )
+    source = _safe_public_scalar(value.get("reasoning_source"), 128)
+    binding = value.get("reasoning_binding")
+    expected = [
+        str(context.attestation.get("pair_key", "")),
+        snapshot.external_session_id,
+        snapshot.effective_model,
+        dict(snapshot.effective_reasoning),
+        snapshot.context_hash,
+    ]
+    if (
+        not isinstance(source, str)
+        or value.get("reasoning_provider_reported") is not True
+        or not isinstance(binding, (list, tuple))
+        or list(binding) != expected
+        or snapshot.effective_model != context.effective_model
+    ):
+        raise ServiceError(
+            "CONTEXT_DRIFT",
+            "adapter reasoning attestation is not bound to this session",
+        )
+    return {
+        "reasoning_source": source,
+        "reasoning_binding": [
+            str(binding[0]),
+            str(binding[1]),
+            str(binding[2]),
+            hashlib.sha256(
+                json.dumps(
+                    binding[3],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest(),
+            str(binding[4]),
+        ],
+        "reasoning_provider_reported": True,
+    }
 
 
 def _context_observation(context: ResolvedContext) -> dict[str, Any]:
@@ -2492,18 +2600,9 @@ def _snapshot_result(snapshot: AdapterSnapshot) -> Mapping[str, Any] | None:
             result["error"]["next_action"] = _redact_text(
                 snapshot.error.next_action
             )
-        provider_error = snapshot.evidence.get("provider_error")
-        if isinstance(provider_error, Mapping):
-            projected = {
-                key: provider_error[key]
-                for key in ("source", "rpc_code", "provider_code", "detail")
-                if key in provider_error
-                and not isinstance(provider_error[key], bool)
-                and isinstance(provider_error[key], (str, int))
-            }
-            safe_details = _redact(projected)
-            if isinstance(safe_details, Mapping):
-                result["error"]["details"] = dict(safe_details)
+        provider_error = _safe_provider_error(snapshot.evidence.get("provider_error"))
+        if provider_error is not None:
+            result["error"]["details"] = dict(_redact(provider_error))
     return result or None
 
 

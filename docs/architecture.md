@@ -14,6 +14,18 @@ Adapters translate the public async contract to one native harness; they do not
 write shared state. The UI and MCP therefore cannot diverge into separate
 provider lifecycle implementations.
 
+## The provider-neutral ACP stdio helper
+
+The private ACP stdio helper owns argv-array process creation, newline-delimited
+JSON-RPC framing and correlation, bounded stdout and stderr pumping, callback
+dispatch, and exact owned-process cleanup. It does not own models,
+authentication, permissions, workspaces, sessions, quota, or filesystem policy;
+the selected adapter retains those decisions.
+
+The Grok Build adapter uses this transport boundary without making it part of
+the public adapter API. DeepSeek Harness does not use this helper in the current
+release.
+
 ## Normalized lifecycle
 
 The stdio server declares 14 tools from `schemas/tools-v1.json`. Core lifecycle

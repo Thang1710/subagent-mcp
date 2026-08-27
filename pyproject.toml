@@ -17,6 +17,8 @@ keywords = [
     "codex",
     "coding-agent",
     "developer-tools",
+    "grok",
+    "grok-build",
     "mcp",
     "mcp-server",
     "model-context-protocol",

@@ -1,0 +1,27 @@
+=== grok --help ===
+Usage: grok [OPTIONS] [PROMPT] [COMMAND]
+
+Commands:
+  agent        Run Grok without the interactive UI
+
+Options:
+    --no-subagents          Disable nested subagents.
+   --disable-web-search    Disable web search.
+  --deny <TOOL>            Deny a tool.
+     --disallowed-tools <TOOLS>  Disallow tools.
+  --permission-mode <MODE> Set the permission mode.
+  -m, --model <MODEL>     Select a model.
+    --reasoning-effort <EFFORT>  Set reasoning effort.
+   --cwd <CWD>             Set the working directory.
+
+=== grok agent --help ===
+Usage: grok agent [OPTIONS] [COMMAND]
+
+Commands:
+  stdio     Run the agent over stdio
+
+Options:
+  --no-leader             Disable leader mode.
+
+=== grok agent stdio --help ===
+Usage: grok agent stdio [OPTIONS]

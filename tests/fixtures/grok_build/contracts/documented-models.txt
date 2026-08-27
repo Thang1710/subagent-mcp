@@ -1,0 +1,2 @@
+grok-4	Grok 4
+grok-future:experimental@2027.0	Future opaque model

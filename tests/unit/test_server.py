@@ -9,6 +9,7 @@ from mcp.types import CallToolResult, TextContent
 
 from subagent_harness_mcp import __version__
 from subagent_harness_mcp import server as server_module
+from subagent_harness_mcp.adapters import grok_build as grok_build_module
 from subagent_harness_mcp.contracts import (
     ADAPTER_API_VERSION,
     AdapterManifest,
@@ -58,11 +59,34 @@ def test_default_service_publishes_only_real_runtime_adapters(
     monkeypatch,
 ) -> None:
     monkeypatch.setenv("SUBAGENT_MCP_HOME", str(tmp_path / "home"))
+
+    class CatalogUnavailableGrokAdapter(grok_build_module.GrokBuildAdapter):
+        async def model_catalog(
+            self, *, refresh: bool = False
+        ) -> tuple[dict[str, str], ...]:
+            del refresh
+            return ()
+
+    monkeypatch.setattr(
+        grok_build_module,
+        "GrokBuildAdapter",
+        CatalogUnavailableGrokAdapter,
+    )
     service = create_default_service()
 
-    runtime_ids = {item["runtime_id"] for item in _run(service.runtime_list())}
+    runtimes = _run(service.runtime_list())
+    by_id = {item["runtime_id"]: item for item in runtimes}
 
-    assert runtime_ids == {"claude-code", "deepseek-harness"}
+    assert set(by_id) == {"claude-code", "deepseek-harness", "grok-build"}
+    grok = by_id["grok-build"]
+    assert grok["enabled"] is False
+    assert grok["manifest"]["harness_id"] == "grok-build"
+    assert grok["manifest"]["semantic_permissions"] == [
+        "repo_read",
+        "workspace_write",
+    ]
+    assert grok["manifest"]["max_write_roots_per_session"] == 32
+    assert grok["manifest"]["write_root_mode"] == "path-prefix"
 
 
 def _metadata(result: CallToolResult) -> dict[str, Any]:
@@ -210,6 +234,7 @@ def test_server_identity_discovery_and_public_schema_match() -> None:
     assert server.name == "Subagent MCP"
     assert server.title == "Subagent MCP"
     assert server.version == __version__
+    assert len(tools) == 14
     assert set(schemas) == EXPECTED_TOOL_NAMES == set(public_schema["tools"])
     assert all(tool.output_schema is None for tool in tools)
     for name in SIDE_EFFECTING_TOOL_NAMES:

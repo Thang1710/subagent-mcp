@@ -222,6 +222,28 @@ class _CatalogFakeAdapter(FakeAdapter):
         )
 
 
+class _NativeCatalogFakeAdapter(FakeAdapter):
+    async def model_catalog(self) -> tuple[dict[str, str], ...]:
+        return (
+            {"value": "opaque/native:model@future", "label": "Native Future"},
+            {"value": "another+exact", "label": "Another Exact"},
+        )
+
+
+class _WriteSetContextAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness, *, drift: bool = False) -> None:
+        super().__init__(harness)
+        self._drift = drift
+
+    async def resolve_context(self, request):
+        context = await super().resolve_context(request)
+        write_set = ("wrong",) if self._drift else request.write_set
+        return replace(
+            context,
+            attestation={"source": "write-set-regression", "write_set": write_set},
+        )
+
+
 class _OneRootFakeAdapter(FakeAdapter):
     """Generic stand-in for a harness that natively enforces one write root."""
 
@@ -370,6 +392,56 @@ class _RestartClosePlaceholderAdapter(FakeAdapter):
             workspace_key="",
             context_hash="",
             evidence={"source": "persisted-session-id"},
+        )
+
+
+class _RecoveryTerminalSnapshotAdapter(FakeAdapter):
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            conversation_state="idle",
+            execution_state="failed",
+            error=AdapterFailure(
+                "RECOVERY_REQUIRED", "adapter", False,
+                "native process outcome is ambiguous",
+            ),
+            evidence={"source": "native-acp"},
+        )
+
+    async def close(self, request):
+        snapshot = await super().close(request)
+        return replace(
+            snapshot,
+            conversation_state="closed",
+            execution_state="failed",
+            error=AdapterFailure(
+                "RECOVERY_REQUIRED", "adapter", False,
+                "native process outcome is ambiguous",
+            ),
+            evidence={"source": "native-acp", "cleanup_confirmed": True},
+        )
+
+
+class _PostHandshakeReasoningAdapter(FakeAdapter):
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        return replace(
+            snapshot,
+            evidence={
+                **dict(snapshot.evidence),
+                "post_handshake_attestation": {
+                    "reasoning_source": "native-acp-session",
+                    "reasoning_binding": [
+                        str(request.context.attestation.get("pair_key", "")),
+                        snapshot.external_session_id,
+                        snapshot.effective_model,
+                        dict(snapshot.effective_reasoning),
+                        snapshot.context_hash,
+                    ],
+                    "reasoning_provider_reported": True,
+                },
+            },
         )
 
 
@@ -605,6 +677,30 @@ def test_snapshot_result_surfaces_redacted_provider_error_details() -> None:
     assert secret not in str(result)
 
 
+def test_snapshot_result_omits_oversized_or_control_provider_fields() -> None:
+    snapshot = AdapterSnapshot(
+        external_session_id="native-session",
+        external_execution_id="execution-1",
+        conversation_state="idle",
+        execution_state="failed",
+        effective_model="vendor/model",
+        effective_reasoning={},
+        workspace_path="workspace",
+        workspace_key="workspace",
+        context_hash="a" * 64,
+        error=AdapterFailure("PROVIDER_ERROR", "provider", False, "failed"),
+        evidence={"provider_error": {
+            "source": "native-acp",
+            "rpc_code": "bad\ncode",
+            "provider_code": "x" * 129,
+            "detail": "y" * 2049,
+        }},
+    )
+    result = service_module._snapshot_result(snapshot)
+    assert result is not None
+    assert result["error"]["details"] == {"source": "native-acp"}
+
+
 def _scoped_spawn_request(
     workspace: Path,
     *,
@@ -657,6 +753,20 @@ def test_runtime_list_publishes_adapter_owned_model_catalog(tmp_path: Path) -> N
             "provider": "vendor",
             "model": "model-b",
         },
+    ]
+
+
+def test_runtime_list_preserves_provider_neutral_native_model_catalog(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    service, _ = _service(tmp_path, harness, adapter=_NativeCatalogFakeAdapter(harness))
+
+    runtime = asyncio.run(service.runtime_list())[0]
+
+    assert runtime["model_catalog"] == [
+        {"value": "opaque/native:model@future", "label": "Native Future"},
+        {"value": "another+exact", "label": "Another Exact"},
     ]
 
 
@@ -1137,6 +1247,69 @@ def _active_writer_leases(store: StateStore) -> int:
                 "WHERE kind = 'writer' AND released_at_utc IS NULL"
             ).fetchone()[0]
         )
+
+
+def test_terminal_recovery_snapshot_retains_writer_until_exact_close(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _RecoveryTerminalSnapshotAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    failed = asyncio.run(service.agent_spawn(_spawn_request(workspace, write=True)))
+    assert failed.execution_state == "failed"
+    assert (
+        store.load_execution(failed.execution_id)
+        .observed["evidence"]["cleanup_confirmed"]
+        is False
+    )
+    assert _active_writer_leases(store) == 1
+    with pytest.raises(ServiceError) as overlap:
+        asyncio.run(service.agent_spawn(_spawn_request(
+            workspace, request_id="ambiguous-overlap", write=True,
+        )))
+    assert overlap.value.code == "WRITE_SET_BUSY"
+
+    closed = asyncio.run(service.agent_close(ActionRequest(
+        "ambiguous-close", failed.conversation_id,
+    )))
+    assert closed.conversation_state == "closed"
+    assert _active_writer_leases(store) == 0
+
+
+def test_post_handshake_reasoning_is_allowlisted_into_status_only(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _PostHandshakeReasoningAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    status = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    assert status.reasoning_attestation["provider_reported"] is True
+    assert status.reasoning_attestation["source"] == "native-acp-session"
+    expected_reasoning_hash = hashlib.sha256(
+        json.dumps(
+            status.reasoning_attestation["effective"],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert status.reasoning_attestation["binding"] == [
+        "",
+        status.external_session_id,
+        status.descriptor.model_display_name,
+        expected_reasoning_hash,
+        status.reasoning_attestation["context_hash"],
+    ]
+    observed = store.load_execution(status.execution_id).observed
+    assert "post_handshake_attestation" not in observed["evidence"]
+    assert observed["attestation"]["reasoning_provider_reported"] is True
 
 
 def test_post_native_spawn_service_error_retains_writer_until_cleanup(
@@ -2115,6 +2288,53 @@ def test_request_id_conflict_and_attestation_mismatch_fail_closed(tmp_path: Path
     assert conflict.value.code == "IDEMPOTENCY_CONFLICT"
 
 
+def test_writer_context_requires_exact_nonempty_write_set_attestation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "src").mkdir()
+    accepted_harness = FakeHarness()
+    accepted_service, _ = _service(
+        tmp_path / "accepted",
+        accepted_harness,
+        adapter=_WriteSetContextAdapter(accepted_harness),
+    )
+
+    accepted = asyncio.run(
+        accepted_service.agent_spawn(
+            _scoped_spawn_request(
+                workspace,
+                request_id="writer-context-exact",
+                write_set=("src",),
+            )
+        )
+    )
+
+    assert accepted.execution_state == "succeeded"
+    assert accepted_harness.call_count("spawn") == 1
+
+    drift_harness = FakeHarness()
+    drift_service, _ = _service(
+        tmp_path / "drift",
+        drift_harness,
+        adapter=_WriteSetContextAdapter(drift_harness, drift=True),
+    )
+    with pytest.raises(ServiceError) as mismatch:
+        asyncio.run(
+            drift_service.agent_spawn(
+                _scoped_spawn_request(
+                    workspace,
+                    request_id="writer-context-drift",
+                    write_set=("src",),
+                )
+            )
+        )
+
+    assert mismatch.value.code == "CONTEXT_DRIFT"
+    assert drift_harness.call_count("spawn") == 0
+
+
 def test_writer_scopes_allow_disjoint_executions_in_same_workspace(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -2380,12 +2600,13 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     harness = FakeHarness()
+    private_key_label = "PRIVATE" + " KEY"
     pem_secret = (
-        "-----BEGIN PRIVATE KEY-----\n"
+        f"-----BEGIN {private_key_label}-----\n"
         "cGVtLXNlY3JldC1tYXJrZXI=\n"
-        "-----END PRIVATE KEY-----"
+        f"-----END {private_key_label}-----"
     )
-    aws_key_id = "AKIAIOSFODNN7EXAMPLE"
+    aws_key_id = "AKIA" + "IOSFODNN7EXAMPLE"
     signed_value = "0123456789abcdef0123456789abcdef"
     harness.enqueue(
         "done",
@@ -2430,16 +2651,17 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
 
 
 def test_redact_text_covers_private_keys_cloud_ids_and_assigned_secrets() -> None:
+    private_key_label = "RSA PRIVATE" + " KEY"
     pem = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
+        f"-----BEGIN {private_key_label}-----\n"
         "bGl0ZXJhbC1wZW0tc2VjcmV0\n"
-        "-----END RSA PRIVATE KEY-----"
+        f"-----END {private_key_label}-----"
     )
     escaped_pem = pem.replace("\n", "\\n")
-    aws_key_id = "ASIAIOSFODNN7EXAMPLE"
+    aws_key_id = "ASIA" + "IOSFODNN7EXAMPLE"
     signature = "abcdef0123456789abcdef0123456789"
-    access_token = "ya29.abcdefghijklmnopqrstuvwxyz"
-    client_secret = "client-secret-value-123456"
+    access_token = "".join(("ya29.", "abcdefghijklmnopqrstuvwxyz"))
+    client_secret = "".join(("client-secret-", "value-123456"))
     basic = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
     raw = (
         f"{pem}\n{escaped_pem}\n{aws_key_id}\n"

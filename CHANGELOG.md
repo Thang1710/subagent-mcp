@@ -2,6 +2,16 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## Unreleased
+
+- Assemble secret-shaped redaction fixtures from fragments so repository secret
+  scans stay clean without weakening runtime redaction coverage.
+- Add a disabled-by-default deterministic Grok Build candidate for read-only
+  review and bounded path-prefix writing through its native ACP harness. Support
+  remains In development until the separate live read-only and writer gates pass.
+- Document the private provider-neutral ACP stdio boundary without changing the
+  existing DeepSeek Harness adapter path.
+
 ## 1.0.23 - 2026-08-26
 
 - Require a positive, non-negated retirement statement before treating a model

@@ -12,6 +12,7 @@ import pytest
 
 from subagent_harness_mcp.adapters import claude_code as claude_code_module
 from subagent_harness_mcp.adapters import deepseek_harness as deepseek_harness_module
+from subagent_harness_mcp.adapters import grok_build as grok_build_module
 from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp import server as server_module
@@ -197,6 +198,94 @@ def test_ui_activity_detail_projects_persisted_execution_without_raw_events(
     encoded = json.dumps(detail)
     assert "payload" not in encoded
     assert "external_session" not in encoded
+
+
+def test_ui_activity_projects_grok_through_provider_neutral_persisted_fields(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    home = tmp_path / "home"
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(home.resolve())},
+        os_name="nt",
+    )
+    config = ConfigStore(paths)
+    config.save(
+        {
+            "schema_version": 1,
+            "revision": 0,
+            "runtimes": {
+                "grok-build": {
+                    "enabled": True,
+                    "selection_mode": "fixed",
+                    "fallback": False,
+                    "transport": "native-acp",
+                    "variants": [
+                        {
+                            "id": "configured",
+                            "model": "grok-model-alpha",
+                            "reasoning": {"effort": "high"},
+                        }
+                    ],
+                }
+            },
+        },
+        expected_revision=0,
+    )
+    harness = FakeHarness()
+    harness.enqueue("done", result="bounded Grok result")
+
+    class GrokActivityAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__(harness)
+            self._manifest = grok_build_module.GrokBuildAdapter(
+                platform="win32",
+                environment={},
+            ).manifest
+
+    store = StateStore.open(paths)
+    service = SubagentMcpService(
+        config=config,
+        store=store,
+        registry=AdapterRegistry(builtin_factories=(GrokActivityAdapter,)),
+    )
+    backend = LocalUiBackend(config=config, service=service, store=store)
+    status = asyncio.run(
+        service.agent_spawn(
+            SpawnRequest(
+                request_id="grok-activity-spawn-1",
+                runtime_id="grok-build",
+                variant_id="configured",
+                task=TaskPacket(
+                    title="Bounded Grok activity task",
+                    prompt="Return one deterministic result.",
+                    acceptance_criteria=("Return normalized status.",),
+                    role="sub-agent",
+                ),
+                cwd=str(workspace.resolve()),
+                mode="review",
+                transport="native-acp",
+                permissions=("repo_read",),
+            )
+        )
+    )
+
+    summary = backend.snapshot()["activity"][0]
+    detail = backend.activity_detail(status.execution_id)
+
+    assert summary["runtime"] == "grok-build"
+    assert summary["displayName"] == "Grok Build"
+    assert summary["modelDisplayName"] == "grok-model-alpha"
+    assert summary["transport"] == "native-acp"
+    assert summary["icon"]["kind"] == "monogram"
+    assert summary["icon"]["text"] == "G"
+    assert detail is not None
+    assert detail["provider"] == "xai"
+    assert detail["harness"] == "grok-build"
+    assert detail["reasoning"] == {"effort": "high"}
+    assert detail["permissions"] == ["repo_read"]
+    assert detail["result"]["text"] == "bounded Grok result"
 
 
 def test_ui_snapshot_surfaces_resident_update_quarantine(
@@ -641,19 +730,49 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         "DeepSeekHarnessAdapter",
         CatalogDeepSeekAdapter,
     )
+    grok_process_starts: list[str] = []
+    real_grok_adapter = grok_build_module.GrokBuildAdapter
+
+    def grok_process_must_not_start(*_args: object, **_kwargs: object) -> object:
+        grok_process_starts.append("started")
+        raise AssertionError("fresh UI snapshot must not start a Grok provider")
+
+    class CatalogGrokAdapter(real_grok_adapter):
+        def __init__(self) -> None:
+            super().__init__(
+                platform="win32",
+                environment={},
+                acp_process_factory=grok_process_must_not_start,
+            )
+
+        async def model_catalog(
+            self, *, refresh: bool = False
+        ) -> tuple[dict[str, str], ...]:
+            del refresh
+            return (
+                {"value": "grok-model-alpha", "label": "Grok Model Alpha"},
+                {"value": "grok-model-beta", "label": "Grok Model Beta"},
+            )
+
+    monkeypatch.setattr(
+        grok_build_module,
+        "GrokBuildAdapter",
+        CatalogGrokAdapter,
+    )
 
     backend = create_local_backend()
     fresh = backend.snapshot()
     by_id = {runtime["id"]: runtime for runtime in fresh["runtimes"]}
 
     assert fresh["revision"] == 0
-    assert set(by_id) == {"claude-code", "deepseek-harness"}
+    assert set(by_id) == {"claude-code", "deepseek-harness", "grok-build"}
     assert fresh["health"]["state"] == "setup_required"
     assert {
         item["label"]: item["state"] for item in fresh["health"]["messages"]
     } == {
         "Claude sub-agent": "not_configured",
         "DeepSeek Harness": "not_configured",
+        "Grok Build": "not_configured",
     }
     claude = by_id["claude-code"]
     assert claude["manifest"]["runtime_id"] == "claude-code"
@@ -699,6 +818,38 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         "DeepSeek-V4-Flash-Vision-Exp",
         "OX Alpha - OpenRouter",
     ]
+
+    grok = by_id["grok-build"]
+    assert grok["manifest"]["runtime_id"] == "grok-build"
+    assert grok["manifest"]["harness_id"] == "grok-build"
+    assert grok["manifest"]["semantic_permissions"] == [
+        "repo_read",
+        "workspace_write",
+    ]
+    assert grok["manifest"]["max_write_roots_per_session"] == 32
+    assert grok["manifest"]["write_root_mode"] == "path-prefix"
+    assert grok["status"]["state"] == "not_configured"
+    assert grok["enabled"] is False
+    assert grok["locked"] is False
+    grok_fields = {
+        field["id"]: field
+        for group in grok["groups"]
+        for field in group["fields"]
+    }
+    assert set(grok_fields) == {
+        "delegation_priority",
+        "model_priority",
+        "variant.0.reasoning",
+    }
+    grok_priority = grok_fields["model_priority"]
+    assert grok_priority["kind"] == "model-priority"
+    assert grok_priority["value"] == []
+    assert grok_priority["allowCustom"] is True
+    assert [item["value"] for item in grok_priority["options"]] == [
+        "grok-model-alpha",
+        "grok-model-beta",
+    ]
+    assert grok_process_starts == []
 
     fields = {
         field["id"]: field
@@ -749,7 +900,18 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
                     "variant.0.reasoning.effort": reasoning["effort"],
                     "delegation_priority": 50,
                 },
-            }
+            },
+            "grok-build": {
+                "enabled": True,
+                "options": {
+                    "model_priority": [
+                        "grok-model-beta",
+                        "grok-model-alpha",
+                    ],
+                    "variant.0.reasoning": '{"effort":"max"}',
+                    "delegation_priority": 100,
+                },
+            },
         }
     }
     saved = backend.patch_config(patch, expected_revision=0)
@@ -760,8 +922,16 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     assert stale.value.code == "REVISION_CONFLICT"
 
     updated = backend.snapshot()
+    assert [runtime["id"] for runtime in updated["runtimes"]] == [
+        "grok-build",
+        "claude-code",
+        "deepseek-harness",
+    ]
     updated_claude = next(
         runtime for runtime in updated["runtimes"] if runtime["id"] == "claude-code"
+    )
+    updated_grok = next(
+        runtime for runtime in updated["runtimes"] if runtime["id"] == "grok-build"
     )
     updated_fields = {
         field["id"]: field
@@ -777,6 +947,18 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         "future/provider-fallback-2@2026.08",
     ]
     assert updated_fields["variant.0.reasoning.effort"]["value"] == "xhigh"
+    updated_grok_fields = {
+        field["id"]: field
+        for group in updated_grok["groups"]
+        for field in group["fields"]
+    }
+    assert updated_grok["enabled"] is True
+    assert updated_grok_fields["delegation_priority"]["value"] == 100
+    assert updated_grok_fields["model_priority"]["value"] == [
+        "grok-model-beta",
+        "grok-model-alpha",
+    ]
+    assert updated_grok_fields["variant.0.reasoning"]["value"] == '{"effort":"max"}'
 
     persisted = ConfigStore(
         resolve_paths(
@@ -806,6 +988,96 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
         "transport": "managed-sdk",
         "variants": [],
     }
+    persisted_grok = persisted["runtimes"]["grok-build"]
+    assert persisted_grok["enabled"] is True
+    assert persisted_grok["delegation_priority"] == 100
+    assert persisted_grok["transport"] == "native-acp"
+    assert [item["model"] for item in persisted_grok["variants"]] == [
+        "grok-model-beta",
+        "grok-model-alpha",
+    ]
+    assert all(
+        item["reasoning"] == {"effort": "max"}
+        for item in persisted_grok["variants"]
+    )
+
+    disabled = backend.patch_config(
+        {"runtimes": {"grok-build": {"enabled": False}}},
+        expected_revision=1,
+    )
+    assert disabled == {"revision": 2}
+    with pytest.raises(ConfigError) as stale_disable:
+        backend.patch_config(
+            {"runtimes": {"grok-build": {"enabled": True}}},
+            expected_revision=1,
+        )
+    assert stale_disable.value.code == "REVISION_CONFLICT"
+    disabled_grok = next(
+        runtime
+        for runtime in backend.snapshot()["runtimes"]
+        if runtime["id"] == "grok-build"
+    )
+    assert disabled_grok["enabled"] is False
+    reloaded = ConfigStore(
+        resolve_paths(
+            {"SUBAGENT_MCP_HOME": str(home.resolve())},
+            os_name="nt",
+        )
+    ).load()
+    assert reloaded["revision"] == 2
+    assert reloaded["runtimes"]["grok-build"]["enabled"] is False
+
+
+def test_fresh_grok_ui_model_catalog_unavailable_retains_bounded_exact_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "fresh-home"
+    monkeypatch.setenv("SUBAGENT_MCP_HOME", str(home.resolve()))
+    process_starts: list[str] = []
+    real_grok_adapter = grok_build_module.GrokBuildAdapter
+
+    def process_must_not_start(*_args: object, **_kwargs: object) -> object:
+        process_starts.append("started")
+        raise AssertionError("UI rendering must not start a Grok provider")
+
+    class CatalogUnavailableGrokAdapter(real_grok_adapter):
+        def __init__(self) -> None:
+            super().__init__(
+                platform="win32",
+                environment={},
+                acp_process_factory=process_must_not_start,
+            )
+
+        async def model_catalog(
+            self, *, refresh: bool = False
+        ) -> tuple[dict[str, str], ...]:
+            del refresh
+            return ()
+
+    monkeypatch.setattr(
+        grok_build_module,
+        "GrokBuildAdapter",
+        CatalogUnavailableGrokAdapter,
+    )
+
+    grok = next(
+        runtime
+        for runtime in create_local_backend().snapshot()["runtimes"]
+        if runtime["id"] == "grok-build"
+    )
+    fields = {
+        field["id"]: field
+        for group in grok["groups"]
+        for field in group["fields"]
+    }
+    model_priority = fields["model_priority"]
+
+    assert model_priority["options"] == []
+    assert model_priority["allowCustom"] is True
+    assert model_priority["required"] is True
+    assert grok["manifest"]["model_schema"]["maxLength"] == 256
+    assert process_starts == []
 
 
 def test_browser_callback_runs_only_after_successful_loopback_bind() -> None:

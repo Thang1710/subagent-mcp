@@ -34,9 +34,16 @@ observe, steer, and close. The core hard-codes no provider role or model name.
   exact provider quota evidence, interactive input, and declared MCP remain
   explicit capability gaps. A provider-retired model route fails terminally and
   is never replaced without the user's explicit selection.
+- **Grok Build — In development.** The deterministic Windows candidate covers
+  read-only review and bounded path-prefix writing. It remains in development
+  until its separately approved live read-only and writer gates pass. It uses
+  cached native login only, is disabled by default, and allows no credits, paid
+  overage, or model fallback. Explicit gaps are terminal/test/Git execution,
+  network/web/browser, MCP/plugins/hooks, nested agents, native worktrees,
+  restart recovery, macOS/Linux support, and exact pre-request quota.
 
-No other runtime is supported yet. Future runtimes use adapters rather than
-provider-specific branches in the core.
+Runtime behavior comes from adapters rather than provider-specific branches in
+the core.
 
 ## Quick start
 

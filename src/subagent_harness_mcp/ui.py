@@ -546,6 +546,7 @@ def create_local_backend() -> LocalUiBackend:
 
     from .adapters.claude_code import ClaudeCodeAdapter
     from .adapters.deepseek_harness import DeepSeekHarnessAdapter
+    from .adapters.grok_build import GrokBuildAdapter
     from .adapters.registry import AdapterRegistry
     from .paths import resolve_paths
     from .service import SubagentMcpService
@@ -555,7 +556,11 @@ def create_local_backend() -> LocalUiBackend:
     config = ConfigStore(paths)
     store = StateStore.open(paths)
     registry = AdapterRegistry(
-        builtin_factories=(ClaudeCodeAdapter, DeepSeekHarnessAdapter)
+        builtin_factories=(
+            ClaudeCodeAdapter,
+            DeepSeekHarnessAdapter,
+            GrokBuildAdapter,
+        )
     )
     registry.discover()
     service = SubagentMcpService(config=config, store=store, registry=registry)

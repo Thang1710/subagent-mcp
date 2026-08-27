@@ -1,0 +1,9 @@
+{
+  "mcp_count": 0,
+  "hook_count": 0,
+  "plugin_count": 0,
+  "cached_native_login": true,
+  "api_key_override": false,
+  "builtin_tool_names_complete": true,
+  "builtin_tool_names": ["edit", "read", "write"]
+}

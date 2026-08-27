@@ -32,6 +32,25 @@ def _read_toml(path: Path) -> dict[str, object]:
         return tomllib.load(handle)
 
 
+def _archive_members(artifact: Path) -> dict[str, bytes]:
+    if artifact.suffix == ".whl":
+        with zipfile.ZipFile(artifact) as archive:
+            return {
+                name: archive.read(name)
+                for name in archive.namelist()
+                if not name.endswith("/")
+            }
+    with tarfile.open(artifact, mode="r:gz") as archive:
+        members: dict[str, bytes] = {}
+        for member in archive.getmembers():
+            if not member.isfile():
+                continue
+            stream = archive.extractfile(member)
+            assert stream is not None
+            members[member.name] = stream.read()
+        return members
+
+
 def _run_source_cli(*arguments: str) -> subprocess.CompletedProcess[str]:
     code = (
         "import sys\n"
@@ -108,6 +127,7 @@ def test_pyproject_declares_publishable_package_contract() -> None:
     assert project["requires-python"] == ">=3.10"
     assert project["license"] == "MIT"
     assert project["license-files"] == ["LICENSE"]
+    assert {"grok", "grok-build"} <= set(project["keywords"])
     assert "Development Status :: 5 - Production/Stable" in project["classifiers"]
     assert "Development Status :: 2 - Pre-Alpha" not in project["classifiers"]
     assert project["dependencies"] == [
@@ -210,6 +230,55 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     workflow = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     assert workflow.startswith("name: publish-release")
     assert "--prerelease" not in workflow
+
+
+def test_grok_build_candidate_documentation_is_truthful() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (ROOT / "docs" / "architecture.md").read_text(
+        encoding="utf-8"
+    )
+    authoring = (ROOT / "docs" / "adapter-authoring.md").read_text(
+        encoding="utf-8"
+    )
+    claude_status = "**Claude Code — Ready.**"
+    deepseek_status = "**DeepSeek Harness — Ready.**"
+    grok_status = "**Grok Build — In development.**"
+
+    assert readme.index(claude_status) < readme.index(deepseek_status)
+    assert readme.index(deepseek_status) < readme.index(grok_status)
+    grok_block = " ".join(
+        readme.split(grok_status, 1)[1].split("\n\n", 1)[0].lower().split()
+    )
+    for phrase in (
+        "read-only review",
+        "bounded path-prefix writing",
+        "separately approved live read-only and writer gates",
+        "cached native login",
+        "disabled by default",
+        "no credits, paid overage, or model fallback",
+        "terminal/test/git",
+        "network/web/browser",
+        "mcp/plugins/hooks",
+        "nested agents",
+        "native worktrees",
+        "restart recovery",
+        "macos/linux",
+        "pre-request quota",
+    ):
+        assert phrase in grok_block
+
+    for document in (architecture, authoring):
+        normalized = " ".join(document.split())
+        assert "provider-neutral ACP stdio helper" in normalized
+        assert "argv-array process creation" in normalized
+        assert "newline-delimited JSON-RPC" in normalized
+        assert "bounded stdout and stderr" in normalized
+        assert "exact owned-process cleanup" in normalized
+        assert "does not own models, authentication, permissions" in normalized
+        assert (
+            "DeepSeek Harness does not use this helper in the current release."
+            in normalized
+        )
 
 
 def test_public_documents_do_not_publish_codex_task_ids() -> None:
@@ -443,6 +512,8 @@ def test_wheel_and_sdist_contain_the_public_package(
             "schemas/tools-v1.json",
         ):
             assert f"{PACKAGE_NAME}/{relative}" in names
+        for relative in ("adapters/acp_stdio.py", "adapters/grok_build.py"):
+            assert f"{PACKAGE_NAME}/{relative}" in names
 
         metadata_path = next(
             name for name in names if name.endswith(".dist-info/METADATA")
@@ -454,6 +525,12 @@ def test_wheel_and_sdist_contain_the_public_package(
         assert metadata["Version"] == VERSION
         assert metadata["Requires-Python"] == ">=3.10"
         assert metadata["License-Expression"] == "MIT"
+        metadata_keywords = {
+            keyword.strip()
+            for value in metadata.get_all("Keywords", [])
+            for keyword in value.split(",")
+        }
+        assert {"grok", "grok-build"} <= metadata_keywords
         requirements = {
             requirement.replace(" ", "")
             for requirement in metadata.get_all("Requires-Dist", [])
@@ -490,9 +567,47 @@ def test_wheel_and_sdist_contain_the_public_package(
             f"/src/{PACKAGE_NAME}/__init__.py",
             f"/src/{PACKAGE_NAME}/cli.py",
             f"/src/{PACKAGE_NAME}/py.typed",
+            f"/src/{PACKAGE_NAME}/adapters/acp_stdio.py",
+            f"/src/{PACKAGE_NAME}/adapters/grok_build.py",
         }
         for suffix in required_suffixes:
             assert any(name.endswith(suffix) for name in names), suffix
+
+
+def test_release_archives_exclude_private_grok_evidence(
+    built_distributions: tuple[Path, Path],
+) -> None:
+    forbidden_paths = (
+        ".phase0a/",
+        ".preview/",
+        "tests/fixtures/",
+        "fake_grok_acp.py",
+        "grok-build-no-model.json",
+        "transcripts/",
+    )
+    forbidden_content = (
+        re.compile(
+            rb"[A-Za-z]:[\\/](?:Users|ClaudeCode|CodeX|DeepSeekHarness)[\\/]"
+        ),
+        re.compile(rb"/(?:home|Users)/[^/\s]+/"),
+        re.compile(rb"\b01a[0-9a-f]{5,}-[0-9a-f-]{20,}\b"),
+        re.compile(rb"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", re.I),
+        re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"),
+        re.compile(rb"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b"),
+        re.compile(
+            rb"\b(?:gh[pousr]_|xox[baprs]-|sk-ant-|xai-)"
+            rb"[A-Za-z0-9_-]{12,}"
+        ),
+        re.compile(rb"grok-build-no-model|raw[_ -]?no[_ -]?model", re.I),
+    )
+
+    for artifact in built_distributions:
+        members = _archive_members(artifact)
+        assert members
+        for name, payload in members.items():
+            normalized = name.replace("\\", "/")
+            assert not any(marker in normalized for marker in forbidden_paths)
+            assert not any(pattern.search(payload) for pattern in forbidden_content)
 
 
 def test_wheel_installs_and_runs_in_an_isolated_environment(
