@@ -67,6 +67,7 @@ Run the Step 2 command. Expected: `1 passed`.
 **Files:**
 - Modify: `tests/unit/test_server.py`
 - Modify: `tests/unit/test_service.py`
+- Modify: `src/subagent_harness_mcp/contracts.py`
 - Modify: `src/subagent_harness_mcp/server.py`
 - Modify: `src/subagent_harness_mcp/service.py`
 
@@ -94,10 +95,10 @@ assert "write_set=['.']" in error.next_action
 assert "repository-relative existing directory" in error.next_action
 ```
 
-Add a focused `_normalize_write_set` assertion proving an absolute Windows path
-remains `REQUEST_INVALID` but now directs the caller to make it relative to
-`cwd` and inspect `runtime_list.write_root_mode` before the next materially
-changed request.
+Exercise `agent_spawn` through the public server with an absolute `write_set`.
+Prove it remains `REQUEST_INVALID` but now directs the caller to make it
+relative to `cwd` and inspect `runtime_list.write_root_mode` before the next
+materially changed request.
 
 - [ ] **Step 2: Run RED**
 
@@ -111,10 +112,12 @@ Expected: both tests fail only on missing holistic guidance.
 
 - [ ] **Step 3: Implement the minimum error-text change**
 
-Change `_require_current_workspace`, `_normalize_write_set`, and
-`_validate_write_root_mode` `next_action` strings only. Keep error code,
-category, retryability, recovery reason, max attempts, normalization, root
-count and provider-call ordering byte-for-byte compatible.
+Allow internal `ContractError` to carry an optional `next_action`, preserve it
+when the MCP server projects the public `ServiceError`, and set it only on the
+repository-relative `SpawnRequest` rejection. Change
+`_require_current_workspace` and `_validate_write_root_mode` guidance. Keep
+error code, category, retryability, recovery reason, max attempts,
+normalization, root count and provider-call ordering compatible.
 
 - [ ] **Step 4: Run GREEN and focused regression**
 

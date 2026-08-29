@@ -161,6 +161,12 @@ runtime that enforces `path-prefix`. Multiple valid directory roots are split
 into disjoint writer calls. These leases coordinate Subagent MCP executions;
 they are not an operating-system sandbox for unrelated local processes.
 
+On the current Windows public slice, set `cwd` to the checkout root and use
+`workspace="current"`. For a DeepSeek write, pass `workspace_write` and exactly
+one existing directory relative to `cwd`, for example
+`write_set=["Assets/_Project/Core/Scripts/GameSettings"]`. An absolute path,
+missing path, or exact file is not a valid `existing-directory` root.
+
 ## How it fits together
 
 ```mermaid

@@ -577,10 +577,52 @@ def test_invalid_version_request_id_and_workspace_fail_before_service_call(
             common_spawn | {"workspace": {"strategy": "create"}},
         )
     )
-
     assert _metadata(invalid_version)["error"]["code"] == "REQUEST_INVALID"
     assert _metadata(oversized_id)["error"]["code"] == "REQUEST_INVALID"
-    assert _metadata(unsupported_workspace)["error"]["code"] == "CAPABILITY_MISSING"
+    workspace_error = _metadata(unsupported_workspace)["error"]
+    assert workspace_error["code"] == "CAPABILITY_MISSING"
+    assert "workspace='current'" in workspace_error["next_action"]
+    assert "cwd" in workspace_error["next_action"]
+    assert "runtime_list" in workspace_error["next_action"]
+    assert "write_root_mode" in workspace_error["next_action"]
+    assert service.calls == []
+
+
+def test_absolute_write_set_rejection_explains_repository_relative_repair(
+    tmp_path: Path,
+) -> None:
+    service = _RecordingService()
+    server = create_server(service)
+
+    result = _run(
+        server.call_tool(
+            "agent_spawn",
+            {
+                "request_id": "absolute-write-set",
+                "runtime_id": "future-runtime",
+                "variant_id": "future-variant",
+                "task": {
+                    "title": "Implement",
+                    "prompt": "Implement one file.",
+                    "acceptance_criteria": ["Return a bounded diff."],
+                    "role": "sub-agent",
+                },
+                "cwd": str(tmp_path.resolve()),
+                "mode": "implement",
+                "required_capabilities": ["repo_read", "workspace_write"],
+                "write_set": [str(tmp_path.resolve() / "src" / "target.py")],
+                "workspace": "current",
+            },
+        )
+    )
+
+    error = _metadata(result)["error"]
+    assert error["code"] == "REQUEST_INVALID"
+    assert "repository-relative" in error["message"]
+    assert isinstance(error["next_action"], str)
+    assert "cwd" in error["next_action"]
+    assert "runtime_list" in error["next_action"]
+    assert "write_root_mode" in error["next_action"]
     assert service.calls == []
 
 
@@ -636,6 +678,11 @@ def test_lifecycle_tools_publish_compact_response_mode_and_long_local_wait() -> 
     assert "repo_write" in spawn_description
     assert "runtime_list" in spawn_description
     assert "write_root_mode" in spawn_description
+    assert "workspace='current'" in spawn_description
+    assert "cwd is the checkout root" in spawn_description
+    assert "write_set=['.']" in spawn_description
+    assert "repository-relative existing directory" in spawn_description
+    assert "exact files require write_root_mode='path-prefix'" in spawn_description
     wait_description = tools["agent_wait"].description or ""
     assert "does not interrupt" in wait_description
     assert "returns running" in wait_description
