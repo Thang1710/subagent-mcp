@@ -43,9 +43,16 @@ _ICON_TONES = ("blue", "green", "purple", "teal")
 
 
 class ContractError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        next_action: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.next_action = next_action
 
 
 class ServiceError(RuntimeError):
@@ -574,7 +581,17 @@ class SpawnRequest:
                 or any(_unsafe_write_set_component(part) for part in parts)
             ):
                 raise ContractError(
-                    "REQUEST_INVALID", "write_set entries must be repository-relative"
+                    "REQUEST_INVALID",
+                    "write_set entries must be repository-relative",
+                    next_action=(
+                        "Set cwd to the checkout root, use workspace='current', "
+                        "request workspace_write, and pass write_set entries relative "
+                        "to cwd. Before changing the request, inspect runtime_list "
+                        "write_root_mode and root limit. For an existing-directory "
+                        "runtime, use write_set=['.'] only when the whole checkout is "
+                        "authorized, or pass one repository-relative existing "
+                        "directory; exact files cannot be enforced."
+                    ),
                 )
 
 

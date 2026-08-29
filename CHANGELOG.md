@@ -12,6 +12,16 @@ All notable changes to Subagent MCP are documented here.
 - Document the private provider-neutral ACP stdio boundary without changing the
   existing DeepSeek Harness adapter path.
 
+## 1.0.27 - 2026-08-29
+
+- Publish the complete Windows writable request shape in the MCP `agent_spawn`
+  description: checkout-root `cwd`, `workspace="current"`, semantic
+  `workspace_write`, and repository-relative write roots.
+- Keep DeepSeek's existing-directory boundary fail-closed while showing a valid
+  one-directory repair; exact files are never widened automatically.
+- Preserve actionable `next_action` guidance when contract validation rejects an
+  absolute `write_set`, before readiness, leases, idempotency, or provider work.
+
 ## 1.0.26 - 2026-08-29
 
 - Add an explicit `runtime_authenticate` action and localhost Sign in button

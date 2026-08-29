@@ -2365,11 +2365,14 @@ def _validate_write_root_mode(
         category="capability",
         retryable=False,
         next_action=(
-            "Use one existing directory root only if that broader write authority "
-            "is explicitly acceptable; otherwise choose another runtime whose "
-            "manifest advertises write_root_mode='path-prefix'. Never widen an "
-            "exact-file scope automatically, and use a new request_id only for a "
-            "materially changed request."
+            "Set cwd to the checkout root, use workspace='current', and request "
+            "workspace_write. Pass write_set=['.'] only when the whole checkout is "
+            "authorized, or pass one repository-relative existing directory when "
+            "that broader write authority is explicitly acceptable; otherwise "
+            "choose another runtime whose manifest advertises "
+            "write_root_mode='path-prefix'. Never widen an exact-file scope "
+            "automatically, and use a new request_id only for a materially changed "
+            "request."
         ),
         recovery={
             "action": "repair",

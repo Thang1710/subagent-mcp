@@ -24,7 +24,7 @@ from mcp.types import CallToolResult, TextContent
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.26"
+VERSION = "1.0.27"
 SCHEMAS = (
     "config-v1.json",
     "adapter-v1.json",
@@ -272,6 +272,12 @@ create_server(service).run('stdio')
             == "provider/model-release-smoke"
         )
         tools_by_name = {tool.name: tool for tool in tools.tools}
+        spawn_description = tools_by_name["agent_spawn"].description or ""
+        assert "workspace='current'" in spawn_description
+        assert "cwd is the checkout root" in spawn_description
+        assert "write_set=['.']" in spawn_description
+        assert "repository-relative existing directory" in spawn_description
+        assert "exact files require write_root_mode='path-prefix'" in spawn_description
         wait_description = tools_by_name["agent_wait"].description or ""
         assert "returns running" in wait_description
         assert "does not interrupt" in wait_description

@@ -112,6 +112,13 @@ requests that cannot run. The controller may select a parent directory only
 when that broader authority is explicitly accepted; the service never widens
 the request automatically.
 
+The current Windows public request uses `workspace="current"` with `cwd` set to
+the checkout root. `write_set` remains repository-relative to that `cwd`.
+Therefore a DeepSeek `existing-directory` writer supplies exactly one existing
+relative directory; `.` represents the whole checkout only when that broader
+authority was explicitly granted. Absolute paths and exact files fail before
+provider work.
+
 The UI is foreground by default. `ui --background` starts one detached local
 process on a fixed loopback port; `ui --status` identifies whether it is the
 managed process, `ui --open` requests a fresh single-use browser bootstrap, and
