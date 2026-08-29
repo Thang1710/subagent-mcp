@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.24"
+VERSION = "1.0.25"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -167,10 +167,11 @@ def test_preview_directory_is_ignored_exactly_once() -> None:
     assert ignore_lines.count(".preview/") == 1
 
 
-def test_windows_config_launcher_uses_the_exact_release() -> None:
+def test_windows_config_launcher_uses_the_local_checkout() -> None:
     launcher = (ROOT / "open-config.bat").read_text(encoding="utf-8")
-    command = f"uvx --isolated --from {DIST_NAME}=={VERSION} {DIST_NAME} ui"
+    command = f'uv run --project "%~dp0." --frozen {DIST_NAME} ui'
 
+    assert "where uv" in launcher
     assert f"{command} --open" in launcher
     assert f"{command} --background" in launcher
     assert "http://127.0.0.1:8765" in launcher

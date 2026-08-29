@@ -2,6 +2,13 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.25 - 2026-08-29
+
+- Add a one-click Windows `open-config.bat` launcher for the fixed localhost
+  configuration port.
+- Run the launcher from its local checkout so it works before or independently
+  of the matching PyPI release becoming available.
+
 ## 1.0.24 - 2026-08-29
 
 - Preserve truthful `auth_required`, `not_installed`, and `incompatible`
