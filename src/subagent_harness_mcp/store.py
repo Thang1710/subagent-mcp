@@ -639,6 +639,23 @@ class StateStore:
                             """,
                             (encoded, now, runtime_id, variant_id),
                         )
+                elif row[0] == "auth_required":
+                    database.execute(
+                        """
+                        UPDATE circuits
+                        SET state = 'needs_canary', category = 'auth_recovered',
+                            retry_after_utc = NULL, revision = revision + 1,
+                            details_json = ?, updated_at_utc = ?
+                        WHERE runtime_id = ? AND variant_id = ?
+                          AND state = 'auth_required' AND revision = ?
+                        """,
+                        (encoded, now, runtime_id, variant_id, int(row[1])),
+                    )
+                    if database.execute("SELECT changes()").fetchone()[0] != 1:
+                        raise StateError(
+                            "CIRCUIT_CONFLICT",
+                            "runtime authentication recovery is stale",
+                        )
         return self.load_circuit(runtime_id, variant_id)
 
     def load_circuit(self, runtime_id: str, variant_id: str) -> CircuitRecord:

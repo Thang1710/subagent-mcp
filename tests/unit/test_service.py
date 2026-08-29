@@ -110,6 +110,11 @@ class _Ids:
 class _QuotaFakeAdapter(FakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
+        self.probe_state = "needs_canary"
+        self.probe_details: dict[str, object] = {
+            "mode": "deterministic-quota",
+            "pair_key": "b" * 64,
+        }
         self.canary_calls = 0
         self.canary_error_code: str | None = None
         self.quota_calls = 0
@@ -117,10 +122,7 @@ class _QuotaFakeAdapter(FakeAdapter):
         self.quota_cleanup_confirmed = True
 
     async def probe(self) -> ProbeResult:
-        return ProbeResult(
-            "needs_canary",
-            {"mode": "deterministic-quota", "pair_key": "b" * 64},
-        )
+        return ProbeResult(self.probe_state, self.probe_details)
 
     async def runtime_canary(self, request: CanaryRequest) -> CanaryResult:
         self.canary_calls += 1
@@ -779,6 +781,101 @@ def test_runtime_check_refreshes_ready_quota_only_when_explicit(tmp_path: Path) 
     }
     assert adapter.canary_calls == adapter.quota_calls == 1
     assert "must-not-escape" not in json.dumps(refreshed)
+
+
+@pytest.mark.parametrize(
+    ("probe_state", "expected_error_code"),
+    [
+        ("auth_required", "AUTH_REQUIRED"),
+        ("not_installed", "INSTALL_REQUIRED"),
+        ("incompatible", "TRANSPORT_INCOMPATIBLE"),
+    ],
+)
+def test_runtime_check_refresh_preserves_fresh_unbound_probe_state(
+    tmp_path: Path,
+    probe_state: str,
+    expected_error_code: str,
+) -> None:
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def prepare_ready_circuit() -> None:
+        await service.runtime_check("fake")
+        await service.runtime_canary(
+            {
+                "request_id": "initial-unbound-probe-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+
+    asyncio.run(prepare_ready_circuit())
+    adapter.probe_state = probe_state
+    adapter.probe_details = {"code": "PRIVATE_ADAPTER_DETAIL"}
+
+    refreshed = asyncio.run(service.runtime_check("fake", refresh_quota=True))
+
+    assert refreshed["state"] == probe_state
+    assert refreshed["can_start_explicit_task"] is False
+    assert refreshed["quota"] == {
+        "state": "unknown",
+        "error_code": expected_error_code,
+    }
+    assert store.load_circuit("fake", "future-deep").state == "ready"
+    assert adapter.canary_calls == 1
+    assert adapter.quota_calls == 0
+
+
+def test_runtime_check_reopens_same_pair_auth_failure_only_for_canary(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _QuotaFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    asyncio.run(service.runtime_check("fake"))
+    adapter.canary_error_code = "AUTH_REQUIRED"
+    with pytest.raises(ServiceError) as blocked:
+        asyncio.run(
+            service.runtime_canary(
+                {
+                    "request_id": "auth-required-canary",
+                    "runtime_id": "fake",
+                    "variant_id": "future-deep",
+                    "transport": "managed-sdk",
+                }
+            )
+        )
+    failed = store.load_circuit("fake", "future-deep")
+    adapter.canary_error_code = None
+
+    rebound = asyncio.run(service.runtime_check("fake", refresh_quota=True))
+    reopened = store.load_circuit("fake", "future-deep")
+
+    assert blocked.value.code == "AUTH_REQUIRED"
+    assert failed.state == "auth_required"
+    assert reopened.state == "needs_canary"
+    assert reopened.revision == failed.revision + 1
+    assert rebound["state"] == "needs_canary"
+    assert rebound["can_start_explicit_task"] is False
+    assert adapter.canary_calls == 1
+    assert adapter.quota_calls == 1
+
+    canary = asyncio.run(
+        service.runtime_canary(
+            {
+                "request_id": "reauthenticated-canary",
+                "runtime_id": "fake",
+                "variant_id": "future-deep",
+                "transport": "managed-sdk",
+            }
+        )
+    )
+
+    assert canary["state"] == "ready"
+    assert adapter.canary_calls == 2
 
 
 def test_runtime_check_pauses_ready_circuit_on_unsafe_quota(tmp_path: Path) -> None:

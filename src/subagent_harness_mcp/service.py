@@ -251,7 +251,8 @@ class SubagentMcpService:
                 )
                 circuits = list(self._store.list_circuits(runtime_id))
                 if circuits:
-                    state = _runtime_check_state(adapter, circuits)
+                    if probe.state == "needs_canary":
+                        state = _runtime_check_state(adapter, circuits)
                     details["circuits"] = [
                         _public_circuit(adapter, item)
                         for item in circuits
@@ -283,6 +284,11 @@ class SubagentMcpService:
             return {"state": "configure_first"}
         if not isinstance(adapter, CanaryAdapter):
             return {"state": "unknown"}
+        if probe.state != "needs_canary":
+            return {
+                "state": "unknown",
+                "error_code": _runtime_state_code(probe.state),
+            }
         base_pair_key = _pair_key(probe.details)
         by_variant = {item.variant_id: item for item in circuits}
         results: list[dict[str, Any]] = []
@@ -2688,8 +2694,8 @@ def _variant_pair_key(
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _runtime_state_error(runtime_id: str, state: str) -> ServiceError:
-    code = {
+def _runtime_state_code(state: str) -> str:
+    return {
         "not_installed": "INSTALL_REQUIRED",
         "auth_required": "AUTH_REQUIRED",
         "auto_paused": "QUOTA_PAUSED",
@@ -2697,8 +2703,11 @@ def _runtime_state_error(runtime_id: str, state: str) -> ServiceError:
         "probing": "RECOVERY_REQUIRED",
         "recovery_required": "RECOVERY_REQUIRED",
     }.get(state, "CAPABILITY_MISSING")
+
+
+def _runtime_state_error(runtime_id: str, state: str) -> ServiceError:
     return ServiceError(
-        code,
+        _runtime_state_code(state),
         f"runtime {runtime_id!r} is {state}",
         category="runtime",
     )

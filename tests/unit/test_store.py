@@ -655,6 +655,110 @@ def test_ready_circuit_pauses_with_cas_and_only_fresh_canary_can_probe(
     assert recovery.state == "probing"
 
 
+def test_exact_same_pair_auth_rebind_requires_a_fresh_canary(tmp_path: Path) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    claim = store.claim_canary_request(
+        request_id="auth-failure-canary",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+    )
+    failed = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        expected_revision=claim.revision,
+        state="auth_required",
+        details={"error_code": "AUTH_REQUIRED"},
+    )
+
+    rebound = store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="default",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+
+    assert rebound.state == "needs_canary"
+    assert rebound.revision == failed.revision + 1
+    assert rebound.details == {
+        "base_pair_key": "b" * 64,
+        "pair_key": "a" * 64,
+    }
+
+
+def test_same_pair_rebind_does_not_recover_ambiguous_circuit_states(
+    tmp_path: Path,
+) -> None:
+    store = StateStore.open(_paths(tmp_path))
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="probing",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+    probing_claim = store.claim_canary_request(
+        request_id="probing-canary",
+        request_payload={"pair_key": "a" * 64},
+        runtime_id="claude-code",
+        variant_id="probing",
+        pair_key="a" * 64,
+    )
+    probing = store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="probing",
+        pair_key="a" * 64,
+        details={"base_pair_key": "b" * 64},
+    )
+
+    store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="recovery",
+        pair_key="c" * 64,
+        details={"base_pair_key": "d" * 64},
+    )
+    recovery_claim = store.claim_canary_request(
+        request_id="ready-before-recovery",
+        request_payload={"pair_key": "c" * 64},
+        runtime_id="claude-code",
+        variant_id="recovery",
+        pair_key="c" * 64,
+    )
+    ready = store.complete_canary(
+        runtime_id="claude-code",
+        variant_id="recovery",
+        pair_key="c" * 64,
+        expected_revision=recovery_claim.revision,
+        state="ready",
+        details={},
+    )
+    recovery = store.require_ready_circuit_recovery(
+        runtime_id="claude-code",
+        variant_id="recovery",
+        pair_key="c" * 64,
+        expected_revision=ready.revision,
+        error_code="RECOVERY_REQUIRED",
+    )
+    retained = store.ensure_circuit_pair(
+        runtime_id="claude-code",
+        variant_id="recovery",
+        pair_key="c" * 64,
+        details={"base_pair_key": "d" * 64},
+    )
+
+    assert probing.state == "probing"
+    assert probing.revision == probing_claim.revision
+    assert retained.state == "recovery_required"
+    assert retained.revision == recovery.revision
+
+
 def test_safe_provider_probe_reopens_only_the_exact_paused_variant(
     tmp_path: Path,
 ) -> None:
