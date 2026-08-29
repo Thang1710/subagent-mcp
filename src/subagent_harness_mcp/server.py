@@ -835,9 +835,11 @@ def _require_current_workspace(value: str | Mapping[str, Any]) -> None:
         category="capability",
         retryable=False,
         next_action=(
-            "Set cwd to the intended checkout root and use workspace='current'. "
-            "Before resubmitting, inspect runtime_list write_root_mode and root "
-            "limit; write_set entries stay repository-relative to cwd."
+            "Set cwd to the intended checkout root, use workspace='current', and "
+            "request workspace_write. Before resubmitting, inspect runtime_list "
+            "write_root_mode and root limit. Use write_set=['.'] only when the whole "
+            "checkout is authorized, or pass one repository-relative existing "
+            "directory when required; exact files need a path-prefix runtime."
         ),
     )
 

@@ -2812,6 +2812,7 @@ def test_directory_only_preflight_rejects_files_before_impossible_decomposition(
     assert "cwd" in error.next_action
     assert "write_set=['.']" in error.next_action
     assert "repository-relative existing directory" in error.next_action
+    assert "workspace_write" in error.next_action
     assert error.recovery == {
         "action": "repair",
         "reason": "select_supported_write_root",

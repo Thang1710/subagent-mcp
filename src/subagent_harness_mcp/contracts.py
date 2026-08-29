@@ -584,11 +584,13 @@ class SpawnRequest:
                     "REQUEST_INVALID",
                     "write_set entries must be repository-relative",
                     next_action=(
-                        "Set cwd to the checkout root and pass write_set entries "
-                        "relative to cwd. Before changing the request, inspect "
-                        "runtime_list write_root_mode and root limit; an "
-                        "existing-directory runtime needs one existing directory, "
-                        "not an absolute path or exact file."
+                        "Set cwd to the checkout root, use workspace='current', "
+                        "request workspace_write, and pass write_set entries relative "
+                        "to cwd. Before changing the request, inspect runtime_list "
+                        "write_root_mode and root limit. For an existing-directory "
+                        "runtime, use write_set=['.'] only when the whole checkout is "
+                        "authorized, or pass one repository-relative existing "
+                        "directory; exact files cannot be enforced."
                     ),
                 )
 

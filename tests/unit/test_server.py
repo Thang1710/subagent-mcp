@@ -585,6 +585,9 @@ def test_invalid_version_request_id_and_workspace_fail_before_service_call(
     assert "cwd" in workspace_error["next_action"]
     assert "runtime_list" in workspace_error["next_action"]
     assert "write_root_mode" in workspace_error["next_action"]
+    assert "workspace_write" in workspace_error["next_action"]
+    assert "write_set=['.']" in workspace_error["next_action"]
+    assert "repository-relative existing directory" in workspace_error["next_action"]
     assert service.calls == []
 
 
@@ -623,6 +626,10 @@ def test_absolute_write_set_rejection_explains_repository_relative_repair(
     assert "cwd" in error["next_action"]
     assert "runtime_list" in error["next_action"]
     assert "write_root_mode" in error["next_action"]
+    assert "workspace='current'" in error["next_action"]
+    assert "workspace_write" in error["next_action"]
+    assert "write_set=['.']" in error["next_action"]
+    assert "repository-relative existing directory" in error["next_action"]
     assert service.calls == []
 
 
