@@ -2477,12 +2477,13 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     harness = FakeHarness()
+    private_key_label = "PRIVATE" + " KEY"
     pem_secret = (
-        "-----BEGIN PRIVATE KEY-----\n"
+        f"-----BEGIN {private_key_label}-----\n"
         "cGVtLXNlY3JldC1tYXJrZXI=\n"
-        "-----END PRIVATE KEY-----"
+        f"-----END {private_key_label}-----"
     )
-    aws_key_id = "AKIAIOSFODNN7EXAMPLE"
+    aws_key_id = "AKIA" + "IOSFODNN7EXAMPLE"
     signed_value = "0123456789abcdef0123456789abcdef"
     harness.enqueue(
         "done",
@@ -2527,16 +2528,17 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
 
 
 def test_redact_text_covers_private_keys_cloud_ids_and_assigned_secrets() -> None:
+    private_key_label = "RSA PRIVATE" + " KEY"
     pem = (
-        "-----BEGIN RSA PRIVATE KEY-----\n"
+        f"-----BEGIN {private_key_label}-----\n"
         "bGl0ZXJhbC1wZW0tc2VjcmV0\n"
-        "-----END RSA PRIVATE KEY-----"
+        f"-----END {private_key_label}-----"
     )
     escaped_pem = pem.replace("\n", "\\n")
-    aws_key_id = "ASIAIOSFODNN7EXAMPLE"
+    aws_key_id = "ASIA" + "IOSFODNN7EXAMPLE"
     signature = "abcdef0123456789abcdef0123456789"
-    access_token = "ya29.abcdefghijklmnopqrstuvwxyz"
-    client_secret = "client-secret-value-123456"
+    access_token = "".join(("ya29.", "abcdefghijklmnopqrstuvwxyz"))
+    client_secret = "".join(("client-secret-", "value-123456"))
     basic = "QWxhZGRpbjpvcGVuIHNlc2FtZQ=="
     raw = (
         f"{pem}\n{escaped_pem}\n{aws_key_id}\n"

@@ -8,6 +8,8 @@ All notable changes to Subagent MCP are documented here.
   runtime-check results when quota refresh has no exact adapter pair.
 - After a user signs back in, reopen only the matching authentication-blocked
   circuit as `needs_canary`; never skip the fresh canary or infer readiness.
+- Assemble secret-shaped redaction fixtures from fragments so repository and
+  release scans stay clean without weakening runtime redaction coverage.
 
 ## 1.0.23 - 2026-08-26
 
