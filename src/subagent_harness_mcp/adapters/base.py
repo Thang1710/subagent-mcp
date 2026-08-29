@@ -181,3 +181,11 @@ class QuotaProbeAdapter(Adapter, Protocol):
 
     async def quota_probe(self, request: CanaryRequest) -> CanaryResult:
         ...
+
+
+@runtime_checkable
+class AuthenticationAdapter(Adapter, Protocol):
+    """Optional explicit native sign-in action implemented by an adapter."""
+
+    async def authenticate(self) -> bool:
+        ...

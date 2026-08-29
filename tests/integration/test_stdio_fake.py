@@ -111,7 +111,7 @@ async def _exercise_protocol(
     expect_interrupt_success: bool,
 ) -> dict[str, Any]:
     discovered = await client.list_tools()
-    assert len(discovered.tools) == 14
+    assert len(discovered.tools) == 15
 
     runtimes = await client.call_tool("runtime_list", {})
     checked = await client.call_tool("runtime_check", {"runtime_id": "fake"})

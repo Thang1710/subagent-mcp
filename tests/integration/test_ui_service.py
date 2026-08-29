@@ -16,6 +16,7 @@ from subagent_harness_mcp.adapters import grok_build as grok_build_module
 from subagent_harness_mcp.adapters.fake import FakeAdapter, FakeHarness
 from subagent_harness_mcp.adapters.registry import AdapterRegistry
 from subagent_harness_mcp import server as server_module
+from subagent_harness_mcp import ui as ui_module
 from subagent_harness_mcp.config import ConfigError, ConfigStore
 from subagent_harness_mcp.contracts import ServiceError, SpawnRequest, TaskPacket
 from subagent_harness_mcp.paths import resolve_paths
@@ -387,6 +388,94 @@ def test_ui_provider_refresh_is_explicit_and_uses_sanitized_quota_state(
         "overage_blocked": True,
     }
     assert "must-not-escape" not in json.dumps(refreshed)
+
+
+def test_ui_provider_refresh_surfaces_native_auth_required_action(
+    tmp_path: Path,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+    manifest = FakeAdapter().manifest.to_dict()
+    manifest["capabilities"] = [*manifest["capabilities"], "authenticate"]
+
+    class AuthRequiredService:
+        async def runtime_list(self):
+            return (
+                {
+                    "runtime_id": "fake",
+                    "state": "available",
+                    "enabled": True,
+                    "manifest": manifest,
+                    "reason": None,
+                    "circuits": [],
+                },
+            )
+
+        async def runtime_check(self, runtime_id: str, refresh_quota: bool = False):
+            assert runtime_id == "fake"
+            assert refresh_quota is True
+            return {
+                "runtime_id": runtime_id,
+                "state": "auth_required",
+                "quota": {"state": "unknown", "error_code": "AUTH_REQUIRED"},
+                "next_action": {
+                    "tool": "runtime_authenticate",
+                    "requires_user_confirmation": True,
+                    "browser": "system_default",
+                },
+            }
+
+    refreshed = LocalUiBackend(
+        config=config,
+        service=AuthRequiredService(),
+    ).refresh_provider()
+
+    assert refreshed["runtimes"][0]["status"] == {
+        "state": "auth_required",
+        "label": "Auth required",
+        "detail": "Sign in through the native harness in your default browser.",
+    }
+    assert refreshed["health"]["state"] == "setup_required"
+
+
+def test_ui_runtime_authentication_respects_resident_update_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, config = _configured_backend(tmp_path / "home")
+
+    class RecordingService:
+        def __init__(self) -> None:
+            self.auth_calls = 0
+
+        async def runtime_authenticate(self, payload):
+            del payload
+            self.auth_calls += 1
+            return {
+                "runtime_id": "fake",
+                "state": "auth_pending",
+                "browser": "system_default",
+            }
+
+    service = RecordingService()
+    backend = LocalUiBackend(config=config, service=service)
+    monkeypatch.setattr(
+        ui_module,
+        "_runtime_update_quarantine",
+        lambda: ServiceError(
+            "UPDATE_QUARANTINED",
+            "resident package identity changed",
+            category="update",
+            retryable=False,
+        ),
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        backend.authenticate_runtime(
+            {"request_id": "ui-auth-after-update", "runtime_id": "fake"}
+        )
+
+    assert caught.value.code == "UPDATE_QUARANTINED"
+    assert service.auth_calls == 0
 
 
 def test_ui_snapshot_uses_paused_circuit_as_runtime_availability(

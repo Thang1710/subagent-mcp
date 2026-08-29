@@ -76,6 +76,9 @@ class CommandRunner(Protocol):
         ...
 
 
+AuthLauncher = Callable[[tuple[str, ...]], object]
+
+
 @dataclass(frozen=True, slots=True)
 class _ProcessObservation:
     name: str
@@ -151,6 +154,7 @@ class ClaudeCodeAdapter:
         *,
         cli_path: Path | None = None,
         command_runner: CommandRunner | None = None,
+        auth_launcher: AuthLauncher | None = None,
         client_factory: Callable[[Any], Any] | None = None,
         sdk_version: str | None = None,
         bundled_cli_paths: Sequence[Path] | None = None,
@@ -160,6 +164,7 @@ class ClaudeCodeAdapter:
     ) -> None:
         self._cli_path = cli_path
         self._command_runner = command_runner or _run_command
+        self._auth_launcher = auth_launcher or _launch_auth
         self._client_factory = client_factory or _default_client_factory
         self._sdk_version = sdk_version
         self._bundled_cli_paths = bundled_cli_paths
@@ -177,7 +182,9 @@ class ClaudeCodeAdapter:
             adapter_version="1.0.3",
             supported_platforms=("win32",),
             supported_transports=("managed-sdk",),
-            capabilities=frozenset({"canary", "session", "resume", "workspace"}),
+            capabilities=frozenset(
+                {"authenticate", "canary", "session", "resume", "workspace"}
+            ),
             semantic_permissions=frozenset({"repo_read", "workspace_write"}),
             reasoning_schema={
                 "type": "object",
@@ -206,12 +213,44 @@ class ClaudeCodeAdapter:
 
     async def probe(self) -> ProbeResult:
         state, bound, details = self._bind_no_model()
-        if bound is not None:
+        if state == "needs_canary" and bound is not None:
             self._last_probe_pair = bound.pair_key
             details = bound.details()
         else:
             self._last_probe_pair = None
         return ProbeResult(state, details)
+
+    async def authenticate(self) -> bool:
+        state, bound, _details = self._bind_no_model()
+        if state == "needs_canary":
+            return False
+        if state != "auth_required":
+            failure = _probe_error(state)
+            raise ServiceError(
+                failure.code,
+                failure.message,
+                category=failure.category,
+                retryable=failure.retryable,
+                next_action=failure.next_action,
+            )
+        if bound is None:
+            raise ServiceError(
+                "TRANSPORT_INCOMPATIBLE",
+                "Claude native sign-in did not bind the checked CLI identity",
+                category="adapter",
+                retryable=False,
+            )
+        try:
+            self._auth_launcher((str(bound.cli_path), "auth", "login"))
+        except (OSError, RuntimeError) as exc:
+            raise ServiceError(
+                "RECOVERY_REQUIRED",
+                "Claude native sign-in could not be started",
+                category="adapter",
+                retryable=False,
+                next_action="Run `claude auth login`, then call runtime_check.",
+            ) from exc
+        return True
 
     async def runtime_canary(self, request: CanaryRequest) -> CanaryResult:
         state, bound, details = self._bind_no_model()
@@ -1242,22 +1281,10 @@ class ClaudeCodeAdapter:
         version = self._command_runner((str(resolved), "--version"), 10.0)
         if version.returncode != 0 or not version.stdout.strip():
             return "incompatible", None, {"code": "CLI_VERSION_FAILED"}
-        auth = self._command_runner(
-            (str(resolved), "auth", "status", "--json"), 10.0
-        )
-        if auth.returncode != 0:
-            return "auth_required", None, {"code": "AUTH_REQUIRED"}
-        try:
-            auth_value = json.loads(auth.stdout)
-        except (TypeError, json.JSONDecodeError):
-            return "incompatible", None, {"code": "AUTH_STATUS_INVALID"}
-        if not isinstance(auth_value, dict) or auth_value.get("loggedIn") is not True:
-            return "auth_required", None, {"code": "AUTH_REQUIRED"}
-        if auth_value.get("authMethod") != "claude.ai":
-            return "incompatible", None, {"code": "AUTH_SOURCE_INVALID"}
-        stat = resolved.stat()
-        sha256 = _sha256_file(resolved)
-        file_id = f"{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
+        identity = _stable_file_identity(resolved)
+        if identity is None:
+            return "incompatible", None, {"code": "CLI_IDENTITY_CHANGED"}
+        sha256, file_id = identity
         pair_payload = {
             "adapter_version": "1.0.3",
             "sdk_version": sdk_version,
@@ -1270,18 +1297,30 @@ class ClaudeCodeAdapter:
         pair_key = hashlib.sha256(
             json.dumps(pair_payload, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()
-        return (
-            "needs_canary",
-            _BoundRuntime(
-                resolved,
-                pair_payload["cli_version"],
-                sha256,
-                file_id,
-                sdk_version,
-                pair_key,
-            ),
-            {},
+        bound = _BoundRuntime(
+            resolved,
+            pair_payload["cli_version"],
+            sha256,
+            file_id,
+            sdk_version,
+            pair_key,
         )
+        auth = self._command_runner(
+            (str(resolved), "auth", "status", "--json"), 10.0
+        )
+        if _stable_file_identity(resolved) != (sha256, file_id):
+            return "incompatible", None, {"code": "CLI_IDENTITY_CHANGED"}
+        if auth.returncode != 0:
+            return "auth_required", bound, {"code": "AUTH_REQUIRED"}
+        try:
+            auth_value = json.loads(auth.stdout)
+        except (TypeError, json.JSONDecodeError):
+            return "incompatible", None, {"code": "AUTH_STATUS_INVALID"}
+        if not isinstance(auth_value, dict) or auth_value.get("loggedIn") is not True:
+            return "auth_required", bound, {"code": "AUTH_REQUIRED"}
+        if auth_value.get("authMethod") != "claude.ai":
+            return "incompatible", None, {"code": "AUTH_SOURCE_INVALID"}
+        return ("needs_canary", bound, {})
 
     def _discover_cli(self) -> Path | None:
         if self._cli_path is not None:
@@ -2075,6 +2114,23 @@ def _run_command(argv: tuple[str, ...], timeout_seconds: float) -> CommandResult
     return CommandResult(completed.returncode, completed.stdout[:16_384], completed.stderr[:4096])
 
 
+def _launch_auth(argv: tuple[str, ...]) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(
+        list(argv),
+        shell=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        close_fds=True,
+        creationflags=(
+            subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW
+            if os.name == "nt"
+            else 0
+        ),
+        start_new_session=os.name != "nt",
+    )
+
+
 def _default_client_factory(options: Any) -> Any:
     from claude_agent_sdk import ClaudeSDKClient
 
@@ -2120,3 +2176,19 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _stable_file_identity(path: Path) -> tuple[str, str] | None:
+    try:
+        before = path.stat()
+        sha256 = _sha256_file(path)
+        after = path.stat()
+    except OSError:
+        return None
+    before_id = (
+        f"{before.st_dev}:{before.st_ino}:{before.st_size}:{before.st_mtime_ns}"
+    )
+    after_id = f"{after.st_dev}:{after.st_ino}:{after.st_size}:{after.st_mtime_ns}"
+    if before_id != after_id:
+        return None
+    return sha256, after_id

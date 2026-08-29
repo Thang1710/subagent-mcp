@@ -380,8 +380,32 @@ def test_active_writer_lease_is_unique_until_released(tmp_path: Path) -> None:
                 acquired_at_utc, expires_at_utc, released_at_utc
             ) VALUES (?, ?, ?, ?, ?, NULL, NULL)
             """,
-            ("lease-2", "workspace:one", execution_id, "writer", now),
-        )
+                ("lease-2", "workspace:one", execution_id, "writer", now),
+            )
+
+
+def test_runtime_auth_lease_is_single_flight_across_store_instances(
+    tmp_path: Path,
+) -> None:
+    paths = _paths(tmp_path)
+    first = StateStore.open(paths)
+    second = StateStore.open(paths)
+
+    assert first.claim_runtime_auth_lease(
+        runtime_id="claude-code",
+        request_id="first-login",
+    ) is True
+    assert second.claim_runtime_auth_lease(
+        runtime_id="claude-code",
+        request_id="second-login",
+    ) is False
+
+    first.release_runtime_auth_lease("claude-code")
+
+    assert second.claim_runtime_auth_lease(
+        runtime_id="claude-code",
+        request_id="third-login",
+    ) is True
 
 
 def test_lifecycle_identity_events_and_terminal_result_are_atomic_and_deduplicated(

@@ -83,6 +83,9 @@ def create_server(service: object) -> MCPServer:
             "drift, update quarantine, or ambiguous launch or cleanup errors; treat them as "
             "terminal and report them. Never run a live canary, switch models, enable credits, "
             "or widen write authority automatically."
+            " When runtime_check reports AUTH_REQUIRED, request explicit user approval "
+            "before calling runtime_authenticate; that action uses the native harness "
+            "to open the operating system's default browser and never handles credentials."
         ),
     )
 
@@ -110,6 +113,28 @@ def create_server(service: object) -> MCPServer:
                 api_version,
                 runtime_id,
                 refresh_quota,
+            ),
+        )
+
+    @server.tool(name="runtime_authenticate", structured_output=False)
+    async def runtime_authenticate(
+        request_id: str,
+        runtime_id: str,
+        api_version: int = TOOL_API_VERSION,
+    ) -> CallToolResult:
+        """Open one user-approved native sign-in flow in the system browser."""
+
+        return await _invoke(
+            "runtime_authenticate",
+            lambda: _call_payload(
+                service,
+                "runtime_authenticate",
+                {
+                    "api_version": _api_version(api_version),
+                    "request_id": _request_id(request_id),
+                    "runtime_id": validate_identifier(runtime_id, "runtime_id"),
+                },
+                require_current_runtime=True,
             ),
         )
 

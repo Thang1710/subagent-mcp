@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from subagent_harness_mcp.adapters import claude_code as claude_code_module
 from claude_agent_sdk import (
     AssistantMessage,
     CLIJSONDecodeError,
@@ -219,6 +220,140 @@ def test_logged_out_probe_is_auth_required_without_pair_identity(tmp_path: Path)
     assert probe.state == "auth_required"
     assert probe.details == {"code": "AUTH_REQUIRED"}
     assert "pair_key" not in probe.details
+
+
+def test_logged_out_authenticate_launches_exact_native_login_argv(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    launched: list[tuple[str, ...]] = []
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_LoggedOutRunner(),
+        auth_launcher=lambda argv: launched.append(argv),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    result = asyncio.run(adapter.authenticate())
+
+    assert launched == [(str(cli.resolve()), "auth", "login")]
+    assert result is True
+
+
+def test_native_login_uses_the_same_cli_identity_that_was_auth_checked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    checked_cli = tmp_path / "checked" / "claude.exe"
+    changed_cli = tmp_path / "changed" / "claude.exe"
+    checked_cli.parent.mkdir()
+    changed_cli.parent.mkdir()
+    checked_cli.write_bytes(b"checked-standalone-cli")
+    changed_cli.write_bytes(b"changed-after-check")
+    discovered = iter((checked_cli, changed_cli))
+    launched: list[tuple[str, ...]] = []
+    adapter = ClaudeCodeAdapter(
+        command_runner=_LoggedOutRunner(),
+        auth_launcher=lambda argv: launched.append(argv),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+    monkeypatch.setattr(adapter, "_discover_cli", lambda: next(discovered))
+
+    result = asyncio.run(adapter.authenticate())
+
+    assert result is True
+    assert launched == [(str(checked_cli.resolve()), "auth", "login")]
+
+
+def test_native_login_rejects_cli_content_replaced_during_auth_status(
+    tmp_path: Path,
+) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"checked-standalone-cli")
+    launched: list[tuple[str, ...]] = []
+
+    class ReplacingRunner(_LoggedOutRunner):
+        def __call__(
+            self,
+            argv: tuple[str, ...],
+            timeout_seconds: float,
+        ) -> CommandResult:
+            result = super().__call__(argv, timeout_seconds)
+            if argv[-3:] == ("auth", "status", "--json"):
+                cli.write_bytes(b"replacement-cli-content")
+            return result
+
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=ReplacingRunner(),
+        auth_launcher=lambda argv: launched.append(argv),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        asyncio.run(adapter.authenticate())
+
+    assert caught.value.code == "TRANSPORT_INCOMPATIBLE"
+    assert launched == []
+
+
+def test_authenticated_runtime_does_not_launch_another_login(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    launched: list[tuple[str, ...]] = []
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_Runner(),
+        auth_launcher=lambda argv: launched.append(argv),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    result = asyncio.run(adapter.authenticate())
+
+    assert launched == []
+    assert result is False
+
+
+def test_native_login_launcher_never_uses_a_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def popen(argv: list[str], **kwargs: object) -> object:
+        calls.append((argv, kwargs))
+        return object()
+
+    monkeypatch.setattr(claude_code_module.subprocess, "Popen", popen)
+
+    result = claude_code_module._launch_auth(
+        (r"C:\Program Files\Claude\claude.exe", "auth", "login")
+    )
+
+    assert result is not None
+    assert calls == [
+        (
+            [r"C:\Program Files\Claude\claude.exe", "auth", "login"],
+            {
+                "shell": False,
+                "stdin": claude_code_module.subprocess.DEVNULL,
+                "stdout": claude_code_module.subprocess.DEVNULL,
+                "stderr": claude_code_module.subprocess.DEVNULL,
+                "close_fds": True,
+                "creationflags": (
+                    claude_code_module.subprocess.CREATE_NEW_PROCESS_GROUP
+                    | claude_code_module.subprocess.CREATE_NO_WINDOW
+                    if os.name == "nt"
+                    else 0
+                ),
+                "start_new_session": os.name != "nt",
+            },
+        )
+    ]
 
 
 def test_setup_timeout_is_bounded_but_terminal_turn_has_no_default_deadline() -> None:

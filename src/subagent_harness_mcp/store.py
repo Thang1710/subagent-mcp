@@ -10,7 +10,7 @@ import threading
 import unicodedata
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Mapping
 
@@ -543,6 +543,112 @@ class StateStore:
                 ),
             )
         return ActionClaim(True)
+
+    def claim_runtime_request(
+        self,
+        *,
+        tool: str,
+        request_id: str,
+        request_payload: Mapping[str, Any],
+    ) -> ActionClaim:
+        _require_id(tool, "tool", 64)
+        _require_id(request_id, "request_id", 256)
+        digest = hashlib.sha256(_canonical_json_bytes(request_payload)).hexdigest()
+        with self.transaction(write=True) as database:
+            existing = database.execute(
+                """
+                SELECT input_sha256, response_json FROM requests
+                WHERE tool = ? AND request_id = ?
+                """,
+                (tool, request_id),
+            ).fetchone()
+            if existing is not None:
+                if existing[0] != digest:
+                    raise StateError(
+                        "IDEMPOTENCY_CONFLICT",
+                        "request_id was already used with different input",
+                    )
+                return ActionClaim(
+                    False,
+                    _decode_optional_object(existing[1], "request response"),
+                )
+            database.execute(
+                """
+                INSERT INTO requests(
+                    tool, request_id, input_sha256, conversation_id,
+                    execution_id, response_json, created_at_utc
+                ) VALUES (?, ?, ?, NULL, NULL, NULL, ?)
+                """,
+                (tool, request_id, digest, _utc_now()),
+            )
+        return ActionClaim(True)
+
+    def claim_runtime_auth_lease(
+        self,
+        *,
+        runtime_id: str,
+        request_id: str,
+    ) -> bool:
+        """Claim one bounded native-login launch across MCP and UI processes."""
+
+        _require_id(runtime_id, "runtime_id", 128)
+        _require_id(request_id, "request_id", 256)
+        now = datetime.now(timezone.utc)
+        acquired_at = _format_utc(now)
+        expires_at = _format_utc(now + timedelta(minutes=15))
+        resource_key = f"runtime-auth:{runtime_id}"
+        lease_id = "runtime-auth-" + hashlib.sha256(
+            f"{runtime_id}\0{request_id}".encode("utf-8")
+        ).hexdigest()
+        with self.transaction(write=True) as database:
+            existing = database.execute(
+                """
+                SELECT expires_at_utc FROM leases
+                WHERE resource_key = ? AND kind = 'runtime_auth'
+                  AND released_at_utc IS NULL
+                """,
+                (resource_key,),
+            ).fetchone()
+            if existing is not None:
+                expiry = existing[0]
+                if not isinstance(expiry, str):
+                    raise StateError(
+                        "DATABASE_CORRUPT",
+                        "runtime authentication lease has no expiry",
+                    )
+                if expiry > acquired_at:
+                    return False
+                database.execute(
+                    """
+                    UPDATE leases SET released_at_utc = ?
+                    WHERE resource_key = ? AND kind = 'runtime_auth'
+                      AND released_at_utc IS NULL
+                    """,
+                    (acquired_at, resource_key),
+                )
+            database.execute(
+                """
+                INSERT INTO leases(
+                    lease_id, resource_key, execution_id, kind,
+                    acquired_at_utc, expires_at_utc, released_at_utc
+                ) VALUES (?, ?, NULL, 'runtime_auth', ?, ?, NULL)
+                """,
+                (lease_id, resource_key, acquired_at, expires_at),
+            )
+        return True
+
+    def release_runtime_auth_lease(self, runtime_id: str) -> None:
+        _require_id(runtime_id, "runtime_id", 128)
+        resource_key = f"runtime-auth:{runtime_id}"
+        with self.transaction(write=True) as database:
+            database.execute(
+                """
+                UPDATE leases SET released_at_utc = ?
+                WHERE resource_key = ? AND kind = 'runtime_auth'
+                  AND released_at_utc IS NULL
+                """,
+                (_utc_now(), resource_key),
+            )
 
     def save_request_response(
         self,
@@ -2090,7 +2196,11 @@ def _is_recovery_required(result_json: object) -> bool:
 
 
 def _utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace(
+    return _format_utc(datetime.now(timezone.utc))
+
+
+def _format_utc(value: datetime) -> str:
+    return value.isoformat(timespec="milliseconds").replace(
         "+00:00",
         "Z",
     )

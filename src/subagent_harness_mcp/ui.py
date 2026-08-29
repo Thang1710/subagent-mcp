@@ -25,7 +25,12 @@ from urllib.parse import quote, unquote, urlsplit
 
 from . import __version__
 from .config import ConfigError, ConfigStore
-from .contracts import ServiceError, result_artifact_metadata
+from .contracts import (
+    ContractError,
+    ServiceError,
+    result_artifact_metadata,
+    validate_identifier,
+)
 from .server import _runtime_update_quarantine
 from .ui_process import (
     CONTROL_CHALLENGE_HEADER,
@@ -162,6 +167,7 @@ SnapshotProvider = Callable[[], Mapping[str, Any]]
 ConfigPatcher = Callable[[dict[str, Any], int], Mapping[str, Any]]
 ActivityDetailProvider = Callable[[str], Mapping[str, Any] | None]
 ProviderRefresher = Callable[[], Mapping[str, Any]]
+RuntimeAuthenticator = Callable[[dict[str, Any]], Mapping[str, Any]]
 BrowserOpener = Callable[[str], object]
 
 
@@ -185,11 +191,27 @@ class LocalUiBackend:
         self._service = service
         self._store = store
         self._provider_quota: dict[str, Any] | None = None
+        self._runtime_checks: dict[str, str] = {}
 
     def snapshot(self) -> Mapping[str, Any]:
         document = self._config.load()
         configured_runtime_ids = _configured_runtime_ids(document)
-        records = _runtime_records(self._service)
+        records = []
+        for record in _runtime_records(self._service):
+            rendered = dict(record)
+            runtime_id = rendered.get("runtime_id")
+            checked_state = (
+                self._runtime_checks.get(runtime_id)
+                if isinstance(runtime_id, str)
+                else None
+            )
+            if checked_state is not None:
+                rendered["state"] = checked_state
+                if checked_state == "auth_required":
+                    rendered["reason"] = (
+                        "Sign in through the native harness in your default browser."
+                    )
+            records.append(rendered)
         runtimes = _runtime_cards(document, records)
         circuits, activity = _read_ui_state(self._store)
         enabled_states = [item["status"]["state"] for item in runtimes if item["enabled"]]
@@ -202,6 +224,8 @@ class LocalUiBackend:
             health_state = "degraded"
         elif any(state == "needs_canary" for state in enabled_states):
             health_state = "needs_canary"
+        elif any(state == "auth_required" for state in enabled_states):
+            health_state = "setup_required"
         elif any(state == "available" for state in enabled_states):
             health_state = "available"
         elif not enabled_states and any(
@@ -271,6 +295,7 @@ class LocalUiBackend:
         _apply_trust_patch(candidate, patch.get("trust"))
         saved = self._config.save(candidate, expected_revision=expected_revision)
         self._provider_quota = None
+        self._runtime_checks.clear()
         return {"revision": saved["revision"]}
 
     def refresh_provider(self) -> Mapping[str, Any]:
@@ -290,6 +315,9 @@ class LocalUiBackend:
                 states.append("unknown")
                 overage_blocked = False
                 continue
+            checked_state = checked.get("state") if isinstance(checked, Mapping) else None
+            if isinstance(checked_state, str):
+                self._runtime_checks[runtime_id] = checked_state
             quota = checked.get("quota") if isinstance(checked, Mapping) else None
             state = quota.get("state") if isinstance(quota, Mapping) else "unknown"
             variants = quota.get("variants") if isinstance(quota, Mapping) else ()
@@ -327,6 +355,17 @@ class LocalUiBackend:
         )
         return self.snapshot()
 
+    def authenticate_runtime(self, payload: dict[str, Any]) -> Mapping[str, Any]:
+        quarantine = _runtime_update_quarantine()
+        if quarantine is not None:
+            raise quarantine
+        result = _run_service_method(
+            self._service,
+            "runtime_authenticate",
+            payload,
+        )
+        return _runtime_auth_response(result)
+
 
 class _UiState:
     def __init__(
@@ -335,12 +374,14 @@ class _UiState:
         config_patcher: ConfigPatcher,
         activity_detail_provider: ActivityDetailProvider | None,
         provider_refresher: ProviderRefresher | None,
+        runtime_authenticator: RuntimeAuthenticator | None,
         control_token: str | None,
     ) -> None:
         self.snapshot_provider = snapshot_provider
         self.config_patcher = config_patcher
         self.activity_detail_provider = activity_detail_provider
         self.provider_refresher = provider_refresher
+        self.runtime_authenticator = runtime_authenticator
         self.control_token = control_token
         self.bootstrap_token: str | None = secrets.token_urlsafe(32)
         self.sessions: dict[str, str] = {}
@@ -434,6 +475,7 @@ class LoopbackUiServer:
         *,
         activity_detail_provider: ActivityDetailProvider | None = None,
         provider_refresher: ProviderRefresher | None = None,
+        runtime_authenticator: RuntimeAuthenticator | None = None,
         control_token: str | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
@@ -451,6 +493,8 @@ class LoopbackUiServer:
             raise UiError("UI_BACKEND_INVALID", "activity detail callback must be callable")
         if provider_refresher is not None and not callable(provider_refresher):
             raise UiError("UI_BACKEND_INVALID", "provider refresh callback must be callable")
+        if runtime_authenticator is not None and not callable(runtime_authenticator):
+            raise UiError("UI_BACKEND_INVALID", "runtime auth callback must be callable")
         if control_token is not None and (
             not isinstance(control_token, str)
             or not 24 <= len(control_token) <= 256
@@ -462,6 +506,7 @@ class LoopbackUiServer:
             config_patcher,
             activity_detail_provider,
             provider_refresher,
+            runtime_authenticator,
             control_token,
         )
         server_type = (
@@ -583,6 +628,7 @@ def run_ui(
         backend.patch_config,
         activity_detail_provider=backend.activity_detail,
         provider_refresher=backend.refresh_provider,
+        runtime_authenticator=backend.authenticate_runtime,
         control_token=control_token,
         port=port,
     )
@@ -777,6 +823,30 @@ def _handler_type(state: _UiState) -> type[BaseHTTPRequestHandler]:
                     self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "UI_BACKEND_FAILED")
                     return
                 self._send_json(HTTPStatus.OK, snapshot)
+                return
+            if path == "/api/v1/runtime-authenticate":
+                if self._session(require_csrf=True) is None:
+                    self._discard_bounded_body()
+                    return
+                if state.runtime_authenticator is None:
+                    self._discard_bounded_body()
+                    self._json_error(HTTPStatus.SERVICE_UNAVAILABLE, "AUTH_UNAVAILABLE")
+                    return
+                body = self._read_json_body()
+                if body is None:
+                    return
+                try:
+                    request = _runtime_auth_request(body)
+                    response = _runtime_auth_response(
+                        state.runtime_authenticator(request)
+                    )
+                except (ConfigError, UiError, ServiceError) as exc:
+                    self._backend_error(exc)
+                    return
+                except Exception:
+                    self._json_error(HTTPStatus.INTERNAL_SERVER_ERROR, "UI_BACKEND_FAILED")
+                    return
+                self._send_json(HTTPStatus.ACCEPTED, response)
                 return
             if path != "/api/v1/session":
                 self._json_error(HTTPStatus.NOT_FOUND, "NOT_FOUND")
@@ -1355,6 +1425,33 @@ def _config_response(value: object) -> dict[str, Any]:
     if type(revision) is not int or revision < 0:
         raise UiError("UI_BACKEND_INVALID", "config callback omitted its revision")
     return {"revision": revision}
+
+
+def _runtime_auth_request(value: Mapping[str, Any]) -> dict[str, str]:
+    if set(value) != {"request_id", "runtime_id"}:
+        raise UiError("UI_AUTH_INVALID", "runtime auth request fields are invalid")
+    try:
+        return {
+            "request_id": validate_identifier(value.get("request_id"), "request_id", 256),
+            "runtime_id": validate_identifier(value.get("runtime_id"), "runtime_id"),
+        }
+    except ContractError as exc:
+        raise UiError("UI_AUTH_INVALID", "runtime auth request is invalid") from exc
+
+
+def _runtime_auth_response(value: object) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise UiError("UI_BACKEND_INVALID", "runtime auth callback returned an invalid value")
+    result: dict[str, Any] = {}
+    for key in ("runtime_id", "state", "browser", "next_action"):
+        item = value.get(key)
+        if isinstance(item, str):
+            result[key] = item[:256]
+    if not isinstance(result.get("runtime_id"), str) or not isinstance(
+        result.get("state"), str
+    ):
+        raise UiError("UI_BACKEND_INVALID", "runtime auth callback omitted its state")
+    return result
 
 
 def _configured_runtime_ids(document: Mapping[str, Any]) -> list[str]:
