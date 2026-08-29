@@ -57,6 +57,19 @@ class _Runner:
         )
 
 
+class _LoggedOutRunner(_Runner):
+    def __call__(self, argv: tuple[str, ...], timeout_seconds: float) -> CommandResult:
+        if argv[-1] == "--version":
+            return super().__call__(argv, timeout_seconds)
+        del timeout_seconds
+        assert argv[-3:] == ("auth", "status", "--json")
+        return CommandResult(
+            0,
+            json.dumps({"loggedIn": False, "authMethod": "none"}),
+            "",
+        )
+
+
 def _pair(base_pair_key: str) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -189,6 +202,23 @@ def test_claude_adapter_version_changes_its_pair_identity(
     assert probe.details["pair_key"] == hashlib.sha256(
         json.dumps(pair_payload, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def test_logged_out_probe_is_auth_required_without_pair_identity(tmp_path: Path) -> None:
+    cli = tmp_path / "claude.exe"
+    cli.write_bytes(b"standalone-cli")
+    adapter = ClaudeCodeAdapter(
+        cli_path=cli,
+        command_runner=_LoggedOutRunner(),
+        sdk_version="0.2.142",
+        bundled_cli_paths=(),
+    )
+
+    probe = asyncio.run(adapter.probe())
+
+    assert probe.state == "auth_required"
+    assert probe.details == {"code": "AUTH_REQUIRED"}
+    assert "pair_key" not in probe.details
 
 
 def test_setup_timeout_is_bounded_but_terminal_turn_has_no_default_deadline() -> None:

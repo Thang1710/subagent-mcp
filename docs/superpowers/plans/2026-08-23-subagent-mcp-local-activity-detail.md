@@ -79,7 +79,7 @@ def test_task_title_is_redacted_bounded_and_prompt_is_not_persisted(tmp_path: Pa
         request,
         task=replace(
             request.task,
-            title="Review user@example.com Bearer abcdefghijklmnopqrstuvwxyz " + "x" * 400,
+            title="Review user@example.com Bearer " + "abcdefghijklmnopqrstuvwxyz " + "x" * 400,
         ),
     )
 

@@ -6,13 +6,27 @@ All notable changes to Subagent MCP are documented here.
 
 - Confirm Grok prompt submission before sending native cancellation so event-loop
   scheduling cannot reverse `session/prompt` and `session/cancel` frames.
-- Assemble secret-shaped redaction fixtures from fragments so repository secret
-  scans stay clean without weakening runtime redaction coverage.
 - Add a disabled-by-default deterministic Grok Build candidate for read-only
   review and bounded path-prefix writing through its native ACP harness. Support
   remains In development until the separate live read-only and writer gates pass.
 - Document the private provider-neutral ACP stdio boundary without changing the
   existing DeepSeek Harness adapter path.
+
+## 1.0.25 - 2026-08-29
+
+- Add a one-click Windows `open-config.bat` launcher for the fixed localhost
+  configuration port.
+- Run the launcher from its local checkout so it works before or independently
+  of the matching PyPI release becoming available.
+
+## 1.0.24 - 2026-08-29
+
+- Preserve truthful `auth_required`, `not_installed`, and `incompatible`
+  runtime-check results when quota refresh has no exact adapter pair.
+- After a user signs back in, reopen only the matching authentication-blocked
+  circuit as `needs_canary`; never skip the fresh canary or infer readiness.
+- Assemble secret-shaped redaction fixtures from fragments so repository and
+  release scans stay clean without weakening runtime redaction coverage.
 
 ## 1.0.23 - 2026-08-26
 
