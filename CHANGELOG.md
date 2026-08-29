@@ -2,6 +2,13 @@
 
 All notable changes to Subagent MCP are documented here.
 
+## 1.0.24 - 2026-08-29
+
+- Preserve truthful `auth_required`, `not_installed`, and `incompatible`
+  runtime-check results when quota refresh has no exact adapter pair.
+- After a user signs back in, reopen only the matching authentication-blocked
+  circuit as `needs_canary`; never skip the fresh canary or infer readiness.
+
 ## 1.0.23 - 2026-08-26
 
 - Require a positive, non-negated retirement statement before treating a model
