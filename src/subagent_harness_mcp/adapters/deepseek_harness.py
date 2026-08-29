@@ -187,6 +187,7 @@ CatalogReader = Callable[
     [DshBinding, Path], Awaitable[tuple[Mapping[str, str], ...]]
 ]
 SettingsPathLocator = Callable[[], Path]
+WriteDaclProbe = Callable[[Path], int | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,6 +229,7 @@ class DeepSeekHarnessAdapter:
         process_inventory: ProcessInventory | None = None,
         catalog_reader: CatalogReader | None = None,
         settings_path_locator: SettingsPathLocator | None = None,
+        write_dacl_probe: WriteDaclProbe | None = None,
         data_root: Path | None = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         binding_probe_timeout_seconds: float = DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS,
@@ -249,6 +251,7 @@ class DeepSeekHarnessAdapter:
         self._process_inventory = process_inventory or _windows_process_inventory
         self._catalog_reader = catalog_reader or _read_dsh_model_catalog
         self._settings_path_locator = settings_path_locator or _dsh_settings_path
+        self._write_dacl_probe = write_dacl_probe or _windows_write_dacl_error
         self._catalog_identity: tuple[object, ...] | None = None
         self._catalog_cache: tuple[Mapping[str, str], ...] = ()
         if data_root is None:
@@ -384,6 +387,43 @@ class DeepSeekHarnessAdapter:
             request.workspace_path,
             write_set if permission_mode == "workspace-write" else (".",),
         )
+        if permission_mode == "workspace-write":
+            write_dacl_next_action = (
+                "Ask the user to choose either one existing directory the "
+                "current user owns or can grant WRITE_DAC on, or another "
+                "runtime that can enforce the authorized scope. Use a new "
+                "request_id only after that material change. Do not retry the "
+                "provider automatically, widen the scope, mutate ACL/ownership, "
+                "or select danger-full-access without separate explicit user "
+                "approval."
+            )
+            try:
+                write_dacl_error = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._write_dacl_probe,
+                        Path(write_root_path),
+                    ),
+                    timeout=self._binding_probe_timeout,
+                )
+            except (TimeoutError, asyncio.TimeoutError):
+                raise ServiceError(
+                    "CAPABILITY_MISSING",
+                    "DeepSeek Harness Windows sandbox WRITE_DAC capability "
+                    "check timed out before ACP/provider work.",
+                    category="capability",
+                    retryable=False,
+                    next_action=write_dacl_next_action,
+                ) from None
+            if write_dacl_error is not None:
+                raise ServiceError(
+                    "CAPABILITY_MISSING",
+                    "DeepSeek Harness Windows sandbox cannot materialize "
+                    "workspace_write for the requested directory: WRITE_DAC is "
+                    f"unavailable (Win32 {write_dacl_error}).",
+                    category="capability",
+                    retryable=False,
+                    next_action=write_dacl_next_action,
+                )
         binding = self._last_binding
         if binding is None:
             raise ServiceError(
@@ -1960,6 +2000,47 @@ def _dsh_pair_key(
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _windows_write_dacl_error(path: Path) -> int | None:
+    """Return a Win32 error when DSH cannot materialize its write-root grant."""
+
+    if sys.platform != "win32":
+        return None
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    invalid_handle = ctypes.c_void_p(-1).value
+    handle = create_file(
+        str(path),
+        0x00040000,  # WRITE_DAC
+        0x00000007,  # FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+        None,
+        3,  # OPEN_EXISTING
+        0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+        None,
+    )
+    if handle == invalid_handle:
+        return ctypes.get_last_error() or 1
+    if not close_handle(handle):
+        return ctypes.get_last_error() or 1
+    return None
 
 
 @contextmanager

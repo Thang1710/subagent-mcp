@@ -352,6 +352,130 @@ def test_context_rejects_unimplemented_context_policy(tmp_path: Path) -> None:
     assert "declared-native" in (captured.value.next_action or "")
 
 
+def test_write_dacl_denial_fails_before_acp_client(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        write_root = workspace / "allowed"
+        write_root.mkdir(parents=True)
+        checked: list[Path] = []
+        clients: list[_FakeAcpClient] = []
+
+        def write_dacl_probe(path: Path) -> int | None:
+            checked.append(path)
+            return 5
+
+        def factory(launch: DshLaunch) -> _FakeAcpClient:
+            client = _FakeAcpClient(launch)
+            clients.append(client)
+            return client
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            client_factory=factory,
+            write_dacl_probe=write_dacl_probe,
+            data_root=tmp_path / "data",
+        )
+        await adapter.probe()
+
+        with pytest.raises(ServiceError) as captured:
+            await adapter.resolve_context(
+                _context_request(workspace, write_set=("allowed",))
+            )
+
+        error = captured.value
+        assert error.code == "CAPABILITY_MISSING"
+        assert error.category == "capability"
+        assert error.retryable is False
+        assert "WRITE_DAC" in str(error)
+        assert "Win32 5" in str(error)
+        assert "new request_id" in (error.next_action or "")
+        assert "danger-full-access" in (error.next_action or "")
+        assert "widen" in (error.next_action or "")
+        assert "ACL" in (error.next_action or "")
+        assert checked == [write_root.resolve()]
+        assert clients == []
+
+    asyncio.run(scenario())
+
+
+def test_write_dacl_probe_timeout_keeps_event_loop_responsive(tmp_path: Path) -> None:
+    release = threading.Event()
+
+    def blocked_probe(_path: Path) -> int | None:
+        release.wait(timeout=1)
+        return None
+
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        write_root = workspace / "allowed"
+        write_root.mkdir(parents=True)
+        heartbeat = asyncio.Event()
+
+        async def beat() -> None:
+            await asyncio.sleep(0)
+            heartbeat.set()
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            write_dacl_probe=blocked_probe,
+            data_root=tmp_path / "data",
+            binding_probe_timeout_seconds=0.01,
+        )
+        await adapter.probe()
+        beat_task = asyncio.create_task(beat())
+        loop = asyncio.get_running_loop()
+        started_at = loop.time()
+        try:
+            with pytest.raises(ServiceError) as captured:
+                await adapter.resolve_context(
+                    _context_request(workspace, write_set=("allowed",))
+                )
+        finally:
+            release.set()
+        await beat_task
+
+        error = captured.value
+        assert loop.time() - started_at < 0.2
+        assert heartbeat.is_set()
+        assert error.code == "CAPABILITY_MISSING"
+        assert error.category == "capability"
+        assert error.retryable is False
+        assert "WRITE_DAC" in str(error)
+        assert "timed out" in str(error)
+        assert "new request_id" in (error.next_action or "")
+        assert "danger-full-access" in (error.next_action or "")
+
+    asyncio.run(scenario())
+
+
+def test_read_only_context_does_not_probe_write_dacl(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+
+        def unexpected_probe(_path: Path) -> int | None:
+            raise AssertionError("read-only context must not probe WRITE_DAC")
+
+        adapter = DeepSeekHarnessAdapter(
+            binding_locator=lambda: _binding(tmp_path),
+            write_dacl_probe=unexpected_probe,
+            data_root=tmp_path / "data",
+        )
+        await adapter.probe()
+
+        context = await adapter.resolve_context(
+            _context_request(
+                workspace,
+                permissions=("repo_read",),
+                write_set=(),
+            )
+        )
+
+        assert context.attestation["permission_mode"] == "read-only"
+
+    asyncio.run(scenario())
+
+
 def test_write_scope_becomes_native_session_cwd_and_multi_root_fails_closed(
     tmp_path: Path,
 ) -> None:
