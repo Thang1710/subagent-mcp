@@ -12,6 +12,13 @@ All notable changes to Subagent MCP are documented here.
 - Document the private provider-neutral ACP stdio boundary without changing the
   existing DeepSeek Harness adapter path.
 
+## 1.0.28 - 2026-08-29
+
+- Fail a Windows DeepSeek writable request before ACP/provider construction when
+  the native sandbox cannot obtain `WRITE_DAC` for its selected directory.
+- Keep the capability check read-only and return actionable `CAPABILITY_MISSING`
+  without changing ACLs, widening authority, or using `danger-full-access`.
+
 ## 1.0.27 - 2026-08-29
 
 - Publish the complete Windows writable request shape in the MCP `agent_spawn`

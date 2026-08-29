@@ -119,6 +119,12 @@ relative directory; `.` represents the whole checkout only when that broader
 authority was explicitly granted. Absolute paths and exact files fail before
 provider work.
 
+The Windows DeepSeek sandbox materializes a restricted-token ACE on that root,
+which requires the current user to hold `WRITE_DAC`. The adapter checks this
+read-only before ACP or provider work and does not change ownership or ACLs.
+Failure is terminal `CAPABILITY_MISSING`; no automatic retry, widening, ACL
+mutation, or `danger-full-access` fallback occurs.
+
 The UI is foreground by default. `ui --background` starts one detached local
 process on a fixed loopback port; `ui --status` identifies whether it is the
 managed process, `ui --open` requests a fresh single-use browser bootstrap, and

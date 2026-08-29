@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.27"
+VERSION = "1.0.28"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -331,6 +331,10 @@ def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:
     assert f"{uvx_prefix} ui --background" in readme
     assert "uvx --isolated --from" in readme
     assert f"{DIST_NAME} ui --stop" in readme
+    assert (
+        f"uvx --isolated --from {DIST_NAME}==1.0.27 {DIST_NAME} ui --stop"
+        in readme
+    )
     assert f"uv tool install {DIST_NAME}" not in readme
     assert "uv tool install --reinstall" not in readme
     assert "codex mcp add subagent-mcp -- subagent-harness-mcp serve" not in readme
@@ -338,6 +342,20 @@ def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:
     assert "close every Codex window once" in readme_flat
     assert "uvx --isolated" in architecture
     assert "different cache" in architecture.lower()
+
+
+def test_public_docs_describe_deepseek_write_dacl_preflight() -> None:
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    architecture = (ROOT / "docs" / "architecture.md").read_text(
+        encoding="utf-8"
+    )
+
+    for document in (readme, architecture):
+        flattened = " ".join(document.split())
+        assert "WRITE_DAC" in flattened
+        assert "before ACP or provider work" in flattened
+        assert "does not change ownership or ACLs" in flattened
+        assert "danger-full-access" in flattened
 
 
 def test_official_mcp_registry_metadata_targets_the_pypi_stdio_server() -> None:
