@@ -19,6 +19,11 @@
       "refresh_quota_default": false,
       "purpose": "Run local compatibility checks or explicitly refresh provider quota"
     },
+    "runtime_authenticate": {
+      "approval": "prompt",
+      "request_id_required": true,
+      "purpose": "Open an explicit native harness sign-in flow in the operating system default browser"
+    },
     "runtime_configure": {
       "approval": "prompt",
       "request_id_required": true,

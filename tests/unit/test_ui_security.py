@@ -28,11 +28,13 @@ def _server(
     *,
     patch_calls: list[tuple[dict[str, object], int]] | None = None,
     refresh_calls: list[None] | None = None,
+    auth_calls: list[dict[str, object]] | None = None,
     activity_detail=None,
     control_token: str | None = None,
 ):
     calls = [] if patch_calls is None else patch_calls
     refreshes = [] if refresh_calls is None else refresh_calls
+    authentications = [] if auth_calls is None else auth_calls
 
     def snapshot():
         return {
@@ -74,11 +76,21 @@ def _server(
         }
         return value
 
+    def authenticate_runtime(payload: dict[str, object]):
+        authentications.append(payload)
+        return {
+            "runtime_id": payload["runtime_id"],
+            "state": "auth_pending",
+            "browser": "system_default",
+            "next_action": "complete_sign_in_then_runtime_check",
+        }
+
     return LoopbackUiServer(
         snapshot,
         patch_config,
         activity_detail_provider=activity_detail,
         provider_refresher=refresh_provider,
+        runtime_authenticator=authenticate_runtime,
         control_token=control_token,
     )
 
@@ -881,6 +893,60 @@ def test_provider_refresh_returns_one_sanitized_snapshot() -> None:
     assert refresh_calls == [None]
     assert payload["quota"] == {"state": "available", "overage_blocked": True}
     assert b"must never leave the backend" not in body
+
+
+def test_runtime_authenticate_requires_csrf_and_routes_bounded_payload() -> None:
+    auth_calls: list[dict[str, object]] = []
+    server = _server(auth_calls=auth_calls)
+    server.start()
+    body = json.dumps(
+        {
+            "request_id": "ui-native-auth-once",
+            "runtime_id": "claude-code",
+        }
+    ).encode()
+    try:
+        cookie, csrf = _open_session(server)
+        missing_csrf, _, _ = _request(
+            server,
+            "POST",
+            "/api/v1/runtime-authenticate",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "Content-Type": "application/json",
+            },
+            body=body,
+        )
+        status, _, response = _request(
+            server,
+            "POST",
+            "/api/v1/runtime-authenticate",
+            headers={
+                "Cookie": cookie,
+                "Origin": server.origin,
+                "Content-Type": "application/json",
+                "X-CSRF-Token": csrf,
+            },
+            body=body,
+        )
+    finally:
+        server.close()
+
+    assert missing_csrf == 403
+    assert status == 202
+    assert json.loads(response) == {
+        "runtime_id": "claude-code",
+        "state": "auth_pending",
+        "browser": "system_default",
+        "next_action": "complete_sign_in_then_runtime_check",
+    }
+    assert auth_calls == [
+        {
+            "request_id": "ui-native-auth-once",
+            "runtime_id": "claude-code",
+        }
+    ]
 
 
 def test_oversized_or_unexpected_config_payload_is_rejected_before_callback() -> None:

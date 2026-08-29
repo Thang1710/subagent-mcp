@@ -12,6 +12,18 @@ All notable changes to Subagent MCP are documented here.
 - Document the private provider-neutral ACP stdio boundary without changing the
   existing DeepSeek Harness adapter path.
 
+## 1.0.26 - 2026-08-29
+
+- Add an explicit `runtime_authenticate` action and localhost Sign in button
+  for runtimes that report `auth_required`. Claude Code launches its native
+  `claude auth login` flow in the operating system's default browser.
+- Keep status checks read-only with respect to login/provider work, require user
+  confirmation plus UI CSRF protection, and never handle credentials, credits,
+  overage, accounts, models, or billing settings.
+- Re-probe immediately before launch and use a durable cross-process
+  single-flight lease so MCP/UI races and different request IDs cannot open
+  competing OAuth flows.
+
 ## 1.0.25 - 2026-08-29
 
 - Add a one-click Windows `open-config.bat` launcher for the fixed localhost

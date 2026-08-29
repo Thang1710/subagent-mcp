@@ -188,6 +188,25 @@ class _QuotaFakeAdapter(FakeAdapter):
         )
 
 
+class _AuthenticationFakeAdapter(_QuotaFakeAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self._manifest = replace(
+            self._manifest,
+            capabilities=self._manifest.capabilities | {"authenticate"},
+        )
+        self.probe_state = "auth_required"
+        self.probe_details = {"code": "AUTH_REQUIRED"}
+        self.authenticate_calls = 0
+        self.authenticate_error: ServiceError | None = None
+
+    async def authenticate(self) -> bool:
+        self.authenticate_calls += 1
+        if self.authenticate_error is not None:
+            raise self.authenticate_error
+        return True
+
+
 class _TerminalQuotaAdapter(_QuotaFakeAdapter):
     def __init__(self, harness: FakeHarness) -> None:
         super().__init__(harness)
@@ -515,6 +534,173 @@ def _spawn_request(
         transport="managed-sdk",
         permissions=("repo_read", "workspace_write") if write else ("repo_read",),
     )
+
+
+def test_runtime_authenticate_is_explicit_and_idempotent(tmp_path: Path) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    checked = asyncio.run(service.runtime_check("fake"))
+    first = asyncio.run(
+        service.runtime_authenticate(
+            {
+                "request_id": "open-native-auth-once",
+                "runtime_id": "fake",
+            }
+        )
+    )
+    replay = asyncio.run(
+        service.runtime_authenticate(
+            {
+                "request_id": "open-native-auth-once",
+                "runtime_id": "fake",
+            }
+        )
+    )
+
+    assert checked["state"] == "auth_required"
+    assert checked["next_action"] == {
+        "tool": "runtime_authenticate",
+        "requires_user_confirmation": True,
+        "browser": "system_default",
+    }
+    assert adapter.authenticate_calls == 1
+    assert first == replay == {
+        "runtime_id": "fake",
+        "state": "auth_pending",
+        "browser": "system_default",
+        "next_action": "complete_sign_in_then_runtime_check",
+    }
+
+
+def test_runtime_authenticate_does_not_relaunch_after_ambiguous_receipt(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    store.claim_runtime_request(
+        tool="runtime_authenticate",
+        request_id="existing-native-auth-launch",
+        request_payload={"runtime_id": "fake"},
+    )
+
+    with pytest.raises(ServiceError) as caught:
+        asyncio.run(
+            service.runtime_authenticate(
+                {
+                    "request_id": "existing-native-auth-launch",
+                    "runtime_id": "fake",
+                }
+            )
+        )
+
+    assert caught.value.code == "RECOVERY_REQUIRED"
+    assert caught.value.retryable is False
+    assert caught.value.next_action == (
+        "Complete sign-in in the existing browser, then call runtime_check."
+    )
+    assert adapter.authenticate_calls == 0
+
+
+def test_runtime_authenticate_reprobes_and_skips_login_when_already_authenticated(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    adapter.probe_state = "needs_canary"
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    result = asyncio.run(
+        service.runtime_authenticate(
+            {
+                "request_id": "already-authenticated",
+                "runtime_id": "fake",
+            }
+        )
+    )
+
+    assert result == {
+        "runtime_id": "fake",
+        "state": "already_authenticated",
+        "browser": "system_default",
+        "next_action": "runtime_check",
+    }
+    assert adapter.authenticate_calls == 0
+
+
+def test_runtime_authenticate_is_single_flight_across_new_request_ids(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    first = asyncio.run(
+        service.runtime_authenticate(
+            {"request_id": "first-login", "runtime_id": "fake"}
+        )
+    )
+    second = asyncio.run(
+        service.runtime_authenticate(
+            {"request_id": "second-login", "runtime_id": "fake"}
+        )
+    )
+
+    assert first == second
+    assert adapter.authenticate_calls == 1
+
+
+def test_runtime_check_releases_login_single_flight_after_auth_succeeds(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+
+    asyncio.run(
+        service.runtime_authenticate(
+            {"request_id": "first-login", "runtime_id": "fake"}
+        )
+    )
+    adapter.probe_state = "needs_canary"
+    adapter.probe_details = {"pair_key": "b" * 64}
+    asyncio.run(service.runtime_check("fake"))
+    adapter.probe_state = "auth_required"
+    asyncio.run(
+        service.runtime_authenticate(
+            {"request_id": "later-login", "runtime_id": "fake"}
+        )
+    )
+
+    assert adapter.authenticate_calls == 2
+
+
+def test_runtime_authenticate_redacts_adapter_error_before_persist_and_return(
+    tmp_path: Path,
+) -> None:
+    harness = FakeHarness()
+    adapter = _AuthenticationFakeAdapter(harness)
+    private_value = "private-" + "token-" + "value-123456789"
+    adapter.authenticate_error = ServiceError(
+        "AUTH_REQUIRED",
+        "Authorization: Bearer " + private_value,
+        category="adapter",
+        retryable=False,
+    )
+    service, _ = _service(tmp_path, harness, adapter=adapter)
+    payload = {"request_id": "redact-auth-error", "runtime_id": "fake"}
+
+    with pytest.raises(ServiceError) as first:
+        asyncio.run(service.runtime_authenticate(payload))
+    with pytest.raises(ServiceError) as replay:
+        asyncio.run(service.runtime_authenticate(payload))
+
+    assert private_value not in str(first.value)
+    assert "[REDACTED]" in str(first.value)
+    assert str(replay.value) == str(first.value)
+    assert adapter.authenticate_calls == 1
 
 
 def test_spawn_hash_binds_declared_input_and_surfaces_attestations(tmp_path: Path) -> None:

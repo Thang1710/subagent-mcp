@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[2]
 EXPECTED_TOOL_NAMES = {
     "runtime_list",
     "runtime_check",
+    "runtime_authenticate",
     "runtime_configure",
     "runtime_canary",
     "project_scan",
@@ -39,6 +40,7 @@ EXPECTED_TOOL_NAMES = {
     "workspace_release",
 }
 SIDE_EFFECTING_TOOL_NAMES = {
+    "runtime_authenticate",
     "runtime_configure",
     "runtime_canary",
     "project_trust",
@@ -153,6 +155,14 @@ class _RecordingService:
             )
         return {"runtime_id": runtime_id, "state": "ready"}
 
+    async def runtime_authenticate(self, payload):
+        self.calls.append(("runtime_authenticate", payload))
+        return {
+            "runtime_id": payload["runtime_id"],
+            "state": "auth_pending",
+            "browser": "system_default",
+        }
+
     async def runtime_configure(self, payload):
         self.calls.append(("runtime_configure", payload))
         raise ServiceError("CAPABILITY_MISSING", "configuration is not available")
@@ -234,7 +244,7 @@ def test_server_identity_discovery_and_public_schema_match() -> None:
     assert server.name == "Subagent MCP"
     assert server.title == "Subagent MCP"
     assert server.version == __version__
-    assert len(tools) == 14
+    assert len(tools) == 15
     assert set(schemas) == EXPECTED_TOOL_NAMES == set(public_schema["tools"])
     assert all(tool.output_schema is None for tool in tools)
     for name in SIDE_EFFECTING_TOOL_NAMES:
@@ -275,6 +285,39 @@ def test_runtime_check_refresh_quota_is_explicit_and_defaults_local() -> None:
     ]
 
 
+def test_runtime_authenticate_requires_request_id_and_routes_exact_runtime() -> None:
+    service = _RecordingService()
+    server = create_server(service)
+
+    result = _metadata(
+        _run(
+            server.call_tool(
+                "runtime_authenticate",
+                {
+                    "request_id": "native-auth-once",
+                    "runtime_id": "future-runtime",
+                },
+            )
+        )
+    )
+
+    assert result["result"] == {
+        "runtime_id": "future-runtime",
+        "state": "auth_pending",
+        "browser": "system_default",
+    }
+    assert service.calls == [
+        (
+            "runtime_authenticate",
+            {
+                "api_version": 1,
+                "request_id": "native-auth-once",
+                "runtime_id": "future-runtime",
+            },
+        )
+    ]
+
+
 def test_changed_runtime_files_warn_local_status_and_block_provider_calls(
     monkeypatch,
 ) -> None:
@@ -297,6 +340,17 @@ def test_changed_runtime_files_warn_local_status_and_block_provider_calls(
             server.call_tool(
                 "runtime_check",
                 {"runtime_id": "future-runtime", "refresh_quota": True},
+            )
+        )
+    )
+    blocked_auth = _metadata(
+        _run(
+            server.call_tool(
+                "runtime_authenticate",
+                {
+                    "request_id": "stale-runtime-auth",
+                    "runtime_id": "future-runtime",
+                },
             )
         )
     )
@@ -330,6 +384,7 @@ def test_changed_runtime_files_warn_local_status_and_block_provider_calls(
     assert local_check["update_quarantine"] == local["update_quarantine"]
     assert "UPDATE_QUARANTINED" in local_result.content[0].text
     assert blocked_refresh["error"]["code"] == "UPDATE_QUARANTINED"
+    assert blocked_auth["error"]["code"] == "UPDATE_QUARANTINED"
     assert blocked_spawn["error"]["code"] == "UPDATE_QUARANTINED"
     assert "fresh Codex task" in blocked_spawn["error"]["next_action"]
     assert service.calls == [

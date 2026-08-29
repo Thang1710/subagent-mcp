@@ -19,6 +19,7 @@
   const API_SNAPSHOT = '/api/v1/snapshot';
   const API_ACTIVITY = '/api/v1/activity/';
   const API_REFRESH = '/api/v1/refresh';
+  const API_AUTH = '/api/v1/runtime-authenticate';
   const API_CONFIG = '/api/v1/config';
   const TOKEN_HEADER = 'X-Subagent-MCP-Token';
   const CSRF_HEADER = 'X-CSRF-Token';
@@ -34,6 +35,7 @@
   let selectedExecutionId = null;
   let activityPollTimer = null;
   let activityPollBusy = false;
+  const authenticating = new Set();
 
   const cards = new Map();       // runtime id -> card entry
   const savedTimers = new Map(); // runtime id -> timeout handle
@@ -426,6 +428,14 @@
         canary.join(', ') + ' must complete a canary run before options can be published.');
     }
 
+    runtimes.filter((runtime) => runtime.authRequired).forEach((runtime) => {
+      addBanner('warn', runtime.name + ' sign-in required',
+        'Sign in through the native harness before Codex delegates work.', {
+          label: authenticating.has(runtime.id) ? 'Opening…' : 'Sign in',
+          onClick: (event) => authenticateRuntime(runtime, event.currentTarget),
+        });
+    });
+
     const gaps = [];
     runtimes.forEach((runtime) => {
       const missing = runtime.capabilities.filter((cap) => !cap.available).map((cap) => cap.label);
@@ -698,6 +708,7 @@
     const needsCanary = raw.needsCanary === true || raw.needs_canary === true ||
       toneFor(pick(statusObject, 'state', 'status')) === 'warn' &&
       str(pick(statusObject, 'state', 'status')).toLowerCase().indexOf('canary') !== -1;
+    const authRequired = str(pick(statusObject, 'state', 'status')).toLowerCase() === 'auth_required';
 
     return {
       id,
@@ -709,6 +720,7 @@
       statusDetail: str(pick(statusObject, 'detail', 'message', 'reason')) ||
         str(pick(raw, 'detail', 'message')),
       needsCanary,
+      authRequired,
       enabled: pick(raw, 'enabled', 'active') === true,
       enabledLabel: str(pick(raw, 'enabledLabel')) || 'Enabled',
       enabledHelp: str(pick(raw, 'enabledHelp')),
@@ -1444,6 +1456,30 @@
       say(entry.runtime.name + ': ' + error.message);
       updateDirty(entry);
       if (error instanceof ApiError && error.status === 409) refresh({ silent: true });
+    }
+  }
+
+  async function authenticateRuntime(runtime, button) {
+    if (dead || authenticating.has(runtime.id)) return;
+    authenticating.add(runtime.id);
+    if (button) button.disabled = true;
+    say('Opening ' + runtime.name + ' sign-in in your default browser…');
+    try {
+      const requestId = 'runtime-auth-' + runtime.id + '-' + window.crypto.randomUUID();
+      await request('POST', API_AUTH, {
+        request_id: requestId,
+        runtime_id: runtime.id,
+      });
+      say('Complete sign-in in your default browser, then click Refresh.');
+    } catch (error) {
+      if (isAuthError(error)) {
+        fatal(error.message);
+        return;
+      }
+      say(runtime.name + ': ' + error.message);
+    } finally {
+      authenticating.delete(runtime.id);
+      if (button) button.disabled = false;
     }
   }
 

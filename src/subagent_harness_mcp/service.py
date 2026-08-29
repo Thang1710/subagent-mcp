@@ -22,6 +22,7 @@ from .adapters.base import (
     AdapterSessionRequest,
     AdapterSnapshot,
     AdapterSpawnRequest,
+    AuthenticationAdapter,
     CanaryAdapter,
     CanaryRequest,
     ModelCatalogAdapter,
@@ -52,6 +53,7 @@ from .contracts import (
     result_artifact_metadata,
     slice_transfer_metrics,
     validate_bounded_text,
+    validate_identifier,
     validate_model_id,
 )
 from .store import (
@@ -201,6 +203,12 @@ class SubagentMcpService:
         try:
             adapter = self._registry.get(runtime_id)
             probe = await adapter.probe()
+            if (
+                probe.state in {"available", "needs_canary", "ready"}
+                and "authenticate" in adapter.manifest.capabilities
+                and isinstance(adapter, AuthenticationAdapter)
+            ):
+                self._store.release_runtime_auth_lease(runtime_id)
             state = probe.state
             details = dict(_redact(probe.details))
             policy = self._config.load()["runtimes"].get(runtime_id, {})
@@ -257,7 +265,7 @@ class SubagentMcpService:
                         _public_circuit(adapter, item)
                         for item in circuits
                     ]
-            return {
+            result = {
                 "runtime_id": runtime_id,
                 "state": state,
                 "can_start_explicit_task": bool(variants)
@@ -266,6 +274,17 @@ class SubagentMcpService:
                 "manifest": adapter.manifest.to_dict(),
                 "quota": quota,
             }
+            if (
+                state == "auth_required"
+                and "authenticate" in adapter.manifest.capabilities
+                and isinstance(adapter, AuthenticationAdapter)
+            ):
+                result["next_action"] = {
+                    "tool": "runtime_authenticate",
+                    "requires_user_confirmation": True,
+                    "browser": "system_default",
+                }
+            return result
         except ServiceError:
             raise
         except (RegistryError, StateError, ConfigError) as exc:
@@ -1318,6 +1337,136 @@ class SubagentMcpService:
 
     async def project_scan(self, payload: Mapping[str, Any]) -> NoReturn:
         _capability_gap("project_scan is not available in this preview slice")
+
+    async def runtime_authenticate(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        try:
+            request_id = validate_identifier(payload.get("request_id"), "request_id", 256)
+            runtime_id = validate_identifier(payload.get("runtime_id"), "runtime_id")
+            adapter = self._registry.get(runtime_id)
+            if (
+                "authenticate" not in adapter.manifest.capabilities
+                or not isinstance(adapter, AuthenticationAdapter)
+            ):
+                raise ServiceError(
+                    "CAPABILITY_MISSING",
+                    f"runtime {runtime_id!r} does not publish native authentication",
+                    category="adapter",
+                    retryable=False,
+                )
+            claim = self._store.claim_runtime_request(
+                tool="runtime_authenticate",
+                request_id=request_id,
+                request_payload={"runtime_id": runtime_id},
+            )
+            if claim.response is not None:
+                error = claim.response.get("error")
+                if isinstance(error, Mapping):
+                    raise ServiceError(
+                        str(error.get("code", "RECOVERY_REQUIRED")),
+                        str(error.get("message", "native authentication failed")),
+                        category=str(error.get("category", "adapter")),
+                        retryable=bool(error.get("retryable", False)),
+                        next_action=(
+                            str(error["next_action"])
+                            if isinstance(error.get("next_action"), str)
+                            else None
+                        ),
+                    )
+                return claim.response
+            if not claim.created:
+                raise ServiceError(
+                    "RECOVERY_REQUIRED",
+                    "prior native authentication launch has no terminal receipt",
+                    category="adapter",
+                    retryable=False,
+                    next_action="Complete sign-in in the existing browser, then call runtime_check.",
+                )
+            try:
+                probe = await adapter.probe()
+                if probe.state in {"available", "needs_canary", "ready"}:
+                    self._store.release_runtime_auth_lease(runtime_id)
+                    response = {
+                        "runtime_id": runtime_id,
+                        "state": "already_authenticated",
+                        "browser": "system_default",
+                        "next_action": "runtime_check",
+                    }
+                elif probe.state != "auth_required":
+                    raise _runtime_state_error(runtime_id, probe.state)
+                elif not self._store.claim_runtime_auth_lease(
+                    runtime_id=runtime_id,
+                    request_id=request_id,
+                ):
+                    response = {
+                        "runtime_id": runtime_id,
+                        "state": "auth_pending",
+                        "browser": "system_default",
+                        "next_action": "complete_sign_in_then_runtime_check",
+                    }
+                else:
+                    try:
+                        launched = await adapter.authenticate()
+                    except ServiceError:
+                        self._store.release_runtime_auth_lease(runtime_id)
+                        raise
+                    if type(launched) is not bool:
+                        self._store.release_runtime_auth_lease(runtime_id)
+                        raise ServiceError(
+                            "ADAPTER_INCOMPATIBLE",
+                            "native authentication adapter returned an invalid receipt",
+                            category="adapter",
+                            retryable=False,
+                        )
+                    if launched:
+                        response = {
+                            "runtime_id": runtime_id,
+                            "state": "auth_pending",
+                            "browser": "system_default",
+                            "next_action": "complete_sign_in_then_runtime_check",
+                        }
+                    else:
+                        self._store.release_runtime_auth_lease(runtime_id)
+                        response = {
+                            "runtime_id": runtime_id,
+                            "state": "already_authenticated",
+                            "browser": "system_default",
+                            "next_action": "runtime_check",
+                        }
+            except ServiceError as exc:
+                safe = _redact(exc.to_dict())
+                assert isinstance(safe, Mapping)
+                safe_next_action = safe.get("next_action")
+                public = ServiceError(
+                    exc.code,
+                    str(safe.get("message", "native authentication failed")),
+                    category=exc.category,
+                    retryable=exc.retryable,
+                    next_action=(
+                        str(safe_next_action)
+                        if isinstance(safe_next_action, str)
+                        else None
+                    ),
+                    recovery=exc.recovery,
+                )
+                self._store.save_request_response(
+                    tool="runtime_authenticate",
+                    request_id=request_id,
+                    response={"error": public.to_dict()},
+                )
+                raise public from exc
+            self._store.save_request_response(
+                tool="runtime_authenticate",
+                request_id=request_id,
+                response=response,
+            )
+            return response
+        except ServiceError:
+            raise
+        except (StateError, RegistryError, ConfigError, ContractError) as exc:
+            raise _public_error(exc) from exc
 
     async def project_trust(self, payload: Mapping[str, Any]) -> NoReturn:
         _capability_gap("project_trust is not available in this preview slice")
