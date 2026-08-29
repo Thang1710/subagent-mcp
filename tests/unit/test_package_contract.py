@@ -167,6 +167,15 @@ def test_preview_directory_is_ignored_exactly_once() -> None:
     assert ignore_lines.count(".preview/") == 1
 
 
+def test_windows_config_launcher_uses_the_exact_release() -> None:
+    launcher = (ROOT / "open-config.bat").read_text(encoding="utf-8")
+    command = f"uvx --isolated --from {DIST_NAME}=={VERSION} {DIST_NAME} ui"
+
+    assert f"{command} --open" in launcher
+    assert f"{command} --background" in launcher
+    assert "http://127.0.0.1:8765" in launcher
+
+
 def test_public_documents_use_display_and_distribution_identities() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     readme_flat = " ".join(readme.split())
