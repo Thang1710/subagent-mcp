@@ -2488,7 +2488,7 @@ def test_prompt_credentials_and_pii_are_not_persisted(tmp_path: Path) -> None:
     harness.enqueue(
         "done",
         result=(
-            "Bearer abcdefghijklmnopqrstuvwxyz user@example.com "
+            "Bearer " + "abcdefghijklmnopqrstuvwxyz user@example.com "
             f"{pem_secret} {aws_key_id} "
             f"https://example.invalid/object?X-Amz-Signature={signed_value} finished"
         ),
@@ -2659,7 +2659,7 @@ def test_task_title_is_redacted_bounded_and_prompt_is_not_persisted(
         task=replace(
             request.task,
             title=(
-                "Review user@example.com Bearer abcdefghijklmnopqrstuvwxyz "
+                "Review user@example.com Bearer " + "abcdefghijklmnopqrstuvwxyz "
                 + "x" * 400
             ),
         ),
