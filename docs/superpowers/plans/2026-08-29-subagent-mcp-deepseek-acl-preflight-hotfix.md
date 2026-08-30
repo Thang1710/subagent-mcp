@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - Do not call DeepSeek/GLM or any provider during diagnosis, tests, or proof.
-- Do not read, write, inspect ACLs of, or otherwise touch `E:\UnityProject\RandomTowerDefender`.
+- Do not read, write, inspect ACLs of, or otherwise touch the caller's protected project workspace.
 - Never mutate ownership/DACLs, select `danger-full-access`, widen a write root, or change model, credits, overage, billing, or host configuration.
 - Preserve the existing `existing-directory`, one-root, repository-relative request contract and all read-only behavior.
 - Release as immutable `1.0.28` only after source, wheel, sdist, security, and fresh installed-artifact proofs pass.

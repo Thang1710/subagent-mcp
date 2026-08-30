@@ -14,7 +14,7 @@
 
 - Never widen an exact-file request to its parent directory automatically.
 - Do not add a dry-run/provider probe or invoke DeepSeek/GLM during diagnosis or proof.
-- Do not change model selection, credits, overage, billing, host config, or RandomTowerDefender.
+- Do not change model selection, credits, overage, billing, host config, or the caller's protected project.
 - Preserve `write_root_mode="path-prefix"` semantics for adapters that can enforce exact files.
 - Release as immutable `1.0.27` only after source, wheel, sdist, privacy, and public-install proof pass.
 
@@ -188,7 +188,7 @@ Fresh caller payload to publish with the receipt:
   "runtime_id": "deepseek-harness",
   "variant_id": "default",
   "transport": "native-acp",
-  "cwd": "E:\\UnityProject\\RandomTowerDefender",
+  "cwd": "D:\\workspace\\sample-project",
   "workspace": "current",
   "required_capabilities": ["repo_read", "workspace_write"],
   "write_set": ["Assets/_Project/Core/Scripts/GameSettings"]
