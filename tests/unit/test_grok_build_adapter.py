@@ -513,7 +513,7 @@ def test_manifest_is_exact_and_contains_no_model_ids(tmp_path: Path) -> None:
         "provider_id": "xai",
         "harness_id": "grok-build",
         "display_name": "Grok Build",
-        "adapter_version": "1.0.27",
+        "adapter_version": "1.0.28",
         "supported_platforms": ["win32"],
         "supported_transports": ["native-acp"],
         "capabilities": ["interrupt", "session", "workspace"],
@@ -903,7 +903,7 @@ def test_context_is_exact_hash_bound_and_builds_exact_argv_and_safe_env(
     assert first.attestation["agent_profile_binding"] == (
         "session/new._meta.agentProfile"
     )
-    assert first.attestation["required_agent_type"] == "grok-build"
+    assert "required_agent_type" not in first.attestation
     assert first.attestation["agent_type_evidence_source"] == (
         "_x.ai/models/list.availableModels._meta.agentType"
     )
@@ -4162,7 +4162,6 @@ def test_context_accepts_exact_file_roots_and_thirty_two_path_prefixes(
         ("requested_agent_profile_json", "{}"),
         ("requested_agent_profile_sha256", "0" * 64),
         ("agent_profile_binding", "unbound"),
-        ("required_agent_type", "codex"),
         ("agent_type_evidence_source", "unbound"),
         ("acp_fs_transport", ("read_text_file",)),
         ("acp_terminal_transport", False),
@@ -4362,7 +4361,7 @@ def test_context_handshake_accepts_only_bounded_writer_route(tmp_path: Path) -> 
         ("auth_method", "api-key"),
         ("provider_no_spend_safe", False),
         ("quota_state", "exhausted"),
-        ("effective_agent_type", "codex"),
+        ("effective_agent_type", True),
         ("agent_type_source", "unbound"),
     ],
 )
@@ -5945,6 +5944,8 @@ def _lifecycle_adapter(
     materialize_bundled_skill_at: str | None = None,
     model_state_mutation: str | None = None,
     session_model_state_mutation: str | None = None,
+    model_agent_type: object = "grok-build",
+    session_agent_type: object | None = None,
 ) -> tuple[GrokBuildAdapter, Path, list[AcpStdioProcess]]:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -6003,6 +6004,12 @@ def _lifecycle_adapter(
             "disabled_extensions": [list(item) for item in disabled_extensions],
             "handshake_delay": handshake_delay,
             "child_role": child_role,
+            "model_agent_type": model_agent_type,
+            "session_agent_type": (
+                model_agent_type
+                if session_agent_type is None
+                else session_agent_type
+            ),
         }
         if mutation is not None:
             config["mutation"] = mutation
@@ -6466,7 +6473,7 @@ def test_lifecycle_fake_exercises_canonical_acp_filesystem_wire(
 
 @pytest.mark.parametrize(
     "model_state_mutation",
-    ("agent-type-missing", "agent-type-strict", "agent-type-mismatch"),
+    ("agent-type-missing", "agent-type-malformed", "agent-type-control"),
 )
 def test_model_agent_type_fails_closed_before_session_new_or_prompt(
     tmp_path: Path,
@@ -6503,9 +6510,96 @@ def test_model_agent_type_fails_closed_before_session_new_or_prompt(
     assert len(children) == 2 and all(child.closed for child in children)
 
 
+@pytest.mark.parametrize("agent_type", ("grok-build-plan", "future-agent/v2"))
+def test_lifecycle_binds_native_agent_type_and_preserves_followup_evidence(
+    tmp_path: Path,
+    agent_type: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    adapter, _trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        model_agent_type=agent_type,
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    async def scenario() -> None:
+        started = await adapter.spawn(_lifecycle_spawn_request(context))
+        assert started.evidence["effective_agent_type"] == agent_type
+        first_request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        first_terminal = await _lifecycle_wait_terminal(adapter, first_request)
+        assert first_terminal.evidence["effective_agent_type"] == agent_type
+        followup = await adapter.send(
+            AdapterSendRequest(
+                "conversation-grok",
+                "execution-grok-2",
+                started.external_session_id,
+                "Return the same bounded marker.",
+                None,
+                {},
+                context,
+            )
+        )
+        assert followup.evidence["effective_agent_type"] == agent_type
+        followup_request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-2",
+            started.external_session_id,
+            followup.external_execution_id,
+        )
+        followup_terminal = await _lifecycle_wait_terminal(adapter, followup_request)
+        assert followup_terminal.evidence["effective_agent_type"] == agent_type
+        closed = await adapter.close(followup_request)
+        assert closed.evidence["effective_agent_type"] == agent_type
+
+    asyncio.run(scenario())
+    assert len(children) == 3 and all(child.closed for child in children)
+
+
+def test_session_new_agent_type_must_match_pre_prompt_model_metadata(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    adapter, trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        model_agent_type="grok-build-plan",
+        session_agent_type="future-agent/v2",
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    with pytest.raises(ServiceError) as rejected:
+        asyncio.run(adapter.spawn(_lifecycle_spawn_request(context)))
+
+    assert rejected.value.code == "CAPABILITY_MISSING"
+    session_methods = [
+        row["method"]
+        for row in _trace_records(trace_path)
+        if row.get("childRole") == "session"
+    ]
+    assert session_methods == [
+        "initialize",
+        "initialized",
+        "authenticate",
+        "_x.ai/models/list",
+        "session/new",
+    ]
+    assert "session/prompt" not in session_methods
+    assert len(children) == 2 and all(child.closed for child in children)
+
+
 @pytest.mark.parametrize(
     "session_model_state_mutation",
-    ("agent-type-missing", "agent-type-strict", "agent-type-mismatch"),
+    ("agent-type-missing", "agent-type-malformed", "agent-type-control"),
 )
 def test_session_new_revalidates_model_agent_type_before_prompt(
     tmp_path: Path,
@@ -7158,6 +7252,7 @@ def test_snapshot_does_not_claim_unreported_spend_state(tmp_path: Path) -> None:
         execution_id="execution",
         execution_state="running",
         quota_state="unknown",
+        effective_agent_type="grok-build-plan",
         reverse_io={
             "scope": "native-session-cumulative",
             "read_attempts": 0,

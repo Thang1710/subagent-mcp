@@ -65,16 +65,16 @@ DEFAULT_BINDING_PROBE_TIMEOUT_SECONDS = 15.0
 DEFAULT_INSPECT_TIMEOUT_SECONDS = 15.0
 _MAX_COMMAND_BYTES = 1024 * 1024
 _MAX_CATALOG_ITEMS = 128
-_ADAPTER_VERSION = "1.0.27"
+_ADAPTER_VERSION = "1.0.28"
 _REVIEW_TOOL_ALLOWLIST = ("read_file",)
 _WRITER_TOOL_ALLOWLIST = ("read_file", "search_replace")
 _DISALLOWED_META_TOOLS = ("search_tool", "use_tool")
 _AGENT_PROFILE_BINDING = "session/new._meta.agentProfile"
 _AGENT_PROFILE_PERMISSION_MODE = "bypassPermissions"
-_REQUIRED_AGENT_TYPE = "grok-build"
 _AGENT_TYPE_EVIDENCE_SOURCE = (
     "_x.ai/models/list.availableModels._meta.agentType"
 )
+_MAX_AGENT_TYPE_BYTES = 128
 _ACP_FS_TRANSPORT = ("read_text_file", "write_text_file")
 _MAX_REVERSE_IO_COUNT = 2_147_483_647
 _REVERSE_IO_SCOPE = "native-session-cumulative"
@@ -103,7 +103,6 @@ _RESUMED_AUTHORITY_FIELDS = (
     "git_attestation",
     "discovered_extensions",
     "model_route_isolation",
-    "required_agent_type",
     "agent_type_evidence_source",
 )
 _CLEANUP_TIMEOUT_SECONDS = 2.0
@@ -968,6 +967,7 @@ class _GrokSession:
     bridge: GrokFilesystemBridge
     public_text: _GrokPublicText
     snapshot: AdapterSnapshot
+    effective_agent_type: str
     turn: _GrokTurn | None = None
     native_closed: bool = False
     closing: bool = False
@@ -1654,7 +1654,6 @@ class GrokBuildAdapter:
             "requested_agent_profile_json": agent_profile_json,
             "requested_agent_profile_sha256": agent_profile_sha256,
             "agent_profile_binding": _AGENT_PROFILE_BINDING,
-            "required_agent_type": _REQUIRED_AGENT_TYPE,
             "agent_type_evidence_source": _AGENT_TYPE_EVIDENCE_SOURCE,
             "acp_fs_transport": list(_ACP_FS_TRANSPORT),
             "acp_terminal_transport": True,
@@ -1680,7 +1679,6 @@ class GrokBuildAdapter:
             "requested_agent_profile_json": agent_profile_json,
             "requested_agent_profile_sha256": agent_profile_sha256,
             "agent_profile_binding": _AGENT_PROFILE_BINDING,
-            "required_agent_type": _REQUIRED_AGENT_TYPE,
             "agent_type_evidence_source": _AGENT_TYPE_EVIDENCE_SOURCE,
             "acp_fs_transport": _ACP_FS_TRANSPORT,
             "acp_terminal_transport": True,
@@ -1741,8 +1739,6 @@ class GrokBuildAdapter:
             != agent_profile_sha256
             or context.attestation.get("agent_profile_binding")
             != _AGENT_PROFILE_BINDING
-            or context.attestation.get("required_agent_type")
-            != _REQUIRED_AGENT_TYPE
             or context.attestation.get("agent_type_evidence_source")
             != _AGENT_TYPE_EVIDENCE_SOURCE
             or fs_transport != _ACP_FS_TRANSPORT
@@ -1808,8 +1804,7 @@ class GrokBuildAdapter:
             raise _capability_error("Grok reasoning evidence is invalid")
         if not isinstance(attestation.quota_state, str):
             raise _capability_error("Grok quota evidence is malformed")
-        if _bounded_public_text(attestation.effective_agent_type, 128) is None:
-            raise _capability_error("Grok effective agent type is invalid")
+        _validate_agent_type(attestation.effective_agent_type)
         if _bounded_public_text(attestation.agent_type_source, 256) is None:
             raise _capability_error("Grok agent type evidence is invalid")
         exact = (
@@ -1820,7 +1815,6 @@ class GrokBuildAdapter:
             and attestation.mode == mode
             and effective_model == context.requested_model
             and attestation.reasoning_effort == effort
-            and attestation.effective_agent_type == _REQUIRED_AGENT_TYPE
             and attestation.agent_type_source == _AGENT_TYPE_EVIDENCE_SOURCE
         )
         if not exact:
@@ -2038,6 +2032,7 @@ class GrokBuildAdapter:
         temporary: tempfile.TemporaryDirectory[str] | None = None
         process: AcpStdioProcess | None = None
         result: CanaryResult
+        attested_agent_type: str | None = None
         self._last_binding = binding
         try:
             temporary = tempfile.TemporaryDirectory(
@@ -2066,6 +2061,7 @@ class GrokBuildAdapter:
                 _session_id,
                 attestation,
             ) = await self._open_native_session(context)
+            attested_agent_type = attestation.effective_agent_type
             _assert_bound_identity(binding)
             result = CanaryResult(
                 True,
@@ -2123,6 +2119,12 @@ class GrokBuildAdapter:
             )
         if not result.passed:
             return result
+        if attested_agent_type is None:
+            return _canary_failure(
+                request.pair_key,
+                "CAPABILITY_MISSING",
+                "Grok selected model agent type is unavailable",
+            )
         return CanaryResult(
             True,
             request.pair_key,
@@ -2132,7 +2134,7 @@ class GrokBuildAdapter:
                 "cleanup_confirmed": True,
                 "provider_no_spend_safe": True,
                 "quota_state": "unknown",
-                "effective_agent_type": _REQUIRED_AGENT_TYPE,
+                "effective_agent_type": attested_agent_type,
                 "agent_type_evidence_source": _AGENT_TYPE_EVIDENCE_SOURCE,
                 "route_isolation": "verified",
                 "route_isolation_source": "isolated-home-native-inspect",
@@ -2188,6 +2190,7 @@ class GrokBuildAdapter:
             execution_state="running",
             quota_state=attestation.quota_state,
             provider_no_spend_safe=attestation.provider_no_spend_safe,
+            effective_agent_type=attestation.effective_agent_type,
             reverse_io=bridge._reverse_io_attestation(),
         )
         session = _GrokSession(
@@ -2197,6 +2200,7 @@ class GrokBuildAdapter:
             bridge,
             public_text,
             snapshot,
+            attestation.effective_agent_type,
         )
         self._sessions[session_id] = session
         self._conversation_sessions[request.conversation_id] = session_id
@@ -2287,7 +2291,10 @@ class GrokBuildAdapter:
                     {},
                     timeout_seconds=self._handshake_timeout,
                 )
-                _parse_models_list_response(model_state, context.requested_model)
+                expected_agent_type = _parse_models_list_response(
+                    model_state,
+                    context.requested_model,
+                )
                 session_result = await process.request(
                     "session/new",
                     {
@@ -2305,6 +2312,7 @@ class GrokBuildAdapter:
                     auth_method,
                     provider_no_spend_safe,
                     session_result,
+                    expected_agent_type,
                 )
                 bridge.bind_session(session_id)
                 self.validate_session_attestation(context, attestation)
@@ -2367,6 +2375,7 @@ class GrokBuildAdapter:
                             session.snapshot.evidence.get("quota_state", "unknown")
                         ),
                         provider_no_spend_safe=True,
+                        effective_agent_type=session.effective_agent_type,
                         reverse_io=session.bridge._reverse_io_attestation(),
                     )
                     await self._start_turn(session, request.execution_id, prompt)
@@ -2528,6 +2537,7 @@ class GrokBuildAdapter:
                         session.snapshot.evidence.get("quota_state", "unknown")
                     ),
                     provider_no_spend_safe=True,
+                    effective_agent_type=session.effective_agent_type,
                     reverse_io=session.bridge._reverse_io_attestation(),
                 )
             session.closed = True
@@ -2703,6 +2713,7 @@ class GrokBuildAdapter:
                     rpc_code=rpc_code,
                     provider_detail=provider_detail,
                     provider_no_spend_safe=True,
+                    effective_agent_type=session.effective_agent_type,
                     reverse_io=session.bridge._reverse_io_attestation(),
                 )
                 return
@@ -2716,6 +2727,7 @@ class GrokBuildAdapter:
                 stop_reason=stop_reason,
                 public_text_truncated=session.public_text.truncated,
                 provider_no_spend_safe=True,
+                effective_agent_type=session.effective_agent_type,
                 reverse_io=session.bridge._reverse_io_attestation(),
             )
 
@@ -2897,6 +2909,17 @@ def _parse_models_list_response(
     return _selected_model_agent_type(state, selected_model)
 
 
+def _validate_agent_type(value: object) -> str:
+    agent_type = _bounded_public_text(value, _MAX_AGENT_TYPE_BYTES)
+    if (
+        agent_type is None
+        or agent_type != agent_type.strip()
+        or len(agent_type.encode("utf-8")) > _MAX_AGENT_TYPE_BYTES
+    ):
+        raise _capability_error("Grok selected model agent type is unavailable")
+    return agent_type
+
+
 def _selected_model_agent_type(
     state: Mapping[str, object],
     selected_model: str,
@@ -2931,11 +2954,9 @@ def _selected_model_agent_type(
             selected_metadata = metadata
     if current_model not in seen or selected_metadata is None:
         raise _capability_error("Grok selected model is absent from ACP model state")
-    if selected_metadata.get("agentType") != _REQUIRED_AGENT_TYPE:
-        raise _capability_error(
-            "Grok selected model does not preserve the bounded agent profile"
-        )
-    return _REQUIRED_AGENT_TYPE
+    if current_model != selected_model:
+        raise _capability_error("Grok selected model is not current in ACP model state")
+    return _validate_agent_type(selected_metadata.get("agentType"))
 
 
 def _parse_session_handshake(
@@ -2944,6 +2965,7 @@ def _parse_session_handshake(
     auth_method: str,
     provider_no_spend_safe: bool,
     session_result: Mapping[str, object],
+    expected_agent_type: str,
 ) -> tuple[str, GrokSessionToolAttestation]:
     session_id = _bounded_public_text(session_result.get("sessionId"), 256)
     models = session_result.get("models")
@@ -2960,6 +2982,10 @@ def _parse_session_handshake(
     except ContractError as exc:
         raise _capability_error("Grok ACP effective model is invalid") from exc
     effective_agent_type = _selected_model_agent_type(models, effective_model)
+    if effective_agent_type != expected_agent_type:
+        raise _capability_error(
+            "Grok selected model agent type changed during session creation"
+        )
     workspace_path = _bounded_public_text(
         metadata.get("currentWorkingDirectory"), 4096
     )
@@ -3249,6 +3275,7 @@ def _grok_snapshot(
     execution_state: str,
     quota_state: str,
     provider_no_spend_safe: bool = False,
+    effective_agent_type: str,
     result_text: str | None = None,
     error: AdapterFailure | None = None,
     stop_reason: str | None = None,
@@ -3266,8 +3293,6 @@ def _grok_snapshot(
         or re.fullmatch(r"[0-9a-f]{64}", profile_digest) is None
         or context.attestation.get("agent_profile_binding")
         != _AGENT_PROFILE_BINDING
-        or context.attestation.get("required_agent_type")
-        != _REQUIRED_AGENT_TYPE
         or context.attestation.get("agent_type_evidence_source")
         != _AGENT_TYPE_EVIDENCE_SOURCE
     ):
@@ -3276,6 +3301,7 @@ def _grok_snapshot(
             "Grok agent-profile attestation is malformed",
             category="adapter",
         )
+    effective_agent_type = _validate_agent_type(effective_agent_type)
     evidence: dict[str, object] = {
         "source": "grok-build-native-acp",
         "pair_key": str(context.attestation.get("pair_key", "")),
@@ -3291,7 +3317,7 @@ def _grok_snapshot(
         "reverse_terminal_authorized": False,
         "agent_profile_request_sha256": profile_digest,
         "agent_profile_request_source": _AGENT_PROFILE_BINDING,
-        "effective_agent_type": _REQUIRED_AGENT_TYPE,
+        "effective_agent_type": effective_agent_type,
         "agent_type_evidence_source": _AGENT_TYPE_EVIDENCE_SOURCE,
         "web_search_enabled": False,
         "nested_agents_enabled": False,

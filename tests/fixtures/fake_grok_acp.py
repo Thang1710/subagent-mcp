@@ -266,13 +266,17 @@ def _lifecycle_model_state(
         if session and mutation == "models-current-mismatch"
         else model
     )
-    metadata: dict[str, object] = {"agentType": "grok-build"}
+    configured_agent_type = config.get(
+        "session_agent_type" if session else "model_agent_type",
+        config.get("agent_type", "grok-build"),
+    )
+    metadata: dict[str, object] = {"agentType": configured_agent_type}
     if mutation == "agent-type-missing":
         metadata = {}
-    elif mutation == "agent-type-strict":
-        metadata["agentType"] = "codex"
-    elif mutation == "agent-type-mismatch":
-        metadata["agentType"] = "custom-agent"
+    elif mutation == "agent-type-malformed":
+        metadata["agentType"] = True
+    elif mutation == "agent-type-control":
+        metadata["agentType"] = "unsafe\nagent"
     return {
         "currentModelId": current_model,
         "availableModels": [
