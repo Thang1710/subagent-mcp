@@ -6401,6 +6401,101 @@ def test_lifecycle_spawn_handshake_returns_running_then_succeeds_with_public_tex
     assert children[0]._env["GROK_AUTH_PATH"] == children[1]._env["GROK_AUTH_PATH"]
 
 
+def test_lifecycle_terminal_result_discards_pre_tool_narration(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    adapter, _trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        scenario="narrated-tool-answer",
+    )
+    context = _lifecycle_context(adapter, workspace)
+
+    async def scenario() -> None:
+        started = await adapter.spawn(_lifecycle_spawn_request(context))
+        request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        terminal = await _lifecycle_wait_terminal(adapter, request)
+        assert terminal.execution_state == "succeeded"
+        assert terminal.result_text == "APPROVED"
+        await adapter.close(request)
+
+    asyncio.run(scenario())
+    assert all(child.closed for child in children)
+
+
+def test_public_text_preserves_no_tool_chunks_and_other_session_isolation() -> None:
+    public_text = grok_module._GrokPublicText(session_id="session-1")
+
+    async def scenario() -> None:
+        for session_id, update in (
+            (
+                "session-1",
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "APP"},
+                },
+            ),
+            (
+                "session-2",
+                {"sessionUpdate": "tool_call", "toolCallId": "other-tool"},
+            ),
+            (
+                "session-1",
+                {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "ROVED"},
+                },
+            ),
+        ):
+            await public_text.handle(
+                "session/update",
+                {"sessionId": session_id, "update": update},
+            )
+
+    asyncio.run(scenario())
+    assert public_text.result() == "APPROVED"
+
+
+def test_public_text_keeps_truncated_final_after_late_tool_update() -> None:
+    public_text = grok_module._GrokPublicText(session_id="session-1")
+    final = "F" * grok_module._MAX_PUBLIC_RESULT_CHARS
+
+    async def scenario() -> None:
+        for update in (
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "narration"},
+            },
+            {"sessionUpdate": "tool_call", "toolCallId": "tool-1"},
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": final},
+            },
+            {
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": "tool-1",
+                "status": "completed",
+            },
+        ):
+            await public_text.handle(
+                "session/update",
+                {"sessionId": "session-1", "update": update},
+            )
+
+    asyncio.run(scenario())
+    assert public_text.result().startswith("F")
+    assert public_text.result().endswith(grok_module._RESULT_TRUNCATION_MARKER)
+    assert public_text.truncated is True
+
+
 def test_lifecycle_fake_exercises_canonical_acp_filesystem_wire(
     tmp_path: Path,
 ) -> None:

@@ -917,10 +917,13 @@ class _GrokPublicText:
         ):
             return
         update = params.get("update")
-        if (
-            not isinstance(update, Mapping)
-            or update.get("sessionUpdate") != "agent_message_chunk"
-        ):
+        if not isinstance(update, Mapping):
+            return
+        update_type = update.get("sessionUpdate")
+        if update_type == "tool_call":
+            self.reset()
+            return
+        if update_type != "agent_message_chunk":
             return
         content = update.get("content")
         if (

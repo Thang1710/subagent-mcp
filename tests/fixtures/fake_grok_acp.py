@@ -434,11 +434,28 @@ def _lifecycle_finish_prompt(
             "content": {"type": "text", "text": "PRIVATE_REASONING"},
         },
     )
+    if config.get("scenario") == "narrated-tool-answer":
+        _lifecycle_update(
+            session_id,
+            {
+                "sessionUpdate": "agent_message_chunk",
+                "content": {"type": "text", "text": "I will inspect the file."},
+            },
+        )
     _lifecycle_update(
         session_id,
         {
             "sessionUpdate": "tool_call",
+            "toolCallId": "tool-1",
             "title": "PRIVATE_TOOL_FRAME",
+        },
+    )
+    _lifecycle_update(
+        session_id,
+        {
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "tool-1",
+            "status": "completed",
         },
     )
     _send(
