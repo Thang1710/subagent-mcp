@@ -911,10 +911,7 @@ def test_fresh_ui_lists_real_runtimes_and_creates_claude_policy_by_cas(
     grok = by_id["grok-build"]
     assert grok["manifest"]["runtime_id"] == "grok-build"
     assert grok["manifest"]["harness_id"] == "grok-build"
-    assert grok["manifest"]["semantic_permissions"] == [
-        "repo_read",
-        "workspace_write",
-    ]
+    assert grok["manifest"]["semantic_permissions"] == ["repo_read"]
     assert grok["manifest"]["max_write_roots_per_session"] == 32
     assert grok["manifest"]["write_root_mode"] == "path-prefix"
     assert grok["status"]["state"] == "not_configured"

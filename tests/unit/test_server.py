@@ -83,10 +83,7 @@ def test_default_service_publishes_only_real_runtime_adapters(
     grok = by_id["grok-build"]
     assert grok["enabled"] is False
     assert grok["manifest"]["harness_id"] == "grok-build"
-    assert grok["manifest"]["semantic_permissions"] == [
-        "repo_read",
-        "workspace_write",
-    ]
+    assert grok["manifest"]["semantic_permissions"] == ["repo_read"]
     assert grok["manifest"]["max_write_roots_per_session"] == 32
     assert grok["manifest"]["write_root_mode"] == "path-prefix"
 
