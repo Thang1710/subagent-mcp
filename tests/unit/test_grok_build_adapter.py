@@ -70,6 +70,7 @@ from subagent_harness_mcp.store import StateStore
 FAKE_ACP = (
     Path(__file__).parents[1] / "fixtures" / "fake_grok_acp.py"
 ).resolve(strict=True)
+_LIFECYCLE_HANDSHAKE_TIMEOUT_SECONDS = 5.0
 _LIFECYCLE_PROCESS_CLEANUP_TIMEOUT_SECONDS = 5.0
 _LEGACY_ISOLATION_CONFIG = b"""[compat.cursor]
 skills = false
@@ -6806,6 +6807,7 @@ def _lifecycle_adapter(
     billing_mutation: str | None = None,
     disabled_extensions: tuple[tuple[str, str], ...] = (),
     handshake_delay: float = 0.0,
+    handshake_timeout: float = _LIFECYCLE_HANDSHAKE_TIMEOUT_SECONDS,
     cancel_timeout: float = 0.5,
     close_delay: float = 0.0,
     close_error: bool = False,
@@ -7018,7 +7020,7 @@ def _lifecycle_adapter(
         },
         data_root=tmp_path / "local" / "SubagentMCP",
         acp_process_factory=process_factory,
-        handshake_timeout_seconds=0.5,
+        handshake_timeout_seconds=handshake_timeout,
         cancel_timeout_seconds=cancel_timeout,
     )
     if unreleased_writer_service:
@@ -8063,6 +8065,7 @@ def test_billing_guard_transport_ambiguity_requires_recovery(
         tmp_path,
         binding,
         billing_mutation=billing_mutation,
+        handshake_timeout=0.5,
     )
     context = _lifecycle_context(adapter, workspace)
 
@@ -9797,6 +9800,7 @@ def test_runtime_canary_maps_only_structured_handshake_failures(
     adapter, trace_path, children = _lifecycle_adapter(
         tmp_path,
         binding,
+        handshake_delay=0.75,
         handshake_rpc_method="authenticate",
         rpc_code=-32603,
         rpc_message="misleading free-form quota auth model words",
