@@ -4448,6 +4448,231 @@ def _filesystem_write_request(
     }
 
 
+def _plan_exit_request(
+    *,
+    session_id: object = _FILESYSTEM_SESSION_ID,
+    tool_call_id: object = "plan-tool-1",
+    plan_content: object = "PRIVATE_PLAN_CONTENT",
+) -> dict[str, object]:
+    return {
+        "sessionId": session_id,
+        "toolCallId": tool_call_id,
+        "planContent": plan_content,
+    }
+
+
+def test_plan_exit_approves_exact_active_writer_once_and_resets_for_followup(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        await bridge.activate_turn("execution-1")
+        request = _plan_exit_request(plan_content=None)
+        assert await bridge.handle_reverse_request(
+            "_x.ai/exit_plan_mode", request, "execution-1"
+        ) == {"outcome": "approved"}
+        assert await bridge.handle_reverse_request(
+            "_x.ai/exit_plan_mode", request, "execution-1"
+        ) == {"outcome": "approved"}
+        with pytest.raises(GrokPermissionError):
+            await bridge.handle_reverse_request(
+                "_x.ai/exit_plan_mode",
+                _plan_exit_request(tool_call_id="plan-tool-2"),
+                "execution-1",
+            )
+        await bridge.deactivate_turn("execution-1")
+
+        await bridge.activate_turn("execution-2")
+        assert await bridge.handle_reverse_request(
+            "_x.ai/exit_plan_mode",
+            _plan_exit_request(tool_call_id="plan-tool-2"),
+            "execution-2",
+        ) == {"outcome": "approved"}
+        await bridge.deactivate_turn("execution-2")
+
+    asyncio.run(scenario())
+    assert bridge._reverse_io_attestation() == {
+        "scope": "native-session-cumulative",
+        "read_attempts": 0,
+        "read_successes": 0,
+        "write_attempts": 0,
+        "write_successes": 0,
+        "plan_exit_attempts": 4,
+        "plan_exit_approvals": 2,
+        "terminal_attempts": 0,
+        "terminal_denials": 0,
+        "saturated": False,
+    }
+
+
+def test_plan_exit_concurrent_distinct_ids_approve_exactly_one_and_replay_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def concurrent_calls(
+        execution_id: str,
+        requests: tuple[dict[str, object], dict[str, object]],
+    ) -> list[object]:
+        gate = asyncio.Event()
+
+        async def invoke(payload: dict[str, object]) -> Mapping[str, object]:
+            await gate.wait()
+            return await bridge.handle_reverse_request(
+                "_x.ai/exit_plan_mode", payload, execution_id
+            )
+
+        calls = [asyncio.create_task(invoke(payload)) for payload in requests]
+        gate.set()
+        return list(await asyncio.gather(*calls, return_exceptions=True))
+
+    async def scenario() -> None:
+        await bridge.activate_turn("execution-1")
+        distinct = await concurrent_calls(
+            "execution-1",
+            (
+                _plan_exit_request(tool_call_id="plan-tool-1"),
+                _plan_exit_request(tool_call_id="plan-tool-2"),
+            ),
+        )
+        assert distinct.count({"outcome": "approved"}) == 1
+        assert sum(isinstance(value, GrokPermissionError) for value in distinct) == 1
+        await bridge.deactivate_turn("execution-1")
+
+        await bridge.activate_turn("execution-2")
+        replay = _plan_exit_request(tool_call_id="plan-tool-3")
+        identical = await concurrent_calls("execution-2", (replay, dict(replay)))
+        assert identical == [{"outcome": "approved"}, {"outcome": "approved"}]
+        await bridge.deactivate_turn("execution-2")
+
+    asyncio.run(scenario())
+    evidence = bridge._reverse_io_attestation()
+    assert evidence["plan_exit_attempts"] == 4
+    assert evidence["plan_exit_approvals"] == 2
+
+
+def test_plan_exit_denies_review_idle_and_foreign_session(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    reviewer = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="repo-read",
+        write_roots=(),
+    )
+    writer = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        await reviewer.activate_turn("review-execution")
+        with pytest.raises(GrokPermissionError):
+            await reviewer.handle_reverse_request(
+                "_x.ai/exit_plan_mode",
+                _plan_exit_request(),
+                "review-execution",
+            )
+        await reviewer.deactivate_turn("review-execution")
+
+        with pytest.raises(GrokPermissionError):
+            await writer.handle_reverse_request(
+                "_x.ai/exit_plan_mode", _plan_exit_request(), None
+            )
+
+        await writer.activate_turn("writer-execution")
+        with pytest.raises(GrokPermissionError):
+            await writer.handle_reverse_request(
+                "_x.ai/exit_plan_mode",
+                _plan_exit_request(session_id="foreign-session"),
+                "writer-execution",
+            )
+        await writer.deactivate_turn("writer-execution")
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {"toolCallId": "plan-tool-1", "planContent": None},
+        {"sessionId": _FILESYSTEM_SESSION_ID, "planContent": None},
+        _plan_exit_request(tool_call_id=True),
+        _plan_exit_request(plan_content=[]),
+        {**_plan_exit_request(), "unexpected": True},
+    ),
+)
+def test_plan_exit_rejects_malformed_wire(
+    tmp_path: Path,
+    payload: dict[str, object],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "_x.ai/exit_plan_mode", payload, "test-execution"
+                )
+
+    asyncio.run(scenario())
+
+
+def test_plan_exit_rejects_oversized_content_without_retaining_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+    monkeypatch.setattr(grok_module, "_MAX_COMMAND_BYTES", 4)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "_x.ai/exit_plan_mode",
+                    _plan_exit_request(plan_content="PRIVATE_PLAN"),
+                    "test-execution",
+                )
+
+    asyncio.run(scenario())
+    assert "PRIVATE_PLAN" not in repr(bridge._reverse_io_attestation())
+
+
 def test_reverse_filesystem_write_requires_active_execution(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()
@@ -4719,6 +4944,8 @@ def test_reverse_io_attestation_saturates_without_retaining_request_data(
         "read_successes": 1,
         "write_attempts": 0,
         "write_successes": 0,
+        "plan_exit_attempts": 0,
+        "plan_exit_approvals": 0,
         "terminal_attempts": 0,
         "terminal_denials": 0,
         "saturated": True,
@@ -6149,13 +6376,14 @@ def _lifecycle_context(
     workspace: Path,
     *,
     writer: bool = False,
+    write_set: tuple[str, ...] = ("allowed.txt",),
 ) -> object:
     assert asyncio.run(adapter.probe()).state == "needs_canary"
     request = (
         _request(
             workspace,
             permissions=("repo_read", "workspace_write"),
-            write_set=("allowed.txt",),
+            write_set=write_set,
         )
         if writer
         else _request(workspace)
@@ -6431,6 +6659,66 @@ def test_lifecycle_terminal_result_discards_pre_tool_narration(
     assert all(child.closed for child in children)
 
 
+def test_lifecycle_writer_approves_plan_exit_before_two_bounded_writes(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    generated = workspace / "generated"
+    generated.mkdir()
+    binding = _binding(tmp_path)
+    adapter, _trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        scenario="plan-exit-writer",
+        model_agent_type="grok-build-plan",
+    )
+    context = _lifecycle_context(
+        adapter,
+        workspace,
+        writer=True,
+        write_set=("allowed.txt", "generated"),
+    )
+
+    async def scenario() -> tuple[str, bytes, bool, Mapping[str, object]]:
+        started = await adapter.spawn(_lifecycle_spawn_request(context))
+        request = AdapterSessionRequest(
+            "conversation-grok",
+            "execution-grok-1",
+            started.external_session_id,
+            started.external_execution_id,
+        )
+        terminal = await _lifecycle_wait_terminal(adapter, request)
+        observed = (
+            terminal.execution_state,
+            allowed.read_bytes(),
+            (generated / "new.txt").exists(),
+            terminal.evidence["reverse_io"],
+        )
+        await adapter.close(request)
+        return observed
+
+    observed = asyncio.run(scenario())
+    assert observed[:3] == ("succeeded", b"approved-write-one\n", True)
+    assert observed[3] == {
+        "scope": "native-session-cumulative",
+        "read_attempts": 0,
+        "read_successes": 0,
+        "write_attempts": 2,
+        "write_successes": 2,
+        "plan_exit_attempts": 1,
+        "plan_exit_approvals": 1,
+        "terminal_attempts": 0,
+        "terminal_denials": 0,
+        "saturated": False,
+    }
+    assert "PRIVATE_PLAN_CONTENT" not in repr(observed[3])
+    assert (generated / "new.txt").read_bytes() == b"approved-write-two\n"
+    assert all(child.closed for child in children)
+
+
 def test_public_text_preserves_no_tool_chunks_and_other_session_isolation() -> None:
     public_text = grok_module._GrokPublicText(session_id="session-1")
 
@@ -6526,6 +6814,8 @@ def test_lifecycle_fake_exercises_canonical_acp_filesystem_wire(
             "read_successes": 1,
             "write_attempts": 1,
             "write_successes": 1,
+            "plan_exit_attempts": 0,
+            "plan_exit_approvals": 0,
             "terminal_attempts": 0,
             "terminal_denials": 0,
             "saturated": False,
@@ -6761,6 +7051,8 @@ def test_lifecycle_review_uses_reverse_read_and_denies_write_and_terminal(
             "read_successes": 1,
             "write_attempts": 1,
             "write_successes": 0,
+            "plan_exit_attempts": 0,
+            "plan_exit_approvals": 0,
             "terminal_attempts": 1,
             "terminal_denials": 1,
             "saturated": False,
@@ -7354,6 +7646,8 @@ def test_snapshot_does_not_claim_unreported_spend_state(tmp_path: Path) -> None:
             "read_successes": 0,
             "write_attempts": 0,
             "write_successes": 0,
+            "plan_exit_attempts": 0,
+            "plan_exit_approvals": 0,
             "terminal_attempts": 0,
             "terminal_denials": 0,
             "saturated": False,
@@ -7368,6 +7662,8 @@ def test_snapshot_does_not_claim_unreported_spend_state(tmp_path: Path) -> None:
         "read_successes": 0,
         "write_attempts": 0,
         "write_successes": 0,
+        "plan_exit_attempts": 0,
+        "plan_exit_approvals": 0,
         "terminal_attempts": 0,
         "terminal_denials": 0,
         "saturated": False,

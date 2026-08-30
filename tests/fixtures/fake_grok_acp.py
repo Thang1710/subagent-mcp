@@ -636,7 +636,68 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
         elif method == "session/prompt" and "id" in current:
             prompt_count += 1
             scenario = config.get("scenario", "happy")
-            if scenario == "filesystem-wire":
+            if scenario == "plan-exit-writer":
+                if config.get("mode") != "writer":
+                    return 15
+                workspace = Path(str(config["workspace_path"]))
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "plan-exit",
+                        "method": "_x.ai/exit_plan_mode",
+                        "params": {
+                            "sessionId": session_id,
+                            "toolCallId": "plan-tool-1",
+                            "planContent": "PRIVATE_PLAN_CONTENT",
+                        },
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "plan-exit",
+                    "result": {"outcome": "approved"},
+                }:
+                    _send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": current["id"],
+                            "result": {"stopReason": "cancelled"},
+                        }
+                    )
+                    current = _read()
+                    continue
+                for request_id, path, content in (
+                    (
+                        "plan-write-one",
+                        workspace / "allowed.txt",
+                        "approved-write-one\n",
+                    ),
+                    (
+                        "plan-write-two",
+                        workspace / "generated" / "new.txt",
+                        "approved-write-two\n",
+                    ),
+                ):
+                    _send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": request_id,
+                            "method": "fs/write_text_file",
+                            "params": {
+                                "sessionId": session_id,
+                                "path": str(path.resolve()),
+                                "content": content,
+                                "_meta": {},
+                            },
+                        }
+                    )
+                    if _read() != {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "result": {},
+                    }:
+                        return 16
+            elif scenario == "filesystem-wire":
                 workspace = Path(str(config["workspace_path"]))
                 _send(
                     {

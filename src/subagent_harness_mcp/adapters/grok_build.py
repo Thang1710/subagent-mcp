@@ -83,6 +83,8 @@ _REVERSE_IO_COUNTERS = (
     "read_successes",
     "write_attempts",
     "write_successes",
+    "plan_exit_attempts",
+    "plan_exit_approvals",
     "terminal_attempts",
     "terminal_denials",
 )
@@ -360,6 +362,7 @@ class GrokFilesystemBridge:
         self._active_execution_id: str | None = None
         self._reverse_execution_id: str | None = None
         self._reverse_callbacks = 0
+        self._plan_exit_approval: tuple[str, str] | None = None
         self._reverse_io_counts = {name: 0 for name in _REVERSE_IO_COUNTERS}
         self._reverse_io_saturated = False
         roots = tuple(self._build_write_root(root) for root in write_roots)
@@ -430,6 +433,31 @@ class GrokFilesystemBridge:
         params: Mapping[str, object],
         reverse_scope: str | None,
     ) -> Mapping[str, object]:
+        if method == "_x.ai/exit_plan_mode":
+            self._record_reverse_io("plan_exit_attempts")
+            execution_id = await self._admit_reverse_callback(reverse_scope)
+            try:
+                if self._permission_mode != "workspace-write" or not self._write_roots:
+                    raise GrokPermissionError("Grok plan exit is not authorized")
+                session_id, tool_call_id = _plan_exit_params(params)
+                if session_id != self._bound_session_id:
+                    raise GrokPermissionError("Grok plan exit session is invalid")
+                async with self._turn_condition:
+                    if self._reverse_execution_id != execution_id:
+                        raise GrokPermissionError(
+                            "Grok filesystem execution authority changed"
+                        )
+                    approval = (execution_id, tool_call_id)
+                    if self._plan_exit_approval is None:
+                        self._plan_exit_approval = approval
+                        self._record_reverse_io("plan_exit_approvals")
+                    elif self._plan_exit_approval != approval:
+                        raise GrokPermissionError(
+                            "Grok plan exit was already approved for this turn"
+                        )
+                return {"outcome": "approved"}
+            finally:
+                await self._finish_reverse_callback(execution_id)
         if method in {"fs/read_text_file", "fs/write_text_file"}:
             execution_id = await self._admit_reverse_callback(reverse_scope)
             try:
@@ -464,7 +492,11 @@ class GrokFilesystemBridge:
         if normalized is None:
             raise GrokPermissionError("Grok filesystem execution authority is invalid")
         async with self._turn_condition:
-            if self._active_execution_id is not None or self._reverse_callbacks:
+            if (
+                self._active_execution_id is not None
+                or self._reverse_callbacks
+                or self._plan_exit_approval is not None
+            ):
                 raise GrokPermissionError("Grok filesystem execution authority is busy")
             self._active_execution_id = normalized
 
@@ -482,6 +514,7 @@ class GrokFilesystemBridge:
                         "Grok filesystem execution authority changed"
                     )
                 await self._turn_condition.wait()
+            self._plan_exit_approval = None
 
     async def _admit_reverse_callback(self, reverse_scope: str | None) -> str:
         async with self._turn_condition:
@@ -7298,6 +7331,24 @@ def _bounded_public_text(value: object, maximum: int) -> str | None:
     ):
         return None
     return text
+
+
+def _plan_exit_params(params: Mapping[str, object]) -> tuple[str, str]:
+    if set(params) != {"sessionId", "toolCallId", "planContent"}:
+        raise GrokPermissionError("Grok plan exit request is malformed")
+    session_id = _bounded_public_text(params.get("sessionId"), 256)
+    tool_call_id = _bounded_public_text(params.get("toolCallId"), 256)
+    plan_content = params.get("planContent")
+    if (
+        session_id is None
+        or tool_call_id is None
+        or (
+            plan_content is not None
+            and _bounded_text(plan_content, _MAX_COMMAND_BYTES) is None
+        )
+    ):
+        raise GrokPermissionError("Grok plan exit request is malformed")
+    return session_id, tool_call_id
 
 
 def _bounded_text(value: object, maximum: int) -> str | None:
