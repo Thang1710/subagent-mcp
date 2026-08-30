@@ -437,16 +437,17 @@ def _exclusive_file_lock(state_path: Path):
     if not lock_path.parent.is_dir():
         raise ValueError("state parent must already exist")
     with lock_path.open("a+b") as stream:
-        stream.seek(0, os.SEEK_END)
-        if stream.tell() == 0:
-            stream.write(b"\0")
-            stream.flush()
         stream.seek(0)
         if os.name == "nt":
             import msvcrt
 
             msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
             try:
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
                 yield
             finally:
                 stream.seek(0)
@@ -456,6 +457,11 @@ def _exclusive_file_lock(state_path: Path):
 
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX)
             try:
+                stream.seek(0, os.SEEK_END)
+                if stream.tell() == 0:
+                    stream.write(b"\0")
+                    stream.flush()
+                stream.seek(0)
                 yield
             finally:
                 fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
