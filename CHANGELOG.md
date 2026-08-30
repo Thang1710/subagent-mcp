@@ -4,11 +4,16 @@ All notable changes to Subagent MCP are documented here.
 
 ## Unreleased
 
+## 1.0.29 - 2026-08-30
+
 - Confirm Grok prompt submission before sending native cancellation so event-loop
   scheduling cannot reverse `session/prompt` and `session/cancel` frames.
 - Add a disabled-by-default deterministic Grok Build candidate for read-only
   review and bounded path-prefix writing through its native ACP harness. Support
   remains In development until the separate live read-only and writer gates pass.
+- Bind Grok's isolated native `plan.md` lifecycle to the active session without
+  widening the declared workspace write set, and revalidate path, lease, and
+  cancellation authority immediately before each atomic replace.
 - Document the private provider-neutral ACP stdio boundary without changing the
   existing DeepSeek Harness adapter path.
 

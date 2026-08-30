@@ -514,7 +514,7 @@ def test_manifest_is_exact_and_contains_no_model_ids(tmp_path: Path) -> None:
         "provider_id": "xai",
         "harness_id": "grok-build",
         "display_name": "Grok Build",
-        "adapter_version": "1.0.28",
+        "adapter_version": "1.0.29",
         "supported_platforms": ["win32"],
         "supported_transports": ["native-acp"],
         "capabilities": ["interrupt", "session", "workspace"],

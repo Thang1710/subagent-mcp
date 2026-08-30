@@ -24,7 +24,7 @@ except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
 ROOT = Path(__file__).resolve().parents[2]
 DIST_NAME = "subagent-harness-mcp"
 PACKAGE_NAME = "subagent_harness_mcp"
-VERSION = "1.0.28"
+VERSION = "1.0.29"
 
 
 def _read_toml(path: Path) -> dict[str, object]:
@@ -332,7 +332,7 @@ def test_readme_isolates_persistent_ui_from_codex_stdio_updates() -> None:
     assert "uvx --isolated --from" in readme
     assert f"{DIST_NAME} ui --stop" in readme
     assert (
-        f"uvx --isolated --from {DIST_NAME}==1.0.27 {DIST_NAME} ui --stop"
+        f"uvx --isolated --from {DIST_NAME}==1.0.28 {DIST_NAME} ui --stop"
         in readme
     )
     assert f"uv tool install {DIST_NAME}" not in readme
