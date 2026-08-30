@@ -4618,7 +4618,6 @@ def test_plan_exit_denies_review_idle_and_foreign_session(tmp_path: Path) -> Non
         {"sessionId": _FILESYSTEM_SESSION_ID, "planContent": None},
         _plan_exit_request(tool_call_id=True),
         _plan_exit_request(plan_content=[]),
-        {**_plan_exit_request(), "unexpected": True},
     ),
 )
 def test_plan_exit_rejects_malformed_wire(
@@ -4643,6 +4642,39 @@ def test_plan_exit_rejects_malformed_wire(
                 )
 
     asyncio.run(scenario())
+
+
+def test_plan_exit_ignores_unknown_fields_without_retaining_them(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+    request = {
+        **_plan_exit_request(plan_content="PRIVATE_PLAN_CONTENT"),
+        "futureMetadata": {"private": "PRIVATE_UNKNOWN_CONTENT"},
+    }
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            assert await bridge.handle_reverse_request(
+                "_x.ai/exit_plan_mode", request, "test-execution"
+            ) == {"outcome": "approved"}
+
+    asyncio.run(scenario())
+    retained = repr(bridge.__dict__)
+    attested = repr(bridge._reverse_io_attestation())
+    for marker in ("PRIVATE_PLAN_CONTENT", "PRIVATE_UNKNOWN_CONTENT"):
+        assert marker not in retained
+        assert marker not in caplog.text
+        assert marker not in attested
 
 
 def test_plan_exit_rejects_oversized_content_without_retaining_it(

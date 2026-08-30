@@ -7334,7 +7334,7 @@ def _bounded_public_text(value: object, maximum: int) -> str | None:
 
 
 def _plan_exit_params(params: Mapping[str, object]) -> tuple[str, str]:
-    if set(params) != {"sessionId", "toolCallId", "planContent"}:
+    if not {"sessionId", "toolCallId", "planContent"}.issubset(params):
         raise GrokPermissionError("Grok plan exit request is malformed")
     session_id = _bounded_public_text(params.get("sessionId"), 256)
     tool_call_id = _bounded_public_text(params.get("toolCallId"), 256)
