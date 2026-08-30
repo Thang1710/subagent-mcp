@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 ReverseRequestHandler = Callable[
-    [str, Mapping[str, object]],
+    [str, Mapping[str, object], str | None],
     Awaitable[Mapping[str, object]],
 ]
 NotificationHandler = Callable[[str, Mapping[str, object]], Awaitable[None]]
@@ -109,6 +109,9 @@ class AcpStdioProcess:
         self._stderr_task: asyncio.Task[None] | None = None
         self._waiter_task: asyncio.Task[None] | None = None
         self._reverse_tasks: set[asyncio.Task[None]] = set()
+        self._reverse_task_scopes: dict[asyncio.Task[None], str | None] = {}
+        self._active_reverse_scope: tuple[int, str] | None = None
+        self._draining_reverse_scopes: set[str] = set()
         self._notification_tasks: set[asyncio.Task[None]] = set()
         self._notification_queue: asyncio.Queue[
             tuple[str, Mapping[str, object]]
@@ -188,11 +191,25 @@ class AcpStdioProcess:
         *,
         timeout_seconds: float | None = None,
         write_receipt: asyncio.Event | None = None,
+        reverse_scope: str | None = None,
     ) -> Mapping[str, object]:
         self._ensure_available()
         timeout = self._request_timeout if timeout_seconds is None else timeout_seconds
         if timeout <= 0:
             raise ValueError("request timeout must be positive")
+        if reverse_scope is not None:
+            if (
+                not isinstance(reverse_scope, str)
+                or not reverse_scope
+                or "\x00" in reverse_scope
+                or len(reverse_scope.encode("utf-8")) > 256
+            ):
+                raise ValueError("reverse_scope must be a bounded non-NUL string")
+            if (
+                self._active_reverse_scope is not None
+                or reverse_scope in self._draining_reverse_scopes
+            ):
+                raise AcpProtocolError("ACP scoped request authority is busy")
 
         request_id = self._next_id
         self._next_id += 1
@@ -200,6 +217,8 @@ class AcpStdioProcess:
             asyncio.get_running_loop().create_future()
         )
         self._pending[request_id] = future
+        if reverse_scope is not None:
+            self._active_reverse_scope = (request_id, reverse_scope)
         try:
             await self._write(
                 {
@@ -224,6 +243,17 @@ class AcpStdioProcess:
                 future.cancel()
             raise
         finally:
+            if reverse_scope is not None:
+                self._close_reverse_scope(request_id)
+                try:
+                    cleanup_cancelled = await self._drain_reverse_scope(reverse_scope)
+                    fatal_callback_error = self._fatal_callback_error
+                    if fatal_callback_error is not None:
+                        raise self._copy_error(fatal_callback_error)
+                    if cleanup_cancelled:
+                        raise asyncio.CancelledError
+                finally:
+                    self._draining_reverse_scopes.discard(reverse_scope)
             self._pending.pop(request_id, None)
 
     async def notify(self, method: str, params: Mapping[str, object]) -> None:
@@ -354,9 +384,14 @@ class AcpStdioProcess:
             return
         if len(self._reverse_tasks) >= self._max_active_reverse_requests:
             raise AcpProtocolError("ACP active reverse request limit exceeded")
-        task = asyncio.create_task(self._answer_reverse(request_id, method, params))
+        active_scope = self._active_reverse_scope
+        reverse_scope = active_scope[1] if active_scope is not None else None
+        task = asyncio.create_task(
+            self._answer_reverse(request_id, method, params, reverse_scope)
+        )
         self._reverse_tasks.add(task)
-        task.add_done_callback(self._reverse_tasks.discard)
+        self._reverse_task_scopes[task] = reverse_scope
+        task.add_done_callback(self._forget_reverse_task)
 
     def _handle_response(self, message: Mapping[str, object]) -> None:
         request_id = self._parse_rpc_id(message.get("id"))
@@ -365,6 +400,7 @@ class AcpStdioProcess:
         future = self._pending.get(request_id)
         if future is None or future.done():
             return
+        self._close_reverse_scope(request_id)
 
         if "error" in message:
             error = message.get("error")
@@ -389,6 +425,7 @@ class AcpStdioProcess:
         request_id: _JsonRpcId,
         method: str,
         params: Mapping[str, object],
+        reverse_scope: str | None,
     ) -> None:
         handler = self._request_handler
         if handler is None:
@@ -399,7 +436,7 @@ class AcpStdioProcess:
             }
         else:
             try:
-                result = await handler(method, params)
+                result = await handler(method, params, reverse_scope)
                 if not isinstance(result, Mapping):
                     raise TypeError("reverse handler returned a non-object")
                 response = {"jsonrpc": "2.0", "id": request_id, "result": dict(result)}
@@ -431,6 +468,37 @@ class AcpStdioProcess:
         except AcpStdioError as exc:
             if not self._closing:
                 self._set_terminal(exc)
+
+    def _close_reverse_scope(self, request_id: int) -> None:
+        active_scope = self._active_reverse_scope
+        if active_scope is None or active_scope[0] != request_id:
+            return
+        self._active_reverse_scope = None
+        self._draining_reverse_scopes.add(active_scope[1])
+
+    async def _drain_reverse_scope(self, reverse_scope: str) -> bool:
+        tasks = tuple(
+            task
+            for task, task_scope in self._reverse_task_scopes.items()
+            if task_scope == reverse_scope
+        )
+        if not tasks:
+            return False
+        drain = asyncio.gather(*tasks, return_exceptions=True)
+        cancelled = False
+        while not drain.done():
+            try:
+                await asyncio.shield(drain)
+            except asyncio.CancelledError:
+                cancelled = True
+        await drain
+        for task in tasks:
+            self._forget_reverse_task(task)
+        return cancelled
+
+    def _forget_reverse_task(self, task: asyncio.Task[None]) -> None:
+        self._reverse_tasks.discard(task)
+        self._reverse_task_scopes.pop(task, None)
 
     async def _run_notifications(self) -> None:
         handler = self._notification_handler

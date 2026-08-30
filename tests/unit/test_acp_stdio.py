@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 
 from subagent_harness_mcp.adapters.acp_stdio import (
+    AcpFatalCallbackError,
     AcpMethodNotFoundError,
     AcpProcessError,
     AcpProtocolError,
@@ -161,11 +162,16 @@ def test_reverse_request_is_answered_exactly_once(
     async def scenario() -> None:
         calls = 0
 
-        async def handle(method: str, params: Mapping[str, object]) -> Mapping[str, object]:
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
             nonlocal calls
             calls += 1
             assert method == "fs/read_text_file"
             assert params == {"path": "README.md"}
+            assert reverse_scope is None
             return {"content": "bounded"}
 
         client = _client(tmp_path, scenario_name, request_handler=handle)
@@ -207,8 +213,11 @@ def test_typed_unknown_reverse_method_is_method_not_found_without_terminal_sessi
 ) -> None:
     async def scenario() -> None:
         async def handle(
-            method: str, params: Mapping[str, object]
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
         ) -> Mapping[str, object]:
+            assert reverse_scope is None
             raise AcpMethodNotFoundError(method)
 
         client = _client(
@@ -238,8 +247,11 @@ def test_reverse_ids_are_lifetime_bounded_without_reexecuting_evicted_ids(
         calls: list[str] = []
 
         async def handle(
-            method: str, params: Mapping[str, object]
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
         ) -> Mapping[str, object]:
+            assert reverse_scope is None
             calls.append(str(params["path"]))
             return {"content": "bounded"}
 
@@ -271,9 +283,12 @@ def test_active_reverse_callback_flood_fails_closed_without_task_exhaustion(
         calls = 0
 
         async def handle(
-            method: str, params: Mapping[str, object]
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
         ) -> Mapping[str, object]:
             nonlocal calls
+            assert reverse_scope is None
             calls += 1
             await release.wait()
             return {"content": "bounded"}
@@ -533,6 +548,379 @@ def test_request_write_receipt_stays_unset_when_drain_fails(tmp_path: Path) -> N
     asyncio.run(scenario())
 
 
+def test_scoped_request_drains_reverse_dispatched_before_handler_admission(
+    tmp_path: Path,
+) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            return
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        dispatched = asyncio.Event()
+        release_admission = asyncio.Event()
+        handled: list[str | None] = []
+
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
+            del method, params
+            handled.append(reverse_scope)
+            return {"content": "bounded"}
+
+        client = _client(tmp_path, "happy", request_handler=handle)
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+        answer_reverse = client._answer_reverse
+
+        async def pause_before_admission(
+            request_id: int | str,
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> None:
+            dispatched.set()
+            await release_admission.wait()
+            await answer_reverse(request_id, method, params, reverse_scope)
+
+        client._answer_reverse = pause_before_admission  # type: ignore[method-assign]
+
+        request = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-1")
+        )
+        await asyncio.sleep(0)
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-1",
+                "method": "fs/write_text_file",
+                "params": {"path": "result.txt", "content": "bounded"},
+            }
+        )
+        await asyncio.wait_for(dispatched.wait(), timeout=1)
+
+        await client._dispatch({"jsonrpc": "2.0", "id": 1, "result": {}})
+        await asyncio.sleep(0)
+        assert request.done() is False
+
+        release_admission.set()
+        assert await asyncio.wait_for(request, timeout=1) == {}
+        assert handled == ["execution-1"]
+        assert not client._reverse_tasks
+
+    asyncio.run(scenario())
+
+
+def test_scoped_request_propagates_fatal_callback_after_terminal_response(
+    tmp_path: Path,
+) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            return
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        handler_started = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
+            del method, params
+            assert reverse_scope == "execution-1"
+            handler_started.set()
+            await release_handler.wait()
+            raise AcpFatalCallbackError("synthetic callback ambiguity")
+
+        client = _client(tmp_path, "happy", request_handler=handle)
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+        request = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-1")
+        )
+        await asyncio.sleep(0)
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-1",
+                "method": "fs/write_text_file",
+                "params": {"path": "result.txt", "content": "bounded"},
+            }
+        )
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+        await client._dispatch({"jsonrpc": "2.0", "id": 1, "result": {}})
+        assert request.done() is False
+
+        release_handler.set()
+        with pytest.raises(AcpFatalCallbackError, match="callback ambiguity"):
+            await request
+
+    asyncio.run(scenario())
+
+
+def test_reverse_dispatch_scope_is_immutable_and_idle_dispatch_is_epochless(
+    tmp_path: Path,
+) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            return
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        first_dispatched = asyncio.Event()
+        release_first = asyncio.Event()
+        handled: list[tuple[str, str | None]] = []
+
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
+            del method
+            handled.append((str(params["path"]), reverse_scope))
+            return {"content": "bounded"}
+
+        client = _client(tmp_path, "happy", request_handler=handle)
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+        answer_reverse = client._answer_reverse
+
+        async def pause_first_before_admission(
+            request_id: int | str,
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> None:
+            if params.get("path") == "first.txt":
+                first_dispatched.set()
+                await release_first.wait()
+            await answer_reverse(request_id, method, params, reverse_scope)
+
+        client._answer_reverse = pause_first_before_admission  # type: ignore[method-assign]
+
+        first = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-1")
+        )
+        await asyncio.sleep(0)
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-first",
+                "method": "fs/read_text_file",
+                "params": {"path": "first.txt"},
+            }
+        )
+        await asyncio.wait_for(first_dispatched.wait(), timeout=1)
+        await client._dispatch({"jsonrpc": "2.0", "id": 1, "result": {}})
+
+        second = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-2")
+        )
+        await asyncio.sleep(0)
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-second",
+                "method": "fs/read_text_file",
+                "params": {"path": "second.txt"},
+            }
+        )
+        await client._dispatch({"jsonrpc": "2.0", "id": 2, "result": {}})
+        assert await asyncio.wait_for(second, timeout=1) == {}
+
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-idle",
+                "method": "fs/read_text_file",
+                "params": {"path": "idle.txt"},
+            }
+        )
+        await asyncio.sleep(0)
+        release_first.set()
+        assert await asyncio.wait_for(first, timeout=1) == {}
+        if client._reverse_tasks:
+            await asyncio.gather(*client._reverse_tasks)
+
+        assert handled == [
+            ("second.txt", "execution-2"),
+            ("idle.txt", None),
+            ("first.txt", "execution-1"),
+        ]
+
+    asyncio.run(scenario())
+
+
+def test_unscoped_request_preserves_active_scope_and_scoped_overlap_is_rejected(
+    tmp_path: Path,
+) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            return
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        handled: list[str | None] = []
+
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
+            del method, params
+            handled.append(reverse_scope)
+            return {"content": "bounded"}
+
+        client = _client(tmp_path, "happy", request_handler=handle)
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+
+        scoped = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-1")
+        )
+        await asyncio.sleep(0)
+        unscoped = asyncio.create_task(client.request("session/cancel", {}))
+        await asyncio.sleep(0)
+        with pytest.raises(AcpProtocolError, match="authority is busy"):
+            await client.request(
+                "session/prompt", {}, reverse_scope="execution-overlap"
+            )
+
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-1",
+                "method": "fs/read_text_file",
+                "params": {"path": "README.md"},
+            }
+        )
+        await client._dispatch({"jsonrpc": "2.0", "id": 2, "result": {}})
+        assert await unscoped == {}
+        assert client._active_reverse_scope == (1, "execution-1")
+
+        await client._dispatch({"jsonrpc": "2.0", "id": 1, "result": {}})
+        assert await scoped == {}
+        assert handled == ["execution-1"]
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("finish", ["timeout", "cancel"])
+def test_scoped_request_timeout_or_cancel_clears_scope_and_drains_callbacks(
+    tmp_path: Path,
+    finish: str,
+) -> None:
+    class Stdin:
+        def write(self, _payload: bytes) -> None:
+            return
+
+        async def drain(self) -> None:
+            return
+
+    class Process:
+        def __init__(self) -> None:
+            self.stdin = Stdin()
+            self.returncode: int | None = None
+
+    async def scenario() -> None:
+        handler_started = asyncio.Event()
+        release_handler = asyncio.Event()
+
+        async def handle(
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
+        ) -> Mapping[str, object]:
+            del method, params
+            assert reverse_scope == "execution-1"
+            handler_started.set()
+            await release_handler.wait()
+            return {"content": "bounded"}
+
+        client = _client(tmp_path, "happy", request_handler=handle)
+        client._process = Process()  # type: ignore[assignment]
+        client._started = True
+        timeout = 0.01 if finish == "timeout" else 1
+        request = asyncio.create_task(
+            client.request(
+                "session/prompt",
+                {},
+                timeout_seconds=timeout,
+                reverse_scope="execution-1",
+            )
+        )
+        await asyncio.sleep(0)
+        await client._dispatch(
+            {
+                "jsonrpc": "2.0",
+                "id": "reverse-1",
+                "method": "fs/read_text_file",
+                "params": {"path": "README.md"},
+            }
+        )
+        await asyncio.wait_for(handler_started.wait(), timeout=1)
+        if finish == "cancel":
+            request.cancel()
+            for _ in range(20):
+                if client._active_reverse_scope is None:
+                    break
+                await asyncio.sleep(0)
+        else:
+            await asyncio.sleep(0.03)
+        assert client._active_reverse_scope is None
+        assert request.done() is False
+
+        replacement = asyncio.create_task(
+            client.request("session/prompt", {}, reverse_scope="execution-2")
+        )
+        await asyncio.sleep(0)
+        await client._dispatch({"jsonrpc": "2.0", "id": 2, "result": {}})
+        assert await asyncio.wait_for(replacement, timeout=1) == {}
+
+        release_handler.set()
+        if finish == "cancel":
+            with pytest.raises(asyncio.CancelledError):
+                await request
+        else:
+            with pytest.raises(TimeoutError):
+                await request
+        assert not client._reverse_tasks
+
+    asyncio.run(scenario())
+
+
 def test_stderr_is_drained_without_deadlock_and_keeps_only_bounded_tail(
     tmp_path: Path,
 ) -> None:
@@ -781,8 +1169,11 @@ def test_close_is_bounded_when_callback_delays_cancellation(tmp_path: Path) -> N
         release = asyncio.Event()
 
         async def handle(
-            method: str, params: Mapping[str, object]
+            method: str,
+            params: Mapping[str, object],
+            reverse_scope: str | None,
         ) -> Mapping[str, object]:
+            assert reverse_scope is None
             started.set()
             try:
                 await asyncio.Event().wait()

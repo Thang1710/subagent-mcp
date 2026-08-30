@@ -715,7 +715,10 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                     "error": {"code": -32603, "message": "Internal error"},
                 }:
                     return 13
-            elif scenario == "filesystem-terminal-race":
+            elif scenario in {
+                "filesystem-terminal-race",
+                "filesystem-dispatch-terminal-race",
+            }:
                 if config.get("mode") != "writer":
                     return 14
                 workspace = Path(str(config["workspace_path"]))
@@ -732,11 +735,14 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                         },
                     }
                 )
-                deadline = time.monotonic() + 2
-                while not tuple(workspace.glob(".allowed.txt.subagent-mcp-*.tmp")):
-                    if time.monotonic() >= deadline:
-                        return 15
-                    time.sleep(0.005)
+                if scenario == "filesystem-terminal-race":
+                    deadline = time.monotonic() + 2
+                    while not tuple(
+                        workspace.glob(".allowed.txt.subagent-mcp-*.tmp")
+                    ):
+                        if time.monotonic() >= deadline:
+                            return 15
+                        time.sleep(0.005)
             if scenario == "process-exit":
                 return 7
             if scenario == "rpc-error":
@@ -765,7 +771,10 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                 pending_prompt = current
             else:
                 _lifecycle_finish_prompt(current, config, session_id)
-                if scenario == "filesystem-terminal-race":
+                if scenario in {
+                    "filesystem-terminal-race",
+                    "filesystem-dispatch-terminal-race",
+                }:
                     _trace(
                         trace_path,
                         {"method": "test/terminal-response-sent"},

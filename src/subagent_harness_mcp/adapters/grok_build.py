@@ -429,9 +429,10 @@ class GrokFilesystemBridge:
         self,
         method: str,
         params: Mapping[str, object],
+        reverse_scope: str | None,
     ) -> Mapping[str, object]:
         if method in {"fs/read_text_file", "fs/write_text_file"}:
-            execution_id = await self._admit_reverse_callback()
+            execution_id = await self._admit_reverse_callback(reverse_scope)
             try:
                 if method == "fs/read_text_file":
                     self._record_reverse_io("read_attempts")
@@ -483,11 +484,13 @@ class GrokFilesystemBridge:
                     )
                 await self._turn_condition.wait()
 
-    async def _admit_reverse_callback(self) -> str:
+    async def _admit_reverse_callback(self, reverse_scope: str | None) -> str:
         async with self._turn_condition:
             execution_id = self._active_execution_id
-            if execution_id is None:
-                raise GrokPermissionError("Grok filesystem execution is not active")
+            if execution_id is None or reverse_scope != execution_id:
+                raise GrokPermissionError(
+                    "Grok filesystem execution scope is not active"
+                )
             if (
                 self._reverse_execution_id is not None
                 and self._reverse_execution_id != execution_id
@@ -2619,6 +2622,7 @@ class GrokBuildAdapter:
                         "prompt": [{"type": "text", "text": prompt}],
                     },
                     write_receipt=write_receipt,
+                    reverse_scope=execution_id,
                 )
             except asyncio.CancelledError:
                 raise
@@ -2729,8 +2733,9 @@ class GrokBuildAdapter:
 async def _deny_billing_guard_reverse_request(
     method: str,
     params: Mapping[str, object],
+    reverse_scope: str | None,
 ) -> Mapping[str, object]:
-    del method, params
+    del method, params, reverse_scope
     raise AcpMethodNotFoundError("Billing guard exposes no reverse methods")
 
 

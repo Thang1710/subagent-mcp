@@ -20,7 +20,11 @@ import pytest
 
 import subagent_harness_mcp.adapters.grok_build as grok_module
 
-from subagent_harness_mcp.adapters.acp_stdio import AcpProcessError, AcpStdioProcess
+from subagent_harness_mcp.adapters.acp_stdio import (
+    AcpFatalCallbackError,
+    AcpProcessError,
+    AcpStdioProcess,
+)
 from subagent_harness_mcp.adapters.base import (
     AdapterContextRequest,
     AdapterSendRequest,
@@ -4461,6 +4465,7 @@ def test_reverse_filesystem_write_requires_active_execution(tmp_path: Path) -> N
             await bridge.handle_reverse_request(
                 "fs/write_text_file",
                 _filesystem_write_request(workspace, "exact.py", "idle\n"),
+                None,
             )
 
     asyncio.run(scenario())
@@ -4483,6 +4488,7 @@ def test_reverse_filesystem_read_requires_active_execution(tmp_path: Path) -> No
             await bridge.handle_reverse_request(
                 "fs/read_text_file",
                 _filesystem_read_request(workspace, "README.md"),
+                None,
             )
 
     asyncio.run(scenario())
@@ -4511,6 +4517,7 @@ def test_reverse_filesystem_write_accepts_exact_active_execution(
         assert await bridge.handle_reverse_request(
             "fs/write_text_file",
             _filesystem_write_request(workspace, "exact.py", "active\n"),
+            "execution-1",
         ) == {}
         await bridge.deactivate_turn("execution-1")
 
@@ -4549,6 +4556,7 @@ def test_reverse_filesystem_deactivation_waits_for_admitted_replace(
             bridge.handle_reverse_request(
                 "fs/write_text_file",
                 _filesystem_write_request(workspace, "exact.py", "settled\n"),
+                "execution-1",
             )
         )
         assert await asyncio.to_thread(entered.wait, 1)
@@ -4584,6 +4592,7 @@ def test_reverse_filesystem_late_write_is_denied_until_next_execution(
             await bridge.handle_reverse_request(
                 "fs/write_text_file",
                 _filesystem_write_request(workspace, "exact.py", "late\n"),
+                "execution-1",
             )
         assert exact.read_bytes() == b"before\n"
         assert bridge._reverse_io_attestation()["write_successes"] == successes
@@ -4592,6 +4601,7 @@ def test_reverse_filesystem_late_write_is_denied_until_next_execution(
         assert await bridge.handle_reverse_request(
             "fs/write_text_file",
             _filesystem_write_request(workspace, "exact.py", "next\n"),
+            "execution-2",
         ) == {}
         await bridge.deactivate_turn("execution-2")
 
@@ -4632,7 +4642,7 @@ def test_filesystem_review_reads_utf8_inside_workspace_and_denies_all_mutation(
             "session/request_permission",
         ):
             with pytest.raises(GrokPermissionError):
-                await bridge.handle_reverse_request(method, {})
+                await bridge.handle_reverse_request(method, {}, None)
 
     asyncio.run(scenario())
     assert source.read_text(encoding="utf-8") == "before\n"
@@ -4664,11 +4674,14 @@ def test_managed_acp_forces_reverse_io_transport_but_denies_terminal(
     async def scenario() -> None:
         async with _active_filesystem_turn(bridge):
             with pytest.raises(GrokPermissionError):
-                await bridge.handle_reverse_request("terminal/create", {})
+                await bridge.handle_reverse_request(
+                    "terminal/create", {}, "test-execution"
+                )
             with pytest.raises(GrokPermissionError):
                 await bridge.handle_reverse_request(
                     "fs/write_text_file",
                     _filesystem_write_request(workspace, "denied.txt", "denied\n"),
+                    "test-execution",
                 )
 
     asyncio.run(scenario())
@@ -4692,8 +4705,12 @@ def test_reverse_io_attestation_saturates_without_retaining_request_data(
     async def scenario() -> None:
         async with _active_filesystem_turn(bridge):
             request = _filesystem_read_request(workspace, "PRIVATE.txt")
-            await bridge.handle_reverse_request("fs/read_text_file", request)
-            await bridge.handle_reverse_request("fs/read_text_file", request)
+            await bridge.handle_reverse_request(
+                "fs/read_text_file", request, "test-execution"
+            )
+            await bridge.handle_reverse_request(
+                "fs/read_text_file", request, "test-execution"
+            )
 
     asyncio.run(scenario())
     evidence = bridge._reverse_io_attestation()
@@ -4731,12 +4748,14 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
                 await bridge.handle_reverse_request(
                     "fs/read_text_file",
                     {"sessionId": "native-session-1", "path": absolute},
+                    "test-execution",
                 )
             bridge.bind_session("native-session-1")
             with pytest.raises(GrokPermissionError):
                 await bridge.handle_reverse_request(
                     "fs/read_text_file",
                     {"sessionId": "wrong-session", "path": absolute},
+                    "test-execution",
                 )
             assert await bridge.handle_reverse_request(
                 "fs/read_text_file",
@@ -4747,6 +4766,7 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
                     "limit": 1,
                     "_meta": {"source": "fixture"},
                 },
+                "test-execution",
             ) == {"content": "two\n"}
             assert await bridge.handle_reverse_request(
                 "fs/read_text_file",
@@ -4757,6 +4777,7 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
                     "limit": 0,
                     "_meta": None,
                 },
+                "test-execution",
             ) == {"content": ""}
             for invalid in (
                 {"sessionId": "native-session-1", "path": "README.md"},
@@ -4765,7 +4786,9 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
                 {"sessionId": "native-session-1", "path": absolute, "extra": 1},
             ):
                 with pytest.raises(GrokPermissionError):
-                    await bridge.handle_reverse_request("fs/read_text_file", invalid)
+                    await bridge.handle_reverse_request(
+                        "fs/read_text_file", invalid, "test-execution"
+                    )
 
     asyncio.run(scenario())
 
@@ -4852,6 +4875,7 @@ def test_filesystem_root_identity_drift_blocks_before_read(
                         "sessionId": "native-session-1",
                         "path": str(source.resolve()),
                     },
+                    "test-execution",
                 )
 
     asyncio.run(scenario())
@@ -5198,7 +5222,9 @@ def test_filesystem_reverse_requests_use_real_bridge_through_acp_stdio(
             client = _filesystem_client(workspace, "filesystem-read", bridge)
             await client.start()
             try:
-                result = await client.request("trigger/filesystem", {})
+                result = await client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
                 assert result["reverseResponse"] == {
                     "jsonrpc": "2.0",
                     "id": "filesystem-1",
@@ -5225,7 +5251,9 @@ def test_filesystem_unknown_reverse_method_is_method_not_found_and_session_survi
         client = _filesystem_client(workspace, "filesystem-unknown", bridge)
         await client.start()
         try:
-            result = await client.request("trigger/filesystem", {})
+            result = await client.request(
+                "trigger/filesystem", {}, reverse_scope="test-execution"
+            )
             assert result["reverseResponse"] == {
                 "jsonrpc": "2.0",
                 "id": "filesystem-1",
@@ -5256,7 +5284,9 @@ def test_filesystem_writer_routes_allowed_and_denied_writes_through_acp_stdio(
             allowed = _filesystem_client(workspace, "filesystem-write", bridge)
             await allowed.start()
             try:
-                result = await allowed.request("trigger/filesystem", {})
+                result = await allowed.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
                 assert result["reverseResponse"]["result"] == {}
             finally:
                 await allowed.close()
@@ -5264,7 +5294,9 @@ def test_filesystem_writer_routes_allowed_and_denied_writes_through_acp_stdio(
             denied = _filesystem_client(workspace, "filesystem-write-denied", bridge)
             await denied.start()
             try:
-                result = await denied.request("trigger/filesystem", {})
+                result = await denied.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
                 assert result["reverseResponse"]["error"] == {
                     "code": -32603,
                     "message": "Internal error",
@@ -5294,7 +5326,9 @@ def test_filesystem_acp_denies_git_metadata_write_without_mutation_or_temp_resid
             client = _filesystem_client(git_metadata, "filesystem-write", bridge)
             await client.start()
             try:
-                result = await client.request("trigger/filesystem", {})
+                result = await client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
                 assert result["reverseResponse"]["error"] == {
                     "code": -32603,
                     "message": "Internal error",
@@ -5626,7 +5660,11 @@ def test_filesystem_acp_close_surfaces_ambiguity_until_write_worker_settles(
             client = _filesystem_client(workspace, "filesystem-write", bridge)
             client._close_timeout = 0.05
             await client.start()
-            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            request = asyncio.create_task(
+                client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
+            )
             assert await asyncio.to_thread(entered.wait, 1)
             try:
                 with pytest.raises(AcpProcessError, match="callback cleanup timed out"):
@@ -5725,7 +5763,9 @@ def test_filesystem_acp_cleanup_ambiguity_is_terminal_and_sanitized(
             client = _filesystem_client(workspace, "filesystem-write", bridge)
             await client.start()
             with pytest.raises(AcpProcessError, match="cleanup ambiguity") as pending:
-                await client.request("trigger/filesystem", {})
+                await client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
             with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
                 await client.close()
             for error in (pending.value, closed.value):
@@ -5775,7 +5815,11 @@ def test_filesystem_acp_cancel_cleanup_ambiguity_is_terminal(
             client = _filesystem_client(workspace, "filesystem-write-hang", bridge)
             client._close_timeout = 0.05
             await client.start()
-            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            request = asyncio.create_task(
+                client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
+            )
             assert await asyncio.to_thread(entered.wait, 1)
             close = asyncio.create_task(client.close())
             for _ in range(100):
@@ -5832,12 +5876,25 @@ def test_filesystem_acp_retains_cleanup_fatal_after_eof_wins_terminal_race(
         async with _active_filesystem_turn(bridge):
             client = _filesystem_client(workspace, "filesystem-write-eof", bridge)
             await client.start()
-            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            request = asyncio.create_task(
+                client.request(
+                    "trigger/filesystem", {}, reverse_scope="test-execution"
+                )
+            )
             assert await asyncio.to_thread(entered.wait, 1)
-            with pytest.raises(AcpProcessError) as pending:
-                await request
-            assert "cleanup ambiguity" not in str(pending.value)
+            for _ in range(100):
+                if client._terminal_error is not None:
+                    break
+                await asyncio.sleep(0.01)
+            assert isinstance(client._terminal_error, AcpProcessError)
+            assert not request.done()
             release.set()
+            with pytest.raises(
+                AcpFatalCallbackError, match="cleanup ambiguity"
+            ) as pending:
+                await request
+            assert "SECRET_LATE_REPLACE" not in str(pending.value)
+            assert "SECRET_LATE_UNLINK" not in str(pending.value)
             for _ in range(100):
                 if bridge._write_worker is None and not client._reverse_tasks:
                     break
@@ -5883,6 +5940,8 @@ def _lifecycle_adapter(
     prompt_write_error: bool = False,
     write_order: list[str] | None = None,
     lifecycle_events: list[str] | None = None,
+    reverse_dispatch_started: asyncio.Event | None = None,
+    reverse_dispatch_release: asyncio.Event | None = None,
     materialize_bundled_skill_at: str | None = None,
     model_state_mutation: str | None = None,
     session_model_state_mutation: str | None = None,
@@ -5976,6 +6035,28 @@ def _lifecycle_adapter(
             config["handshake_rpc_method"] = handshake_rpc_method
         names = ("SYSTEMROOT", "WINDIR", "COMSPEC", "PATH", "PATHEXT")
         class LifecycleProcess(AcpStdioProcess):
+            async def _answer_reverse(
+                self,
+                request_id: int | str,
+                method: str,
+                params: Mapping[str, object],
+                reverse_scope: str | None,
+            ) -> None:
+                if (
+                    child_role == "session"
+                    and method == "fs/write_text_file"
+                    and reverse_dispatch_release is not None
+                ):
+                    assert reverse_dispatch_started is not None
+                    reverse_dispatch_started.set()
+                    await reverse_dispatch_release.wait()
+                await super()._answer_reverse(
+                    request_id,
+                    method,
+                    params,
+                    reverse_scope,
+                )
+
             async def _write(self, message: Mapping[str, object]) -> None:
                 method = message.get("method")
                 if lifecycle_events is not None and isinstance(method, str):
@@ -6122,6 +6203,7 @@ async def _assert_lifecycle_reverse_write_idle(
                 "path": str((workspace / "allowed.txt").resolve(strict=False)),
                 "content": "late-write-must-not-land\n",
             },
+            None,
         )
     assert bridge._reverse_io_attestation()["write_successes"] == successes
 
@@ -8683,17 +8765,38 @@ def test_service_canary_unblocks_grok_spawn_without_a_canary_prompt(
     assert all(child.closed is True for child in children)
 
 
+@pytest.mark.parametrize(
+    "race_boundary",
+    ("admitted-replace", "dispatch-before-admission"),
+)
 def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    race_boundary: str,
 ) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
     binding = _binding(tmp_path)
+    reverse_dispatch_started = asyncio.Event()
+    reverse_dispatch_release = asyncio.Event()
     adapter, trace_path, _children = _lifecycle_adapter(
         tmp_path,
         binding,
-        scenario="filesystem-terminal-race",
+        scenario=(
+            "filesystem-terminal-race"
+            if race_boundary == "admitted-replace"
+            else "filesystem-dispatch-terminal-race"
+        ),
+        reverse_dispatch_started=(
+            reverse_dispatch_started
+            if race_boundary == "dispatch-before-admission"
+            else None
+        ),
+        reverse_dispatch_release=(
+            reverse_dispatch_release
+            if race_boundary == "dispatch-before-admission"
+            else None
+        ),
     )
     paths = resolve_paths(
         {"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt"
@@ -8774,11 +8877,15 @@ def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
             }
         )
         assert ready["state"] == "ready"
-        monkeypatch.setattr(grok_module.os, "replace", blocked_replace)
+        if race_boundary == "admitted-replace":
+            monkeypatch.setattr(grok_module.os, "replace", blocked_replace)
         started = await service.agent_spawn(spawn)
         closed = False
         try:
-            assert await asyncio.to_thread(entered.wait, 2)
+            if race_boundary == "admitted-replace":
+                assert await asyncio.to_thread(entered.wait, 2)
+            else:
+                await asyncio.wait_for(reverse_dispatch_started.wait(), timeout=2)
             for _ in range(200):
                 if any(
                     row.get("method") == "test/terminal-response-sent"
@@ -8797,7 +8904,10 @@ def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
             assert observed.execution_state == "running"
             assert active_writer_leases() == 1
 
-            release.set()
+            if race_boundary == "admitted-replace":
+                release.set()
+            else:
+                reverse_dispatch_release.set()
             for _ in range(100):
                 statuses = await service.agent_wait(
                     WaitRequest((WaitTarget(started.conversation_id),), 0.05)
@@ -8819,6 +8929,7 @@ def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
             closed = True
         finally:
             release.set()
+            reverse_dispatch_release.set()
             if not closed:
                 await service.agent_close(
                     ActionRequest(
