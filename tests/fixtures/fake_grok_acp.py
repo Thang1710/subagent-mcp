@@ -619,6 +619,12 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                 "agentProfile": _lifecycle_agent_profile(config.get("mode"))
             }:
                 return 14
+            (
+                Path(os.environ["GROK_HOME"])
+                / "sessions"
+                / "E%3A%5Cworkspace"
+                / session_id
+            ).mkdir(parents=True, exist_ok=True)
             result: dict[str, object] = {
                 "sessionId": session_id,
                 "models": _lifecycle_model_state(config, session=True),
@@ -640,6 +646,58 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                 if config.get("mode") != "writer":
                     return 15
                 workspace = Path(str(config["workspace_path"]))
+                plan_path = (
+                    Path(os.environ["GROK_HOME"])
+                    / "sessions"
+                    / "E%3A%5Cworkspace"
+                    / session_id
+                    / "plan.md"
+                )
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "internal-plan-write",
+                        "method": "fs/write_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str(plan_path.resolve()),
+                            "content": "PRIVATE_PLAN_CONTENT",
+                            "_meta": {},
+                        },
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "internal-plan-write",
+                    "result": {},
+                }:
+                    _send(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": current["id"],
+                            "result": {"stopReason": "cancelled"},
+                        }
+                    )
+                    current = _read()
+                    continue
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "internal-plan-read",
+                        "method": "fs/read_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str(plan_path.resolve()),
+                            "_meta": {},
+                        },
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "internal-plan-read",
+                    "result": {"content": "PRIVATE_PLAN_CONTENT"},
+                }:
+                    return 17
                 _send(
                     {
                         "jsonrpc": "2.0",

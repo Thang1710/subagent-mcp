@@ -3015,8 +3015,10 @@ def test_filesystem_bridge_denies_reserved_instruction_and_native_surfaces(
     workspace.mkdir()
     target = workspace.joinpath(*PureWindowsPath(reserved).parts)
     target.parent.mkdir(parents=True, exist_ok=True)
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
     bridge = GrokFilesystemBridge(
         workspace=workspace,
+        runtime_home=runtime_home,
         permission_mode="workspace-write",
         write_roots=(".",),
     )
@@ -4407,7 +4409,22 @@ def _filesystem_client(
 _FILESYSTEM_SESSION_ID = "native-session-1"
 
 
+def _runtime_home_with_session(
+    root: Path,
+    *,
+    session_id: str = _FILESYSTEM_SESSION_ID,
+    encoded_cwd: str = "E%3A%5Cworkspace",
+) -> tuple[Path, Path]:
+    runtime_home = root / "runtime-home"
+    session_dir = runtime_home / "sessions" / encoded_cwd / session_id
+    session_dir.mkdir(parents=True, exist_ok=True)
+    return runtime_home, session_dir
+
+
 def _bound_filesystem_bridge(**kwargs: object) -> GrokFilesystemBridge:
+    workspace = Path(os.fspath(kwargs["workspace"]))
+    runtime_home, _session_dir = _runtime_home_with_session(workspace.parent)
+    kwargs.setdefault("runtime_home", runtime_home)
     bridge = GrokFilesystemBridge(**kwargs)  # type: ignore[arg-type]
     bridge.bind_session(_FILESYSTEM_SESSION_ID)
     return bridge
@@ -4507,6 +4524,10 @@ def test_plan_exit_approves_exact_active_writer_once_and_resets_for_followup(
         "read_successes": 0,
         "write_attempts": 0,
         "write_successes": 0,
+        "internal_plan_read_attempts": 0,
+        "internal_plan_read_successes": 0,
+        "internal_plan_write_attempts": 0,
+        "internal_plan_write_successes": 0,
         "plan_exit_attempts": 4,
         "plan_exit_approvals": 2,
         "terminal_attempts": 0,
@@ -4567,6 +4588,33 @@ def test_plan_exit_concurrent_distinct_ids_approve_exactly_one_and_replay_is_ide
     evidence = bridge._reverse_io_attestation()
     assert evidence["plan_exit_attempts"] == 4
     assert evidence["plan_exit_approvals"] == 2
+
+
+def test_plan_exit_shipped_and_current_aliases_share_one_semantic_gate(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+    request = _plan_exit_request(plan_content=None)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            for method in ("x.ai/exit_plan_mode", "_x.ai/exit_plan_mode"):
+                assert await bridge.handle_reverse_request(
+                    method, request, "test-execution"
+                ) == {"outcome": "approved"}
+
+    asyncio.run(scenario())
+    evidence = bridge._reverse_io_attestation()
+    assert evidence["plan_exit_attempts"] == 2
+    assert evidence["plan_exit_approvals"] == 1
 
 
 def test_plan_exit_denies_review_idle_and_foreign_session(tmp_path: Path) -> None:
@@ -4681,8 +4729,8 @@ def test_plan_exit_ignores_unknown_fields_without_retaining_them(
 @pytest.mark.parametrize(
     "method",
     (
-        "_x.ai/exit_plan_mode",
         "x.ai/exit_plan_mode/future",
+        "_x.ai/exit_plan_mode/future",
         "x.ai/request_approval",
     ),
 )
@@ -4711,6 +4759,458 @@ def test_plan_exit_only_recognizes_exact_official_method(
     evidence = bridge._reverse_io_attestation()
     assert evidence["plan_exit_attempts"] == 0
     assert evidence["plan_exit_approvals"] == 0
+
+
+def test_internal_plan_read_write_is_exact_and_separate_from_user_mutations(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    plan = session_dir / "plan.md"
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            assert await bridge.handle_reverse_request(
+                "fs/write_text_file",
+                {
+                    "sessionId": _FILESYSTEM_SESSION_ID,
+                    "path": str(plan.resolve()),
+                    "content": "PRIVATE_INTERNAL_PLAN",
+                },
+                "test-execution",
+            ) == {}
+            assert await bridge.handle_reverse_request(
+                "fs/read_text_file",
+                {
+                    "sessionId": _FILESYSTEM_SESSION_ID,
+                    "path": str(plan.resolve()),
+                },
+                "test-execution",
+            ) == {"content": "PRIVATE_INTERNAL_PLAN"}
+
+    asyncio.run(scenario())
+    assert allowed.read_bytes() == b"before\n"
+    assert plan.read_text("utf-8") == "PRIVATE_INTERNAL_PLAN"
+    evidence = bridge._reverse_io_attestation()
+    assert evidence["read_attempts"] == 0
+    assert evidence["read_successes"] == 0
+    assert evidence["write_attempts"] == 0
+    assert evidence["write_successes"] == 0
+    assert evidence["internal_plan_read_attempts"] == 1
+    assert evidence["internal_plan_read_successes"] == 1
+    assert evidence["internal_plan_write_attempts"] == 1
+    assert evidence["internal_plan_write_successes"] == 1
+    assert "PRIVATE_INTERNAL_PLAN" not in repr(evidence)
+
+
+def test_review_session_binding_does_not_require_internal_plan_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    runtime_home = tmp_path / "runtime-home"
+    workspace.mkdir()
+    runtime_home.mkdir()
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="repo-read",
+        write_roots=(),
+    )
+
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+
+    assert bridge._bound_session_id == _FILESYSTEM_SESSION_ID
+    assert bridge._internal_plan_authority is None
+
+
+def test_reverse_fs_attempts_count_before_payload_validation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/read_text_file", {}, "test-execution"
+                )
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/read_text_file",
+                    {
+                        "sessionId": "foreign-session",
+                        "path": str((session_dir / "plan.md").resolve()),
+                    },
+                    "test-execution",
+                )
+
+    asyncio.run(scenario())
+    evidence = bridge._reverse_io_attestation()
+    assert evidence["read_attempts"] == 1
+    assert evidence["read_successes"] == 0
+    assert evidence["internal_plan_read_attempts"] == 1
+    assert evidence["internal_plan_read_successes"] == 0
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    (
+        "sessions/E%3A%5Cworkspace/foreign-session/plan.md",
+        f"sessions/E%3A%5Cworkspace/{_FILESYSTEM_SESSION_ID}/nested/plan.md",
+        f"sessions/E%3A%5Cworkspace/{_FILESYSTEM_SESSION_ID}/notes.md",
+    ),
+)
+def test_internal_plan_rejects_foreign_session_extra_segments_and_other_files(
+    tmp_path: Path,
+    candidate: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
+    target = runtime_home.joinpath(*PureWindowsPath(candidate).parts)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/write_text_file",
+                    {
+                        "sessionId": _FILESYSTEM_SESSION_ID,
+                        "path": str(target.resolve()),
+                        "content": "must-not-land",
+                    },
+                    "test-execution",
+                )
+
+    asyncio.run(scenario())
+    assert not target.exists()
+    assert allowed.read_bytes() == b"before\n"
+
+
+def test_internal_plan_rejects_runtime_home_escape_and_review_access(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
+    outside = tmp_path / "outside" / "plan.md"
+    outside.parent.mkdir()
+    reviewer = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="repo-read",
+        write_roots=(),
+    )
+    reviewer.bind_session(_FILESYSTEM_SESSION_ID)
+    plan = _session_dir / "plan.md"
+    plan.write_text("private plan", "utf-8")
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(reviewer):
+            for path in (outside, plan):
+                with pytest.raises(GrokPermissionError):
+                    await reviewer.handle_reverse_request(
+                        "fs/read_text_file",
+                        {
+                            "sessionId": _FILESYSTEM_SESSION_ID,
+                            "path": str(path.resolve()),
+                        },
+                        "test-execution",
+                    )
+
+    asyncio.run(scenario())
+    assert not outside.exists()
+
+
+def test_internal_plan_bind_rejects_missing_or_ambiguous_session_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime_home = tmp_path / "runtime-home"
+    runtime_home.mkdir()
+    missing = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=(".",),
+    )
+    with pytest.raises(GrokPermissionError):
+        missing.bind_session(_FILESYSTEM_SESSION_ID)
+
+    for encoded in ("first", "second"):
+        (runtime_home / "sessions" / encoded / _FILESYSTEM_SESSION_ID).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
+    ambiguous = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=(".",),
+    )
+    with pytest.raises(GrokPermissionError):
+        ambiguous.bind_session(_FILESYSTEM_SESSION_ID)
+
+
+@pytest.mark.parametrize("runtime_location", ("inside-workspace", "contains-workspace"))
+def test_internal_plan_runtime_home_must_not_overlap_workspace(
+    tmp_path: Path,
+    runtime_location: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime_home = (
+        workspace / "runtime-home"
+        if runtime_location == "inside-workspace"
+        else tmp_path
+    )
+    runtime_home.mkdir(exist_ok=True)
+
+    with pytest.raises(GrokPermissionError):
+        GrokFilesystemBridge(
+            workspace=workspace,
+            runtime_home=runtime_home,
+            permission_mode="workspace-write",
+            write_roots=(".",),
+        )
+
+
+def test_internal_plan_session_discovery_is_bounded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runtime_home = tmp_path / "runtime-home"
+    for encoded in ("first", "second"):
+        (runtime_home / "sessions" / encoded).mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(grok_module, "_MAX_INTERNAL_PLAN_CWD_DIRS", 1)
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=(".",),
+    )
+
+    with pytest.raises(GrokPermissionError):
+        bridge.bind_session(_FILESYSTEM_SESSION_ID)
+
+
+def test_internal_plan_bind_rejects_synthetic_reparse_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    real_reparse = grok_module._is_reparse_point
+    monkeypatch.setattr(
+        grok_module,
+        "_is_reparse_point",
+        lambda path: Path(path) == session_dir or real_reparse(path),
+    )
+    rejected = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    with pytest.raises(GrokPermissionError):
+        rejected.bind_session(_FILESYSTEM_SESSION_ID)
+
+
+def test_internal_plan_rejects_hardlinked_plan(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    outside_file = tmp_path / "outside-plan.md"
+    outside_file.write_text("outside", "utf-8")
+    plan = session_dir / "plan.md"
+    try:
+        os.link(outside_file, plan)
+    except OSError as exc:
+        pytest.skip(f"hardlink creation unavailable: {exc}")
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    with pytest.raises(GrokPermissionError):
+        bridge.bind_session(_FILESYSTEM_SESSION_ID)
+    assert outside_file.read_text("utf-8") == "outside"
+    assert plan.read_text("utf-8") == "outside"
+
+
+@pytest.mark.parametrize("drift_target", ("session-parent", "existing-plan"))
+def test_internal_plan_identity_drift_fails_before_atomic_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift_target: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    allowed = workspace / "allowed.txt"
+    allowed.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    plan = session_dir / "plan.md"
+    if drift_target == "existing-plan":
+        plan.write_bytes(b"original-plan\n")
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("allowed.txt",),
+    )
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+    real_identity = grok_module._filesystem_identity
+    observed_calls = 0
+
+    def drifted_identity(path: Path) -> tuple[int, int]:
+        nonlocal observed_calls
+        identity = real_identity(path)
+        watched = session_dir if drift_target == "session-parent" else plan
+        if Path(path) == watched:
+            observed_calls += 1
+            drift_call = 4 if drift_target == "session-parent" else 2
+            if observed_calls == drift_call:
+                return identity[0], identity[1] + 1
+        return identity
+
+    monkeypatch.setattr(grok_module, "_filesystem_identity", drifted_identity)
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/write_text_file",
+                    {
+                        "sessionId": _FILESYSTEM_SESSION_ID,
+                        "path": str(plan.resolve()),
+                        "content": "must-not-land",
+                    },
+                    "test-execution",
+                )
+
+    asyncio.run(scenario())
+    if drift_target == "existing-plan":
+        assert plan.read_bytes() == b"original-plan\n"
+    else:
+        assert not plan.exists()
+    assert not tuple(session_dir.glob("*.subagent-mcp-*.tmp"))
+
+
+@pytest.mark.parametrize("target_kind", ("workspace", "internal-plan"))
+@pytest.mark.parametrize("fence", ("context", "cancel"))
+def test_internal_plan_and_workspace_final_authority_fence_after_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    target_kind: str,
+    fence: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    runtime_home, session_dir = _runtime_home_with_session(tmp_path)
+    plan = session_dir / "plan.md"
+    plan.write_bytes(b"before-plan\n")
+    context_drifted = False
+
+    def context_guard() -> None:
+        if context_drifted:
+            raise ServiceError(
+                "CONTEXT_DRIFT",
+                "synthetic context drift",
+                category="context",
+            )
+
+    bridge = GrokFilesystemBridge(
+        workspace=workspace,
+        runtime_home=runtime_home,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+        context_guard=context_guard,
+    )
+    bridge.bind_session(_FILESYSTEM_SESSION_ID)
+    real_revalidate = bridge._revalidate_before_replace
+
+    def drift_after_revalidation(*args: object) -> None:
+        nonlocal context_drifted
+        real_revalidate(*args)
+        if fence == "context":
+            context_drifted = True
+        else:
+            assert bridge._write_cancel is not None
+            bridge._write_cancel.set()
+
+    monkeypatch.setattr(
+        bridge,
+        "_revalidate_before_replace",
+        drift_after_revalidation,
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(GrokPermissionError):
+            if target_kind == "workspace":
+                await bridge.write_text_file(
+                    _filesystem_write_request(workspace, "exact.py", "must-not-land\n")
+                )
+                return
+            async with _active_filesystem_turn(bridge):
+                await bridge.handle_reverse_request(
+                    "fs/write_text_file",
+                    {
+                        "sessionId": _FILESYSTEM_SESSION_ID,
+                        "path": str(plan.resolve()),
+                        "content": "must-not-land",
+                    },
+                    "test-execution",
+                )
+
+    asyncio.run(scenario())
+    assert exact.read_bytes() == b"before\n"
+    assert plan.read_bytes() == b"before-plan\n"
+    assert not tuple(workspace.glob("*.subagent-mcp-*.tmp"))
+    assert not tuple(session_dir.glob("*.subagent-mcp-*.tmp"))
 
 
 def test_plan_exit_rejects_oversized_content_without_retaining_it(
@@ -5012,6 +5512,10 @@ def test_reverse_io_attestation_saturates_without_retaining_request_data(
         "read_successes": 1,
         "write_attempts": 0,
         "write_successes": 0,
+        "internal_plan_read_attempts": 0,
+        "internal_plan_read_successes": 0,
+        "internal_plan_write_attempts": 0,
+        "internal_plan_write_successes": 0,
         "plan_exit_attempts": 0,
         "plan_exit_approvals": 0,
         "terminal_attempts": 0,
@@ -5029,8 +5533,10 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
     workspace.mkdir()
     source = workspace / "README.md"
     source.write_bytes(b"one\ntwo\nthree\n")
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
     bridge = GrokFilesystemBridge(
         workspace=workspace,
+        runtime_home=runtime_home,
         permission_mode="repo-read",
         write_roots=(),
     )
@@ -5126,10 +5632,12 @@ def test_workspace_root_reparse_is_rejected_before_outside_read_or_write(
 
     monkeypatch.setattr(Path, "open", guarded_path_open)
     monkeypatch.setattr(grok_module.os, "open", guarded_os_open)
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
 
     with pytest.raises(GrokPermissionError):
         GrokFilesystemBridge(
             workspace=lexical_workspace,
+            runtime_home=runtime_home,
             permission_mode="workspace-write",
             write_roots=(".",),
         )
@@ -5147,8 +5655,10 @@ def test_filesystem_root_identity_drift_blocks_before_read(
     workspace.mkdir()
     source = workspace / "README.md"
     source.write_text("inside\n", "utf-8")
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
     bridge = GrokFilesystemBridge(
         workspace=workspace,
+        runtime_home=runtime_home,
         permission_mode="repo-read",
         write_roots=(),
     )
@@ -5638,10 +6148,12 @@ def test_filesystem_acp_denies_git_metadata_write_without_mutation_or_temp_resid
 def test_filesystem_rejects_overlapping_write_roots(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     (workspace / "src" / "nested").mkdir(parents=True)
+    runtime_home, _session_dir = _runtime_home_with_session(tmp_path)
 
     with pytest.raises(GrokPermissionError):
         GrokFilesystemBridge(
             workspace=workspace,
+            runtime_home=runtime_home,
             permission_mode="workspace-write",
             write_roots=("src", "SRC/nested"),
         )
@@ -6776,6 +7288,10 @@ def test_lifecycle_writer_approves_plan_exit_before_two_bounded_writes(
         "read_successes": 0,
         "write_attempts": 2,
         "write_successes": 2,
+        "internal_plan_read_attempts": 1,
+        "internal_plan_read_successes": 1,
+        "internal_plan_write_attempts": 1,
+        "internal_plan_write_successes": 1,
         "plan_exit_attempts": 1,
         "plan_exit_approvals": 1,
         "terminal_attempts": 0,
@@ -6784,6 +7300,10 @@ def test_lifecycle_writer_approves_plan_exit_before_two_bounded_writes(
     }
     assert "PRIVATE_PLAN_CONTENT" not in repr(observed[3])
     assert (generated / "new.txt").read_bytes() == b"approved-write-two\n"
+    session_home = Path(children[1]._env["GROK_HOME"])
+    plans = tuple(session_home.glob("sessions/*/*/plan.md"))
+    assert len(plans) == 1
+    assert plans[0].read_text("utf-8") == "PRIVATE_PLAN_CONTENT"
     assert all(child.closed for child in children)
 
 
@@ -6882,6 +7402,10 @@ def test_lifecycle_fake_exercises_canonical_acp_filesystem_wire(
             "read_successes": 1,
             "write_attempts": 1,
             "write_successes": 1,
+            "internal_plan_read_attempts": 0,
+            "internal_plan_read_successes": 0,
+            "internal_plan_write_attempts": 0,
+            "internal_plan_write_successes": 0,
             "plan_exit_attempts": 0,
             "plan_exit_approvals": 0,
             "terminal_attempts": 0,
@@ -7119,6 +7643,10 @@ def test_lifecycle_review_uses_reverse_read_and_denies_write_and_terminal(
             "read_successes": 1,
             "write_attempts": 1,
             "write_successes": 0,
+            "internal_plan_read_attempts": 0,
+            "internal_plan_read_successes": 0,
+            "internal_plan_write_attempts": 0,
+            "internal_plan_write_successes": 0,
             "plan_exit_attempts": 0,
             "plan_exit_approvals": 0,
             "terminal_attempts": 1,
@@ -7714,6 +8242,10 @@ def test_snapshot_does_not_claim_unreported_spend_state(tmp_path: Path) -> None:
             "read_successes": 0,
             "write_attempts": 0,
             "write_successes": 0,
+            "internal_plan_read_attempts": 0,
+            "internal_plan_read_successes": 0,
+            "internal_plan_write_attempts": 0,
+            "internal_plan_write_successes": 0,
             "plan_exit_attempts": 0,
             "plan_exit_approvals": 0,
             "terminal_attempts": 0,
@@ -7730,6 +8262,10 @@ def test_snapshot_does_not_claim_unreported_spend_state(tmp_path: Path) -> None:
         "read_successes": 0,
         "write_attempts": 0,
         "write_successes": 0,
+        "internal_plan_read_attempts": 0,
+        "internal_plan_read_successes": 0,
+        "internal_plan_write_attempts": 0,
+        "internal_plan_write_successes": 0,
         "plan_exit_attempts": 0,
         "plan_exit_approvals": 0,
         "terminal_attempts": 0,

@@ -77,12 +77,17 @@ _AGENT_TYPE_EVIDENCE_SOURCE = (
 _MAX_AGENT_TYPE_BYTES = 128
 _ACP_FS_TRANSPORT = ("read_text_file", "write_text_file")
 _MAX_REVERSE_IO_COUNT = 2_147_483_647
+_MAX_INTERNAL_PLAN_CWD_DIRS = 4096
 _REVERSE_IO_SCOPE = "native-session-cumulative"
 _REVERSE_IO_COUNTERS = (
     "read_attempts",
     "read_successes",
     "write_attempts",
     "write_successes",
+    "internal_plan_read_attempts",
+    "internal_plan_read_successes",
+    "internal_plan_write_attempts",
+    "internal_plan_write_successes",
     "plan_exit_attempts",
     "plan_exit_approvals",
     "terminal_attempts",
@@ -318,6 +323,25 @@ class _GrokWriteRoot:
     anchor_identity: tuple[int, int]
 
 
+@dataclass(frozen=True, slots=True)
+class _GrokFilesystemTarget:
+    root: Path
+    parts: tuple[str, ...]
+    internal_plan: bool
+
+
+@dataclass(frozen=True, slots=True)
+class _GrokInternalPlanAuthority:
+    sessions_path: Path
+    sessions_identity: tuple[int, int]
+    encoded_path: Path
+    encoded_identity: tuple[int, int]
+    session_path: Path
+    session_identity: tuple[int, int]
+    plan_path: Path
+    plan_parts: tuple[str, ...]
+
+
 class GrokFilesystemBridge:
     """Enforce bounded ACP text-file access inside one canonical workspace."""
 
@@ -325,6 +349,7 @@ class GrokFilesystemBridge:
         self,
         *,
         workspace: str | os.PathLike[str],
+        runtime_home: str | os.PathLike[str],
         permission_mode: str,
         write_roots: Sequence[str],
         max_file_bytes: int = _MAX_FILESYSTEM_FILE_BYTES,
@@ -344,6 +369,18 @@ class GrokFilesystemBridge:
             raise GrokPermissionError("Grok workspace is unavailable") from exc
         if not canonical_workspace.is_dir():
             raise GrokPermissionError("Grok workspace is unavailable")
+        try:
+            canonical_runtime_home, runtime_home_identity = _attest_workspace_root(
+                runtime_home
+            )
+        except (OSError, RuntimeError, GrokPermissionError) as exc:
+            raise GrokPermissionError("Grok isolated runtime home is unavailable") from exc
+        if (
+            not canonical_runtime_home.is_dir()
+            or _windows_contains(canonical_runtime_home, canonical_workspace)
+            or _windows_contains(canonical_workspace, canonical_runtime_home)
+        ):
+            raise GrokPermissionError("Grok isolated runtime home is unsafe")
         if permission_mode == "repo-read" and write_roots:
             raise GrokPermissionError("Review mode cannot declare write roots")
         if permission_mode == "workspace-write" and not 1 <= len(write_roots) <= 32:
@@ -351,7 +388,10 @@ class GrokFilesystemBridge:
 
         self._workspace = canonical_workspace
         self._workspace_identity = workspace_identity
+        self._runtime_home = canonical_runtime_home
+        self._runtime_home_identity = runtime_home_identity
         self._bound_session_id: str | None = None
+        self._internal_plan_authority: _GrokInternalPlanAuthority | None = None
         self._permission_mode = permission_mode
         self._max_file_bytes = max_file_bytes
         self._context_guard = context_guard
@@ -375,18 +415,38 @@ class GrokFilesystemBridge:
     async def read_text_file(
         self, params: Mapping[str, object]
     ) -> Mapping[str, object]:
-        values = _filesystem_read_params(params, self._bound_session_id)
-        path = self._relative_acp_path(values["path"])
+        target, line, limit = self._prepare_read(params, allow_internal_plan=False)
         return await asyncio.to_thread(
             self._read_text_file,
-            path,
-            values.get("line"),
-            values.get("limit"),
+            target,
+            line,
+            limit,
         )
 
     async def write_text_file(
         self, params: Mapping[str, object]
     ) -> Mapping[str, object]:
+        target, encoded = self._prepare_write(params, allow_internal_plan=False)
+        return await self._write_prepared(target, encoded)
+
+    def _prepare_read(
+        self,
+        params: Mapping[str, object],
+        *,
+        allow_internal_plan: bool,
+    ) -> tuple[_GrokFilesystemTarget, int | None, int | None]:
+        values = _filesystem_read_params(params, self._bound_session_id)
+        target = self._filesystem_target(
+            values["path"], allow_internal_plan=allow_internal_plan
+        )
+        return target, values.get("line"), values.get("limit")
+
+    def _prepare_write(
+        self,
+        params: Mapping[str, object],
+        *,
+        allow_internal_plan: bool,
+    ) -> tuple[_GrokFilesystemTarget, bytes]:
         if self._permission_mode != "workspace-write":
             raise GrokPermissionError("Grok filesystem write is not authorized")
         values = _filesystem_write_params(params, self._bound_session_id)
@@ -399,12 +459,22 @@ class GrokFilesystemBridge:
             raise GrokPermissionError("Grok filesystem content is not UTF-8") from exc
         if len(encoded) > self._max_file_bytes:
             raise GrokPermissionError("Grok filesystem content is too large")
+        target = self._filesystem_target(
+            values["path"], allow_internal_plan=allow_internal_plan
+        )
+        return target, encoded
+
+    async def _write_prepared(
+        self,
+        target: _GrokFilesystemTarget,
+        encoded: bytes,
+    ) -> Mapping[str, object]:
         async with self._write_lock:
             cancel_event = threading.Event()
             worker = asyncio.create_task(
                 asyncio.to_thread(
                     self._write_text_file,
-                    self._relative_acp_path(values["path"]),
+                    target,
                     encoded,
                     cancel_event,
                 )
@@ -433,7 +503,7 @@ class GrokFilesystemBridge:
         params: Mapping[str, object],
         reverse_scope: str | None,
     ) -> Mapping[str, object]:
-        if method == "x.ai/exit_plan_mode":
+        if method in {"x.ai/exit_plan_mode", "_x.ai/exit_plan_mode"}:
             self._record_reverse_io("plan_exit_attempts")
             execution_id = await self._admit_reverse_callback(reverse_scope)
             try:
@@ -442,6 +512,13 @@ class GrokFilesystemBridge:
                 session_id, tool_call_id = _plan_exit_params(params)
                 if session_id != self._bound_session_id:
                     raise GrokPermissionError("Grok plan exit session is invalid")
+                authority = self._internal_plan_authority
+                if authority is None:
+                    raise GrokPermissionError("Grok plan exit is not authorized")
+                await asyncio.to_thread(
+                    self._validate_internal_plan_authority,
+                    authority,
+                )
                 async with self._turn_condition:
                     if self._reverse_execution_id != execution_id:
                         raise GrokPermissionError(
@@ -462,18 +539,31 @@ class GrokFilesystemBridge:
             execution_id = await self._admit_reverse_callback(reverse_scope)
             try:
                 if method == "fs/read_text_file":
-                    self._record_reverse_io("read_attempts")
-                    result = await self.read_text_file(params)
-                    self._record_reverse_io("read_successes")
+                    prefix = self._reverse_fs_counter_prefix(params)
+                    self._record_reverse_io(f"{prefix}read_attempts")
+                    target, line, limit = self._prepare_read(
+                        params, allow_internal_plan=True
+                    )
+                    result = await asyncio.to_thread(
+                        self._read_text_file,
+                        target,
+                        line,
+                        limit,
+                    )
+                    self._record_reverse_io(f"{prefix}read_successes")
                     return result
-                self._record_reverse_io("write_attempts")
+                prefix = self._reverse_fs_counter_prefix(params)
+                self._record_reverse_io(f"{prefix}write_attempts")
+                target, encoded = self._prepare_write(
+                    params, allow_internal_plan=True
+                )
                 try:
-                    result = await self.write_text_file(params)
+                    result = await self._write_prepared(target, encoded)
                 except GrokFilesystemCleanupError as exc:
                     raise AcpFatalCallbackError(
                         "ACP filesystem cleanup ambiguity"
                     ) from exc
-                self._record_reverse_io("write_successes")
+                self._record_reverse_io(f"{prefix}write_successes")
                 return result
             finally:
                 await self._finish_reverse_callback(execution_id)
@@ -560,26 +650,179 @@ class GrokFilesystemBridge:
 
     def bind_session(self, session_id: object) -> None:
         normalized = _bounded_public_text(session_id, 256)
-        if normalized is None or self._bound_session_id is not None:
+        if (
+            normalized is None
+            or not _safe_single_path_segment(normalized)
+            or self._bound_session_id is not None
+        ):
             raise GrokPermissionError("Grok filesystem session binding is invalid")
+        authority = (
+            self._discover_internal_plan_authority(normalized)
+            if self._permission_mode == "workspace-write" and self._write_roots
+            else None
+        )
         self._bound_session_id = normalized
+        self._internal_plan_authority = authority
 
-    def _relative_acp_path(self, value: str) -> str:
+    def _reverse_fs_counter_prefix(self, params: Mapping[str, object]) -> str:
+        authority = self._internal_plan_authority
+        if authority is None:
+            return ""
+        try:
+            absolute = _lexical_local_dos_path(params.get("path"), "filesystem")
+        except GrokBindingIncompatible:
+            return ""
+        return (
+            "internal_plan_"
+            if absolute == PureWindowsPath(str(authority.plan_path))
+            else ""
+        )
+
+    def _filesystem_target(
+        self,
+        value: str,
+        *,
+        allow_internal_plan: bool,
+    ) -> _GrokFilesystemTarget:
         try:
             absolute = _lexical_local_dos_path(value, "filesystem")
         except GrokBindingIncompatible as exc:
             raise GrokPermissionError("Grok filesystem path is invalid") from exc
-        boundary = PureWindowsPath(str(self._workspace))
+        workspace_boundary = PureWindowsPath(str(self._workspace))
         try:
-            relative = absolute.relative_to(boundary)
-        except ValueError as exc:
+            relative = absolute.relative_to(workspace_boundary)
+        except ValueError:
+            relative = None
+        if relative is not None:
+            parts = tuple(relative.parts)
+            if not parts:
+                raise GrokPermissionError("Grok filesystem path is invalid")
+            return _GrokFilesystemTarget(self._workspace, parts, False)
+
+        authority = self._internal_plan_authority
+        if (
+            not allow_internal_plan
+            or self._permission_mode != "workspace-write"
+            or not self._write_roots
+            or authority is None
+            or absolute != PureWindowsPath(str(authority.plan_path))
+        ):
+            raise GrokPermissionError("Grok filesystem path is not authorized")
+        return _GrokFilesystemTarget(
+            self._runtime_home,
+            authority.plan_parts,
+            True,
+        )
+
+    def _discover_internal_plan_authority(
+        self,
+        session_id: str,
+    ) -> _GrokInternalPlanAuthority:
+        self._validate_runtime_home()
+        sessions_path = _resolve_existing_directory(self._runtime_home, ("sessions",))
+        sessions_identity = _filesystem_identity(sessions_path)
+        matches: list[_GrokInternalPlanAuthority] = []
+        try:
+            with os.scandir(sessions_path) as entries:
+                for index, entry in enumerate(entries, start=1):
+                    if index > _MAX_INTERNAL_PLAN_CWD_DIRS:
+                        raise GrokPermissionError(
+                            "Grok internal plan session scan is too large"
+                        )
+                    encoded_path = Path(entry.path)
+                    if _is_reparse_point(encoded_path):
+                        raise GrokPermissionError(
+                            "Grok internal plan session path is unsafe"
+                        )
+                    if not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if not _safe_single_path_segment(entry.name):
+                        continue
+                    candidate = encoded_path / session_id
+                    if not os.path.lexists(candidate):
+                        continue
+                    if _is_reparse_point(candidate):
+                        raise GrokPermissionError(
+                            "Grok internal plan session path is unsafe"
+                        )
+                    session_path = _resolve_existing_directory(
+                        self._runtime_home,
+                        ("sessions", entry.name, session_id),
+                    )
+                    encoded_resolved = _resolve_existing_directory(
+                        self._runtime_home,
+                        ("sessions", entry.name),
+                    )
+                    plan_parts = ("sessions", entry.name, session_id, "plan.md")
+                    matches.append(
+                        _GrokInternalPlanAuthority(
+                            sessions_path=sessions_path,
+                            sessions_identity=sessions_identity,
+                            encoded_path=encoded_resolved,
+                            encoded_identity=_filesystem_identity(encoded_resolved),
+                            session_path=session_path,
+                            session_identity=_filesystem_identity(session_path),
+                            plan_path=session_path / "plan.md",
+                            plan_parts=plan_parts,
+                        )
+                    )
+        except GrokPermissionError:
+            raise
+        except OSError as exc:
             raise GrokPermissionError(
-                "Grok filesystem path is outside the workspace"
+                "Grok internal plan session scan failed"
             ) from exc
-        parts = tuple(relative.parts)
-        if not parts:
-            raise GrokPermissionError("Grok filesystem path is invalid")
-        return str(PureWindowsPath(*parts))
+        if len(matches) != 1:
+            raise GrokPermissionError(
+                "Grok internal plan session authority is missing or ambiguous"
+            )
+        authority = matches[0]
+        self._validate_internal_plan_authority(authority)
+        return authority
+
+    def _validate_runtime_home(self) -> None:
+        try:
+            current, identity = _attest_workspace_root(self._runtime_home)
+        except (GrokPermissionError, OSError, RuntimeError) as exc:
+            raise GrokPermissionError("Grok isolated runtime home changed") from exc
+        if current != self._runtime_home or identity != self._runtime_home_identity:
+            raise GrokPermissionError("Grok isolated runtime home changed")
+
+    def _validate_internal_plan_authority(
+        self,
+        authority: _GrokInternalPlanAuthority,
+    ) -> None:
+        self._validate_runtime_home()
+        for path, identity in (
+            (authority.sessions_path, authority.sessions_identity),
+            (authority.encoded_path, authority.encoded_identity),
+            (authority.session_path, authority.session_identity),
+        ):
+            try:
+                details = path.lstat()
+                current = path.resolve(strict=True)
+            except (OSError, RuntimeError) as exc:
+                raise GrokPermissionError(
+                    "Grok internal plan session authority changed"
+                ) from exc
+            if (
+                _is_reparse_point(path)
+                or not stat.S_ISDIR(details.st_mode)
+                or current != path
+                or _filesystem_identity(current) != identity
+                or not _windows_contains(current, self._runtime_home)
+            ):
+                raise GrokPermissionError(
+                    "Grok internal plan session authority changed"
+                )
+        _reject_reparse_chain(self._runtime_home, authority.plan_parts)
+        if os.path.lexists(authority.plan_path):
+            current_plan = _resolve_existing_file(
+                self._runtime_home,
+                authority.plan_parts,
+            )
+            if current_plan != authority.plan_path:
+                raise GrokPermissionError("Grok internal plan file changed")
 
     def _build_write_root(self, value: object) -> _GrokWriteRoot:
         if value == ".":
@@ -622,16 +865,20 @@ class GrokFilesystemBridge:
 
     def _read_text_file(
         self,
-        value: str,
+        request_target: _GrokFilesystemTarget,
         line: int | None,
         limit: int | None,
     ) -> Mapping[str, object]:
         self._guard_context()
-        parts = _windows_relative_parts(value)
-        target = _resolve_existing_file(self._workspace, parts)
-        expected = _filesystem_identity(target)
+        if request_target.internal_plan:
+            authority = self._internal_plan_authority
+            if authority is None:
+                raise GrokPermissionError("Grok internal plan authority is unavailable")
+            self._validate_internal_plan_authority(authority)
+        path = _resolve_existing_file(request_target.root, request_target.parts)
+        expected = _filesystem_identity(path)
         try:
-            with target.open("rb") as stream:
+            with path.open("rb") as stream:
                 opened = os.fstat(stream.fileno())
                 if (
                     (opened.st_dev, opened.st_ino) != expected
@@ -663,25 +910,33 @@ class GrokFilesystemBridge:
 
     def _write_text_file(
         self,
-        value: str,
+        request_target: _GrokFilesystemTarget,
         data: bytes,
         cancel_event: threading.Event,
     ) -> Mapping[str, object]:
-        parts = _windows_relative_parts(value)
-        _reject_reserved_writer_path(parts)
+        parts = request_target.parts
+        if not request_target.internal_plan:
+            _reject_reserved_writer_path(parts)
         self._guard_context()
-        root = self._authorized_root(parts)
-        parent = _resolve_existing_directory(self._workspace, parts[:-1])
-        self._validate_root_anchor(root)
+        root: _GrokWriteRoot | None = None
+        if request_target.internal_plan:
+            authority = self._internal_plan_authority
+            if authority is None:
+                raise GrokPermissionError("Grok internal plan authority is unavailable")
+            self._validate_internal_plan_authority(authority)
+        else:
+            root = self._authorized_root(parts)
+            self._validate_root_anchor(root)
+        parent = _resolve_existing_directory(request_target.root, parts[:-1])
         parent_identity = _filesystem_identity(parent)
         target = parent / parts[-1]
         before_identity: tuple[int, int] | None
         if target.exists():
-            existing = _resolve_existing_file(self._workspace, parts)
+            existing = _resolve_existing_file(request_target.root, parts)
             before_identity = _filesystem_identity(existing)
             target = existing
         else:
-            _reject_reparse_chain(self._workspace, parts)
+            _reject_reparse_chain(request_target.root, parts)
             before_identity = None
 
         descriptor = -1
@@ -701,7 +956,11 @@ class GrokFilesystemBridge:
                 os.fsync(stream.fileno())
             if cancel_event.is_set():
                 raise GrokPermissionError("Grok filesystem write was cancelled")
+            self._guard_context()
+            if cancel_event.is_set():
+                raise GrokPermissionError("Grok filesystem write was cancelled")
             self._revalidate_before_replace(
+                request_target,
                 root,
                 parts,
                 parent,
@@ -741,6 +1000,7 @@ class GrokFilesystemBridge:
 
     def _guard_context(self) -> None:
         self._validate_workspace_root()
+        self._validate_runtime_home()
         if self._context_guard is None:
             return
         try:
@@ -779,14 +1039,23 @@ class GrokFilesystemBridge:
 
     def _revalidate_before_replace(
         self,
-        root: _GrokWriteRoot,
+        request_target: _GrokFilesystemTarget,
+        root: _GrokWriteRoot | None,
         parts: tuple[str, ...],
         parent: Path,
         parent_identity: tuple[int, int],
         before_identity: tuple[int, int] | None,
     ) -> None:
-        self._validate_root_anchor(root)
-        current_parent = _resolve_existing_directory(self._workspace, parts[:-1])
+        if request_target.internal_plan:
+            authority = self._internal_plan_authority
+            if authority is None:
+                raise GrokPermissionError("Grok internal plan authority is unavailable")
+            self._validate_internal_plan_authority(authority)
+        else:
+            if root is None:
+                raise GrokPermissionError("Grok write root changed")
+            self._validate_root_anchor(root)
+        current_parent = _resolve_existing_directory(request_target.root, parts[:-1])
         if (
             current_parent != parent
             or _filesystem_identity(current_parent) != parent_identity
@@ -796,9 +1065,9 @@ class GrokFilesystemBridge:
         if before_identity is None:
             if target.exists() or target.is_symlink():
                 raise GrokPermissionError("Grok filesystem target changed")
-            _reject_reparse_chain(self._workspace, parts)
+            _reject_reparse_chain(request_target.root, parts)
             return
-        current_target = _resolve_existing_file(self._workspace, parts)
+        current_target = _resolve_existing_file(request_target.root, parts)
         if _filesystem_identity(current_target) != before_identity:
             raise GrokPermissionError("Grok filesystem target changed")
 
@@ -2280,6 +2549,7 @@ class GrokBuildAdapter:
                 try:
                     bridge = GrokFilesystemBridge(
                         workspace=context.workspace_path,
+                        runtime_home=self._runtime_home,
                         permission_mode=(
                             "workspace-write" if mode == "writer" else "repo-read"
                         ),
@@ -6251,6 +6521,17 @@ def _windows_relative_parts(value: object) -> tuple[str, ...]:
         ):
             raise GrokPermissionError("Grok filesystem path is invalid")
     return parts
+
+
+def _safe_single_path_segment(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        parts = _windows_relative_parts(value)
+        encoded = value.encode("utf-8", errors="strict")
+    except (GrokPermissionError, UnicodeError):
+        return False
+    return len(parts) == 1 and parts[0] == value and len(encoded) <= 255
 
 
 def _is_grok_instruction_basename(value: str) -> bool:
