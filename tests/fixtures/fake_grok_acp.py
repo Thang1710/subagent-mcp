@@ -715,6 +715,28 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                     "error": {"code": -32603, "message": "Internal error"},
                 }:
                     return 13
+            elif scenario == "filesystem-terminal-race":
+                if config.get("mode") != "writer":
+                    return 14
+                workspace = Path(str(config["workspace_path"]))
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-terminal-race-write",
+                        "method": "fs/write_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str((workspace / "allowed.txt").resolve()),
+                            "content": "terminal-race-write\n",
+                            "_meta": {},
+                        },
+                    }
+                )
+                deadline = time.monotonic() + 2
+                while not tuple(workspace.glob(".allowed.txt.subagent-mcp-*.tmp")):
+                    if time.monotonic() >= deadline:
+                        return 15
+                    time.sleep(0.005)
             if scenario == "process-exit":
                 return 7
             if scenario == "rpc-error":
@@ -743,6 +765,12 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                 pending_prompt = current
             else:
                 _lifecycle_finish_prompt(current, config, session_id)
+                if scenario == "filesystem-terminal-race":
+                    _trace(
+                        trace_path,
+                        {"method": "test/terminal-response-sent"},
+                        child_role=str(config.get("child_role", "session")),
+                    )
         elif method == "session/cancel" and pending_prompt is not None:
             if config.get("scenario") == "cancel-timeout":
                 continue

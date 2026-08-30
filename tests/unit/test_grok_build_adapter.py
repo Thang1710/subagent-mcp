@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Mapping
-from contextlib import contextmanager
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 import hashlib
 import json
@@ -25,6 +25,7 @@ from subagent_harness_mcp.adapters.base import (
     AdapterContextRequest,
     AdapterSendRequest,
     AdapterSessionRequest,
+    AdapterSnapshot,
     AdapterSpawnRequest,
     CanaryAdapter,
     CanaryRequest,
@@ -4408,6 +4409,18 @@ def _bound_filesystem_bridge(**kwargs: object) -> GrokFilesystemBridge:
     return bridge
 
 
+@asynccontextmanager
+async def _active_filesystem_turn(
+    bridge: GrokFilesystemBridge,
+    execution_id: str = "test-execution",
+) -> AsyncIterator[None]:
+    await bridge.activate_turn(execution_id)
+    try:
+        yield
+    finally:
+        await bridge.deactivate_turn(execution_id)
+
+
 def _filesystem_read_request(
     workspace: Path,
     relative_path: str,
@@ -4430,6 +4443,161 @@ def _filesystem_write_request(
         **_filesystem_read_request(workspace, relative_path, **optional),
         "content": content,
     }
+
+
+def test_reverse_filesystem_write_requires_active_execution(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(GrokPermissionError):
+            await bridge.handle_reverse_request(
+                "fs/write_text_file",
+                _filesystem_write_request(workspace, "exact.py", "idle\n"),
+            )
+
+    asyncio.run(scenario())
+    assert exact.read_bytes() == b"before\n"
+    assert bridge._reverse_io_attestation()["write_successes"] == 0
+
+
+def test_reverse_filesystem_read_requires_active_execution(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "README.md").write_bytes(b"private-until-active\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="repo-read",
+        write_roots=(),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(GrokPermissionError):
+            await bridge.handle_reverse_request(
+                "fs/read_text_file",
+                _filesystem_read_request(workspace, "README.md"),
+            )
+
+    asyncio.run(scenario())
+    assert bridge._reverse_io_attestation()["read_successes"] == 0
+
+
+def test_reverse_filesystem_write_accepts_exact_active_execution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        await bridge.activate_turn("execution-1")
+        with pytest.raises(GrokPermissionError):
+            await bridge.activate_turn("execution-2")
+        with pytest.raises(GrokPermissionError):
+            await bridge.deactivate_turn("execution-2")
+        assert await bridge.handle_reverse_request(
+            "fs/write_text_file",
+            _filesystem_write_request(workspace, "exact.py", "active\n"),
+        ) == {}
+        await bridge.deactivate_turn("execution-1")
+
+    asyncio.run(scenario())
+    assert exact.read_bytes() == b"active\n"
+    assert bridge._reverse_io_attestation()["write_successes"] == 1
+
+
+def test_reverse_filesystem_deactivation_waits_for_admitted_replace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_replace = grok_module.os.replace
+
+    def blocked_replace(source: object, target: object) -> None:
+        entered.set()
+        assert release.wait(timeout=2)
+        real_replace(source, target)
+
+    monkeypatch.setattr(grok_module.os, "replace", blocked_replace)
+
+    async def scenario() -> None:
+        await bridge.activate_turn("execution-1")
+        write = asyncio.create_task(
+            bridge.handle_reverse_request(
+                "fs/write_text_file",
+                _filesystem_write_request(workspace, "exact.py", "settled\n"),
+            )
+        )
+        assert await asyncio.to_thread(entered.wait, 1)
+        deactivation = asyncio.create_task(bridge.deactivate_turn("execution-1"))
+        await asyncio.sleep(0)
+        assert not deactivation.done()
+        release.set()
+        await asyncio.wait_for(deactivation, timeout=1)
+        assert exact.read_bytes() == b"settled\n"
+        assert await write == {}
+
+    asyncio.run(scenario())
+
+
+def test_reverse_filesystem_late_write_is_denied_until_next_execution(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        await bridge.activate_turn("execution-1")
+        await bridge.deactivate_turn("execution-1")
+        successes = bridge._reverse_io_attestation()["write_successes"]
+        with pytest.raises(GrokPermissionError):
+            await bridge.handle_reverse_request(
+                "fs/write_text_file",
+                _filesystem_write_request(workspace, "exact.py", "late\n"),
+            )
+        assert exact.read_bytes() == b"before\n"
+        assert bridge._reverse_io_attestation()["write_successes"] == successes
+
+        await bridge.activate_turn("execution-2")
+        assert await bridge.handle_reverse_request(
+            "fs/write_text_file",
+            _filesystem_write_request(workspace, "exact.py", "next\n"),
+        ) == {}
+        await bridge.deactivate_turn("execution-2")
+
+    asyncio.run(scenario())
+    assert exact.read_bytes() == b"next\n"
+    assert bridge._reverse_io_attestation()["write_successes"] == 1
 
 
 def test_filesystem_review_reads_utf8_inside_workspace_and_denies_all_mutation(
@@ -4494,13 +4662,14 @@ def test_managed_acp_forces_reverse_io_transport_but_denies_terminal(
     }
 
     async def scenario() -> None:
-        with pytest.raises(GrokPermissionError):
-            await bridge.handle_reverse_request("terminal/create", {})
-        with pytest.raises(GrokPermissionError):
-            await bridge.handle_reverse_request(
-                "fs/write_text_file",
-                _filesystem_write_request(workspace, "denied.txt", "denied\n"),
-            )
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request("terminal/create", {})
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/write_text_file",
+                    _filesystem_write_request(workspace, "denied.txt", "denied\n"),
+                )
 
     asyncio.run(scenario())
     assert not (workspace / "denied.txt").exists()
@@ -4521,9 +4690,10 @@ def test_reverse_io_attestation_saturates_without_retaining_request_data(
     monkeypatch.setattr(grok_module, "_MAX_REVERSE_IO_COUNT", 1)
 
     async def scenario() -> None:
-        request = _filesystem_read_request(workspace, "PRIVATE.txt")
-        await bridge.handle_reverse_request("fs/read_text_file", request)
-        await bridge.handle_reverse_request("fs/read_text_file", request)
+        async with _active_filesystem_turn(bridge):
+            request = _filesystem_read_request(workspace, "PRIVATE.txt")
+            await bridge.handle_reverse_request("fs/read_text_file", request)
+            await bridge.handle_reverse_request("fs/read_text_file", request)
 
     asyncio.run(scenario())
     evidence = bridge._reverse_io_attestation()
@@ -4556,45 +4726,46 @@ def test_acp_filesystem_wire_requires_bound_session_absolute_path_and_read_slice
     absolute = str(source.resolve())
 
     async def scenario() -> None:
-        with pytest.raises(GrokPermissionError):
-            await bridge.handle_reverse_request(
-                "fs/read_text_file",
-                {"sessionId": "native-session-1", "path": absolute},
-            )
-        bridge.bind_session("native-session-1")
-        with pytest.raises(GrokPermissionError):
-            await bridge.handle_reverse_request(
-                "fs/read_text_file",
-                {"sessionId": "wrong-session", "path": absolute},
-            )
-        assert await bridge.handle_reverse_request(
-            "fs/read_text_file",
-            {
-                "sessionId": "native-session-1",
-                "path": absolute,
-                "line": 2,
-                "limit": 1,
-                "_meta": {"source": "fixture"},
-            },
-        ) == {"content": "two\n"}
-        assert await bridge.handle_reverse_request(
-            "fs/read_text_file",
-            {
-                "sessionId": "native-session-1",
-                "path": absolute,
-                "line": None,
-                "limit": 0,
-                "_meta": None,
-            },
-        ) == {"content": ""}
-        for invalid in (
-            {"sessionId": "native-session-1", "path": "README.md"},
-            {"sessionId": "native-session-1", "path": absolute, "line": True},
-            {"sessionId": "native-session-1", "path": absolute, "_meta": []},
-            {"sessionId": "native-session-1", "path": absolute, "extra": 1},
-        ):
+        async with _active_filesystem_turn(bridge):
             with pytest.raises(GrokPermissionError):
-                await bridge.handle_reverse_request("fs/read_text_file", invalid)
+                await bridge.handle_reverse_request(
+                    "fs/read_text_file",
+                    {"sessionId": "native-session-1", "path": absolute},
+                )
+            bridge.bind_session("native-session-1")
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/read_text_file",
+                    {"sessionId": "wrong-session", "path": absolute},
+                )
+            assert await bridge.handle_reverse_request(
+                "fs/read_text_file",
+                {
+                    "sessionId": "native-session-1",
+                    "path": absolute,
+                    "line": 2,
+                    "limit": 1,
+                    "_meta": {"source": "fixture"},
+                },
+            ) == {"content": "two\n"}
+            assert await bridge.handle_reverse_request(
+                "fs/read_text_file",
+                {
+                    "sessionId": "native-session-1",
+                    "path": absolute,
+                    "line": None,
+                    "limit": 0,
+                    "_meta": None,
+                },
+            ) == {"content": ""}
+            for invalid in (
+                {"sessionId": "native-session-1", "path": "README.md"},
+                {"sessionId": "native-session-1", "path": absolute, "line": True},
+                {"sessionId": "native-session-1", "path": absolute, "_meta": []},
+                {"sessionId": "native-session-1", "path": absolute, "extra": 1},
+            ):
+                with pytest.raises(GrokPermissionError):
+                    await bridge.handle_reverse_request("fs/read_text_file", invalid)
 
     asyncio.run(scenario())
 
@@ -4672,16 +4843,18 @@ def test_filesystem_root_identity_drift_blocks_before_read(
 
     monkeypatch.setattr(grok_module, "_attest_workspace_root", drifted_attest)
     bridge.bind_session("native-session-1")
-    with pytest.raises(GrokPermissionError):
-        asyncio.run(
-            bridge.handle_reverse_request(
-                "fs/read_text_file",
-                {
-                    "sessionId": "native-session-1",
-                    "path": str(source.resolve()),
-                },
-            )
-        )
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(GrokPermissionError):
+                await bridge.handle_reverse_request(
+                    "fs/read_text_file",
+                    {
+                        "sessionId": "native-session-1",
+                        "path": str(source.resolve()),
+                    },
+                )
+
+    asyncio.run(scenario())
 
 
 def test_context_attests_workspace_root_identity_in_hash(tmp_path: Path) -> None:
@@ -5021,17 +5194,18 @@ def test_filesystem_reverse_requests_use_real_bridge_through_acp_stdio(
     )
 
     async def scenario() -> None:
-        client = _filesystem_client(workspace, "filesystem-read", bridge)
-        await client.start()
-        try:
-            result = await client.request("trigger/filesystem", {})
-            assert result["reverseResponse"] == {
-                "jsonrpc": "2.0",
-                "id": "filesystem-1",
-                "result": {"content": "bridge-read\n"},
-            }
-        finally:
-            await client.close()
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(workspace, "filesystem-read", bridge)
+            await client.start()
+            try:
+                result = await client.request("trigger/filesystem", {})
+                assert result["reverseResponse"] == {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-1",
+                    "result": {"content": "bridge-read\n"},
+                }
+            finally:
+                await client.close()
 
     asyncio.run(scenario())
 
@@ -5078,24 +5252,25 @@ def test_filesystem_writer_routes_allowed_and_denied_writes_through_acp_stdio(
     )
 
     async def scenario() -> None:
-        allowed = _filesystem_client(workspace, "filesystem-write", bridge)
-        await allowed.start()
-        try:
-            result = await allowed.request("trigger/filesystem", {})
-            assert result["reverseResponse"]["result"] == {}
-        finally:
-            await allowed.close()
+        async with _active_filesystem_turn(bridge):
+            allowed = _filesystem_client(workspace, "filesystem-write", bridge)
+            await allowed.start()
+            try:
+                result = await allowed.request("trigger/filesystem", {})
+                assert result["reverseResponse"]["result"] == {}
+            finally:
+                await allowed.close()
 
-        denied = _filesystem_client(workspace, "filesystem-write-denied", bridge)
-        await denied.start()
-        try:
-            result = await denied.request("trigger/filesystem", {})
-            assert result["reverseResponse"]["error"] == {
-                "code": -32603,
-                "message": "Internal error",
-            }
-        finally:
-            await denied.close()
+            denied = _filesystem_client(workspace, "filesystem-write-denied", bridge)
+            await denied.start()
+            try:
+                result = await denied.request("trigger/filesystem", {})
+                assert result["reverseResponse"]["error"] == {
+                    "code": -32603,
+                    "message": "Internal error",
+                }
+            finally:
+                await denied.close()
 
     asyncio.run(scenario())
     assert exact.read_bytes() == b"written-through-acp\n"
@@ -5115,16 +5290,17 @@ def test_filesystem_acp_denies_git_metadata_write_without_mutation_or_temp_resid
     )
 
     async def scenario() -> None:
-        client = _filesystem_client(git_metadata, "filesystem-write", bridge)
-        await client.start()
-        try:
-            result = await client.request("trigger/filesystem", {})
-            assert result["reverseResponse"]["error"] == {
-                "code": -32603,
-                "message": "Internal error",
-            }
-        finally:
-            await client.close()
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(git_metadata, "filesystem-write", bridge)
+            await client.start()
+            try:
+                result = await client.request("trigger/filesystem", {})
+                assert result["reverseResponse"]["error"] == {
+                    "code": -32603,
+                    "message": "Internal error",
+                }
+            finally:
+                await client.close()
 
     asyncio.run(scenario())
     assert not (git_metadata / "exact.py").exists()
@@ -5446,25 +5622,26 @@ def test_filesystem_acp_close_surfaces_ambiguity_until_write_worker_settles(
     monkeypatch.setattr(grok_module.os, "fsync", blocking_fsync)
 
     async def scenario() -> None:
-        client = _filesystem_client(workspace, "filesystem-write", bridge)
-        client._close_timeout = 0.05
-        await client.start()
-        request = asyncio.create_task(client.request("trigger/filesystem", {}))
-        assert await asyncio.to_thread(entered.wait, 1)
-        try:
-            with pytest.raises(AcpProcessError, match="callback cleanup timed out"):
-                await client.close()
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(workspace, "filesystem-write", bridge)
+            client._close_timeout = 0.05
+            await client.start()
+            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            assert await asyncio.to_thread(entered.wait, 1)
+            try:
+                with pytest.raises(AcpProcessError, match="callback cleanup timed out"):
+                    await client.close()
+                assert exact.read_bytes() == b"before\n"
+            finally:
+                release.set()
+            await asyncio.gather(request, return_exceptions=True)
+            for _ in range(100):
+                if bridge._write_worker is None:
+                    break
+                await asyncio.sleep(0.01)
+            assert bridge._write_worker is None
+            assert not bridge._write_lock.locked()
             assert exact.read_bytes() == b"before\n"
-        finally:
-            release.set()
-        await asyncio.gather(request, return_exceptions=True)
-        for _ in range(100):
-            if bridge._write_worker is None:
-                break
-            await asyncio.sleep(0.01)
-        assert bridge._write_worker is None
-        assert not bridge._write_lock.locked()
-        assert exact.read_bytes() == b"before\n"
 
     asyncio.run(scenario())
 
@@ -5544,15 +5721,16 @@ def test_filesystem_acp_cleanup_ambiguity_is_terminal_and_sanitized(
     monkeypatch.setattr(Path, "unlink", fail_owned_temp_unlink)
 
     async def scenario() -> None:
-        client = _filesystem_client(workspace, "filesystem-write", bridge)
-        await client.start()
-        with pytest.raises(AcpProcessError, match="cleanup ambiguity") as pending:
-            await client.request("trigger/filesystem", {})
-        with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
-            await client.close()
-        for error in (pending.value, closed.value):
-            assert os.fspath(workspace) not in str(error)
-            assert "SECRET_DETAIL" not in str(error)
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(workspace, "filesystem-write", bridge)
+            await client.start()
+            with pytest.raises(AcpProcessError, match="cleanup ambiguity") as pending:
+                await client.request("trigger/filesystem", {})
+            with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
+                await client.close()
+            for error in (pending.value, closed.value):
+                assert os.fspath(workspace) not in str(error)
+                assert "SECRET_DETAIL" not in str(error)
 
     asyncio.run(scenario())
     assert exact.read_bytes() == b"before\n"
@@ -5593,24 +5771,25 @@ def test_filesystem_acp_cancel_cleanup_ambiguity_is_terminal(
     monkeypatch.setattr(Path, "unlink", fail_owned_temp_unlink)
 
     async def scenario() -> None:
-        client = _filesystem_client(workspace, "filesystem-write-hang", bridge)
-        client._close_timeout = 0.05
-        await client.start()
-        request = asyncio.create_task(client.request("trigger/filesystem", {}))
-        assert await asyncio.to_thread(entered.wait, 1)
-        close = asyncio.create_task(client.close())
-        for _ in range(100):
-            if bridge._write_cancel is not None and bridge._write_cancel.is_set():
-                break
-            await asyncio.sleep(0.01)
-        assert bridge._write_cancel is not None and bridge._write_cancel.is_set()
-        release.set()
-        with pytest.raises(AcpProcessError, match="cleanup ambiguity") as pending:
-            await request
-        with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
-            await close
-        assert "SECRET_CANCEL_CLEANUP" not in str(pending.value)
-        assert "SECRET_CANCEL_CLEANUP" not in str(closed.value)
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(workspace, "filesystem-write-hang", bridge)
+            client._close_timeout = 0.05
+            await client.start()
+            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            assert await asyncio.to_thread(entered.wait, 1)
+            close = asyncio.create_task(client.close())
+            for _ in range(100):
+                if bridge._write_cancel is not None and bridge._write_cancel.is_set():
+                    break
+                await asyncio.sleep(0.01)
+            assert bridge._write_cancel is not None and bridge._write_cancel.is_set()
+            release.set()
+            with pytest.raises(AcpProcessError, match="cleanup ambiguity") as pending:
+                await request
+            with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
+                await close
+            assert "SECRET_CANCEL_CLEANUP" not in str(pending.value)
+            assert "SECRET_CANCEL_CLEANUP" not in str(closed.value)
 
     asyncio.run(scenario())
     assert exact.read_bytes() == b"before\n"
@@ -5650,24 +5829,25 @@ def test_filesystem_acp_retains_cleanup_fatal_after_eof_wins_terminal_race(
     monkeypatch.setattr(Path, "unlink", fail_owned_temp_unlink)
 
     async def scenario() -> None:
-        client = _filesystem_client(workspace, "filesystem-write-eof", bridge)
-        await client.start()
-        request = asyncio.create_task(client.request("trigger/filesystem", {}))
-        assert await asyncio.to_thread(entered.wait, 1)
-        with pytest.raises(AcpProcessError) as pending:
-            await request
-        assert "cleanup ambiguity" not in str(pending.value)
-        release.set()
-        for _ in range(100):
-            if bridge._write_worker is None and not client._reverse_tasks:
-                break
-            await asyncio.sleep(0.01)
-        assert bridge._write_worker is None
-        assert not client._reverse_tasks
-        with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
-            await client.close()
-        assert "SECRET_LATE_REPLACE" not in str(closed.value)
-        assert "SECRET_LATE_UNLINK" not in str(closed.value)
+        async with _active_filesystem_turn(bridge):
+            client = _filesystem_client(workspace, "filesystem-write-eof", bridge)
+            await client.start()
+            request = asyncio.create_task(client.request("trigger/filesystem", {}))
+            assert await asyncio.to_thread(entered.wait, 1)
+            with pytest.raises(AcpProcessError) as pending:
+                await request
+            assert "cleanup ambiguity" not in str(pending.value)
+            release.set()
+            for _ in range(100):
+                if bridge._write_worker is None and not client._reverse_tasks:
+                    break
+                await asyncio.sleep(0.01)
+            assert bridge._write_worker is None
+            assert not client._reverse_tasks
+            with pytest.raises(AcpProcessError, match="cleanup ambiguity") as closed:
+                await client.close()
+            assert "SECRET_LATE_REPLACE" not in str(closed.value)
+            assert "SECRET_LATE_UNLINK" not in str(closed.value)
 
     asyncio.run(scenario())
     assert exact.read_bytes() == b"before\n"
@@ -5925,6 +6105,25 @@ async def _lifecycle_wait_terminal(
             return snapshot
         await asyncio.sleep(0.01)
     raise AssertionError("fake Grok lifecycle did not reach terminal state")
+
+
+async def _assert_lifecycle_reverse_write_idle(
+    adapter: GrokBuildAdapter,
+    snapshot: AdapterSnapshot,
+    workspace: Path,
+) -> None:
+    bridge = adapter._sessions[snapshot.external_session_id].bridge
+    successes = bridge._reverse_io_attestation()["write_successes"]
+    with pytest.raises(GrokPermissionError, match="not active"):
+        await bridge.handle_reverse_request(
+            "fs/write_text_file",
+            {
+                "sessionId": snapshot.external_session_id,
+                "path": str((workspace / "allowed.txt").resolve(strict=False)),
+                "content": "late-write-must-not-land\n",
+            },
+        )
+    assert bridge._reverse_io_attestation()["write_successes"] == successes
 
 
 @pytest.mark.parametrize("auth_mutation", (None, "auth-meta"))
@@ -7441,6 +7640,7 @@ def test_lifecycle_interrupt_sends_cancel_once_and_reconciles_late_terminal(
         second = await adapter.interrupt(request)
         assert first.execution_state == second.execution_state == expected_state
         assert first.result_text == second.result_text == expected_result
+        await _assert_lifecycle_reverse_write_idle(adapter, first, workspace)
         await adapter.close(request)
 
     asyncio.run(scenario())
@@ -7562,6 +7762,7 @@ def test_lifecycle_close_active_is_exact_idempotent_and_restart_is_recovery_requ
         assert first == second
         assert first.conversation_state == "closed"
         assert first.evidence["cleanup_confirmed"] is True
+        await _assert_lifecycle_reverse_write_idle(adapter, first, workspace)
 
         restarted, _trace, _fresh_children = _lifecycle_adapter(tmp_path, binding)
         with pytest.raises(ServiceError) as unavailable:
@@ -7806,6 +8007,7 @@ def test_lifecycle_unknown_stop_reason_remains_fail_closed(
         assert terminal.error.retryable is False
         assert terminal.error.next_action is None
         assert terminal.evidence["stop_reason"] == "future_stop_reason"
+        await _assert_lifecycle_reverse_write_idle(adapter, terminal, workspace)
         await adapter.close(request)
 
     asyncio.run(scenario())
@@ -8479,6 +8681,152 @@ def test_service_canary_unblocks_grok_spawn_without_a_canary_prompt(
     assert [row["method"] for row in records].count("session/prompt") == 1
     assert len(children) == 4
     assert all(child.closed is True for child in children)
+
+
+def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    adapter, trace_path, _children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        scenario="filesystem-terminal-race",
+    )
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt"
+    )
+    ConfigStore(paths).save(
+        {
+            "schema_version": 1,
+            "revision": 0,
+            "runtimes": {
+                "grok-build": {
+                    "enabled": True,
+                    "delegation_priority": 100,
+                    "selection_mode": "fixed",
+                    "fallback": False,
+                    "variants": [
+                        {
+                            "id": "default",
+                            "model": "grok-4",
+                            "reasoning": {"effort": "xhigh"},
+                        }
+                    ],
+                }
+            },
+        },
+        expected_revision=0,
+    )
+    store = StateStore.open(paths)
+    identifiers = iter(range(1, 30))
+    service = SubagentMcpService(
+        config=ConfigStore(paths),
+        store=store,
+        registry=AdapterRegistry(builtin_factories=(lambda: adapter,)),
+        id_factory=lambda prefix: f"{prefix}-{next(identifiers)}",
+    )
+    spawn = SpawnRequest(
+        request_id="grok-terminal-race",
+        runtime_id="grok-build",
+        variant_id="default",
+        task=TaskPacket(
+            "Bounded write",
+            "Write only the declared file.",
+            ("Return a verdict.",),
+            "sub-agent",
+        ),
+        cwd=str(workspace),
+        mode="implement",
+        transport="native-acp",
+        permissions=("repo_read", "workspace_write"),
+        write_set=("allowed.txt",),
+    )
+    entered = threading.Event()
+    release = threading.Event()
+    real_replace = grok_module.os.replace
+    exact = (workspace / "allowed.txt").resolve(strict=False)
+
+    def blocked_replace(source: object, target: object) -> None:
+        if Path(os.fspath(target)).resolve(strict=False) == exact:
+            entered.set()
+            assert release.wait(timeout=3)
+        real_replace(source, target)
+
+    def active_writer_leases() -> int:
+        with store.transaction() as database:
+            row = database.execute(
+                "SELECT COUNT(*) FROM leases "
+                "WHERE kind = 'writer' AND released_at_utc IS NULL"
+            ).fetchone()
+        assert row is not None
+        return int(row[0])
+
+    async def scenario() -> None:
+        ready = await service.runtime_canary(
+            {
+                "request_id": "grok-terminal-race-canary",
+                "runtime_id": "grok-build",
+                "variant_id": "default",
+                "transport": "native-acp",
+            }
+        )
+        assert ready["state"] == "ready"
+        monkeypatch.setattr(grok_module.os, "replace", blocked_replace)
+        started = await service.agent_spawn(spawn)
+        closed = False
+        try:
+            assert await asyncio.to_thread(entered.wait, 2)
+            for _ in range(200):
+                if any(
+                    row.get("method") == "test/terminal-response-sent"
+                    for row in _trace_records(trace_path)
+                ):
+                    break
+                await asyncio.sleep(0.005)
+            else:
+                raise AssertionError("fake Grok terminal response was not sent")
+
+            observed = (
+                await service.agent_wait(
+                    WaitRequest((WaitTarget(started.conversation_id),), 0.05)
+                )
+            )[0]
+            assert observed.execution_state == "running"
+            assert active_writer_leases() == 1
+
+            release.set()
+            for _ in range(100):
+                statuses = await service.agent_wait(
+                    WaitRequest((WaitTarget(started.conversation_id),), 0.05)
+                )
+                if statuses[0].execution_state != "running":
+                    terminal = statuses[0]
+                    break
+            else:
+                raise AssertionError("fake Grok service task did not finish")
+            assert terminal.execution_state == "succeeded"
+            assert active_writer_leases() == 0
+            assert exact.read_bytes() == b"terminal-race-write\n"
+            owned = adapter._sessions[terminal.external_session_id].snapshot
+            await _assert_lifecycle_reverse_write_idle(adapter, owned, workspace)
+            assert exact.read_bytes() == b"terminal-race-write\n"
+            await service.agent_close(
+                ActionRequest("grok-terminal-race-close", started.conversation_id)
+            )
+            closed = True
+        finally:
+            release.set()
+            if not closed:
+                await service.agent_close(
+                    ActionRequest(
+                        "grok-terminal-race-cleanup", started.conversation_id
+                    )
+                )
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize(

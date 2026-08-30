@@ -357,6 +357,10 @@ class GrokFilesystemBridge:
         self._write_lock = asyncio.Lock()
         self._write_worker: asyncio.Task[Mapping[str, object]] | None = None
         self._write_cancel: threading.Event | None = None
+        self._turn_condition = asyncio.Condition()
+        self._active_execution_id: str | None = None
+        self._reverse_execution_id: str | None = None
+        self._reverse_callbacks = 0
         self._reverse_io_counts = {name: 0 for name in _REVERSE_IO_COUNTERS}
         self._reverse_io_saturated = False
         roots = tuple(self._build_write_root(root) for root in write_roots)
@@ -426,21 +430,25 @@ class GrokFilesystemBridge:
         method: str,
         params: Mapping[str, object],
     ) -> Mapping[str, object]:
-        if method == "fs/read_text_file":
-            self._record_reverse_io("read_attempts")
-            result = await self.read_text_file(params)
-            self._record_reverse_io("read_successes")
-            return result
-        if method == "fs/write_text_file":
-            self._record_reverse_io("write_attempts")
+        if method in {"fs/read_text_file", "fs/write_text_file"}:
+            execution_id = await self._admit_reverse_callback()
             try:
-                result = await self.write_text_file(params)
-            except GrokFilesystemCleanupError as exc:
-                raise AcpFatalCallbackError(
-                    "ACP filesystem cleanup ambiguity"
-                ) from exc
-            self._record_reverse_io("write_successes")
-            return result
+                if method == "fs/read_text_file":
+                    self._record_reverse_io("read_attempts")
+                    result = await self.read_text_file(params)
+                    self._record_reverse_io("read_successes")
+                    return result
+                self._record_reverse_io("write_attempts")
+                try:
+                    result = await self.write_text_file(params)
+                except GrokFilesystemCleanupError as exc:
+                    raise AcpFatalCallbackError(
+                        "ACP filesystem cleanup ambiguity"
+                    ) from exc
+                self._record_reverse_io("write_successes")
+                return result
+            finally:
+                await self._finish_reverse_callback(execution_id)
         if method.startswith("terminal/"):
             self._record_reverse_io("terminal_attempts")
             self._record_reverse_io("terminal_denials")
@@ -450,6 +458,56 @@ class GrokFilesystemBridge:
         ):
             raise GrokPermissionError("Grok reverse method is not authorized")
         raise AcpMethodNotFoundError(method)
+
+    async def activate_turn(self, execution_id: object) -> None:
+        normalized = _bounded_public_text(execution_id, 256)
+        if normalized is None:
+            raise GrokPermissionError("Grok filesystem execution authority is invalid")
+        async with self._turn_condition:
+            if self._active_execution_id is not None or self._reverse_callbacks:
+                raise GrokPermissionError("Grok filesystem execution authority is busy")
+            self._active_execution_id = normalized
+
+    async def deactivate_turn(self, execution_id: object) -> None:
+        normalized = _bounded_public_text(execution_id, 256)
+        if normalized is None:
+            raise GrokPermissionError("Grok filesystem execution authority is invalid")
+        async with self._turn_condition:
+            if self._active_execution_id != normalized:
+                raise GrokPermissionError("Grok filesystem execution authority changed")
+            self._active_execution_id = None
+            while self._reverse_callbacks:
+                if self._reverse_execution_id != normalized:
+                    raise GrokPermissionError(
+                        "Grok filesystem execution authority changed"
+                    )
+                await self._turn_condition.wait()
+
+    async def _admit_reverse_callback(self) -> str:
+        async with self._turn_condition:
+            execution_id = self._active_execution_id
+            if execution_id is None:
+                raise GrokPermissionError("Grok filesystem execution is not active")
+            if (
+                self._reverse_execution_id is not None
+                and self._reverse_execution_id != execution_id
+            ):
+                raise GrokPermissionError("Grok filesystem execution authority changed")
+            self._reverse_execution_id = execution_id
+            self._reverse_callbacks += 1
+            return execution_id
+
+    async def _finish_reverse_callback(self, execution_id: str) -> None:
+        async with self._turn_condition:
+            if (
+                self._reverse_execution_id != execution_id
+                or self._reverse_callbacks < 1
+            ):
+                raise RuntimeError("Grok reverse callback authority accounting failed")
+            self._reverse_callbacks -= 1
+            if not self._reverse_callbacks:
+                self._reverse_execution_id = None
+                self._turn_condition.notify_all()
 
     def _record_reverse_io(self, name: str) -> None:
         current = self._reverse_io_counts[name]
@@ -2139,7 +2197,7 @@ class GrokBuildAdapter:
         )
         self._sessions[session_id] = session
         self._conversation_sessions[request.conversation_id] = session_id
-        self._start_turn(session, request.execution_id, prompt)
+        await self._start_turn(session, request.execution_id, prompt)
         return snapshot
 
     async def _open_native_session(
@@ -2308,7 +2366,7 @@ class GrokBuildAdapter:
                         provider_no_spend_safe=True,
                         reverse_io=session.bridge._reverse_io_attestation(),
                     )
-                    self._start_turn(session, request.execution_id, prompt)
+                    await self._start_turn(session, request.execution_id, prompt)
                     return session.snapshot
             await interrupt_done.wait()
 
@@ -2519,12 +2577,13 @@ class GrokBuildAdapter:
                 category="adapter",
             ) from exc
 
-    def _start_turn(
+    async def _start_turn(
         self,
         session: _GrokSession,
         execution_id: str,
         prompt: str,
     ) -> None:
+        await session.bridge.activate_turn(execution_id)
         session.public_text.reset()
         write_receipt = asyncio.Event()
         task = asyncio.create_task(
@@ -2552,39 +2611,52 @@ class GrokBuildAdapter:
         rpc_code: int | str | None = None
         stop_reason: str | None = None
         try:
-            result = await session.process.request(
-                "session/prompt",
-                {
-                    "sessionId": session.snapshot.external_session_id,
-                    "prompt": [{"type": "text", "text": prompt}],
-                },
-                write_receipt=write_receipt,
-            )
-        except asyncio.CancelledError:
-            raise
-        except AcpRpcError as exc:
-            rpc_code = exc.code
-            failure, provider_code, provider_detail = _failure_from_rpc(exc)
-        except (AcpProcessError, AcpProtocolError, TimeoutError):
-            failure = AdapterFailure(
-                "RECOVERY_REQUIRED",
-                "adapter",
-                False,
-                "Grok ACP turn ended without an unambiguous terminal result",
-            )
-        except Exception:
-            failure = AdapterFailure(
-                "RECOVERY_REQUIRED",
-                "adapter",
-                False,
-                "Grok ACP turn handling failed",
-            )
+            try:
+                result = await session.process.request(
+                    "session/prompt",
+                    {
+                        "sessionId": session.snapshot.external_session_id,
+                        "prompt": [{"type": "text", "text": prompt}],
+                    },
+                    write_receipt=write_receipt,
+                )
+            except asyncio.CancelledError:
+                raise
+            except AcpRpcError as exc:
+                rpc_code = exc.code
+                failure, provider_code, provider_detail = _failure_from_rpc(exc)
+            except (AcpProcessError, AcpProtocolError, TimeoutError):
+                failure = AdapterFailure(
+                    "RECOVERY_REQUIRED",
+                    "adapter",
+                    False,
+                    "Grok ACP turn ended without an unambiguous terminal result",
+                )
+            except Exception:
+                failure = AdapterFailure(
+                    "RECOVERY_REQUIRED",
+                    "adapter",
+                    False,
+                    "Grok ACP turn handling failed",
+                )
 
-        # The wire reader enqueues notifications before resolving the response.
-        # The callback is intentionally non-blocking, so one scheduler yield drains
-        # the FIFO queue without imposing a model-turn deadline.
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
+            # The wire reader enqueues notifications before resolving the response.
+            # The callback is intentionally non-blocking, so one scheduler yield drains
+            # the FIFO queue without imposing a model-turn deadline.
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+        finally:
+            cleanup = asyncio.create_task(session.bridge.deactivate_turn(execution_id))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                while not cleanup.done():
+                    try:
+                        await asyncio.shield(cleanup)
+                    except asyncio.CancelledError:
+                        continue
+                await cleanup
+                raise
         async with session.lock:
             turn = session.turn
             if turn is None or turn.execution_id != execution_id:
