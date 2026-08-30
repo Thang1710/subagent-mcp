@@ -242,7 +242,7 @@ def test_public_documents_use_display_and_distribution_identities() -> None:
     assert "--prerelease" not in workflow
 
 
-def test_grok_build_candidate_documentation_is_truthful() -> None:
+def test_grok_build_review_only_documentation_is_truthful() -> None:
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     architecture = (ROOT / "docs" / "architecture.md").read_text(
         encoding="utf-8"
@@ -252,7 +252,7 @@ def test_grok_build_candidate_documentation_is_truthful() -> None:
     )
     claude_status = "**Claude Code — Ready.**"
     deepseek_status = "**DeepSeek Harness — Ready.**"
-    grok_status = "**Grok Build — In development.**"
+    grok_status = "**Grok Build — Ready for read-only review.**"
 
     assert readme.index(claude_status) < readme.index(deepseek_status)
     assert readme.index(deepseek_status) < readme.index(grok_status)
@@ -260,12 +260,11 @@ def test_grok_build_candidate_documentation_is_truthful() -> None:
         readme.split(grok_status, 1)[1].split("\n\n", 1)[0].lower().split()
     )
     for phrase in (
-        "read-only review",
-        "bounded path-prefix writing",
-        "separately approved live read-only and writer gates",
         "cached native login",
-        "disabled by default",
         "no credits, paid overage, or model fallback",
+        "accepts `repo_read` only",
+        "bounded writing remains **in development**",
+        "`workspace_write` requests fail before a native process starts",
         "terminal/test/git",
         "network/web/browser",
         "mcp/plugins/hooks",
