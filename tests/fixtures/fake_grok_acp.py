@@ -111,15 +111,27 @@ def _serve_callback_flood(*, notification: bool) -> None:
 
 
 def _serve_filesystem_reverse(message: dict[str, Any], *, operation: str) -> None:
+    session_id = "native-session-1"
     if operation == "read":
         method = "fs/read_text_file"
-        params = {"path": "README.md"}
+        params = {
+            "sessionId": session_id,
+            "path": str((Path.cwd() / "README.md").resolve()),
+        }
     elif operation in {"write", "write-eof", "write-hang"}:
         method = "fs/write_text_file"
-        params = {"path": "exact.py", "content": "written-through-acp\n"}
+        params = {
+            "sessionId": session_id,
+            "path": str((Path.cwd() / "exact.py").resolve()),
+            "content": "written-through-acp\n",
+        }
     elif operation == "write-denied":
         method = "fs/write_text_file"
-        params = {"path": "other.py", "content": "must-not-land\n"}
+        params = {
+            "sessionId": session_id,
+            "path": str((Path.cwd() / "other.py").resolve()),
+            "content": "must-not-land\n",
+        }
     else:
         method = "future/unknown"
         params = {}
@@ -151,13 +163,26 @@ def _serve_filesystem_reverse(message: dict[str, Any], *, operation: str) -> Non
         current = _read()
 
 
-def _trace(path: Path, message: dict[str, Any]) -> None:
+def _trace(
+    path: Path,
+    message: dict[str, Any],
+    *,
+    child_role: str | None = None,
+) -> None:
     method = message.get("method")
     record: dict[str, object] = {"method": method}
+    if child_role is not None:
+        record["childRole"] = child_role
     params = message.get("params")
     if method == "initialize" and isinstance(params, dict):
         record["params"] = params
     elif method == "authenticate" and isinstance(params, dict):
+        record["params"] = params
+    elif method in {
+        "_x.ai/billing",
+        "_x.ai/auto-topup-rule",
+        "_x.ai/models/list",
+    } and isinstance(params, dict):
         record["params"] = params
     elif method == "session/new" and isinstance(params, dict):
         record["params"] = params
@@ -188,78 +213,200 @@ def _lifecycle_initialize(config: dict[str, Any]) -> dict[str, object]:
     if isinstance(delay, (int, float)) and not isinstance(delay, bool) and delay > 0:
         time.sleep(float(delay))
     methods: list[dict[str, str]] = [
-        {"id": "cached_token", "name": "Cached native login"}
+        {"id": "cached_token", "name": "Cached native login"},
+        {"id": "grok.com", "name": "Grok"},
     ]
-    if config.get("mutation") == "missing-auth":
-        methods = []
+    default_method: object = "cached_token"
+    mutation = config.get("mutation")
+    if mutation == "missing-auth":
+        methods = [{"id": "grok.com", "name": "Grok"}]
+        default_method = "grok.com"
+    elif mutation == "api-key":
+        methods.append({"id": "xai.api_key", "name": "XAI API key"})
+        default_method = "xai.api_key"
+    elif mutation == "interactive-auth":
+        default_method = "grok.com"
+    elif mutation == "malformed-default-auth":
+        default_method = None
+    elif mutation == "duplicate-auth":
+        methods.append({"id": "cached_token", "name": "Duplicate"})
+    protocol_version = 2 if mutation == "protocol-mismatch" else 1
     return {
-        "protocolVersion": 1,
+        "protocolVersion": protocol_version,
         "agentInfo": {"name": "Grok Build", "version": "synthetic"},
         "authMethods": methods,
+        "_meta": {
+            "defaultAuthMethodId": default_method,
+            "modelState": {"currentModelId": config["model"]},
+        },
     }
 
 
 def _lifecycle_auth(config: dict[str, Any]) -> dict[str, object]:
-    result: dict[str, object] = {
-        "authenticated": True,
-        "methodId": "cached_token",
-        "authMethod": "cached-native",
-        "apiKeyOverride": False,
-        "customPaidRoute": False,
-        "noExtraSpend": True,
+    if config.get("mutation") == "malformed-auth-response":
+        return {"authenticated": True, "methodId": "cached_token"}
+    if config.get("mutation") == "auth-meta":
+        return {"_meta": {"methodId": "cached_token"}}
+    return {}
+
+
+def _lifecycle_model_state(
+    config: dict[str, Any],
+    *,
+    session: bool,
+) -> dict[str, object]:
+    model = str(config["model"])
+    mutation = config.get(
+        "session_model_state_mutation" if session else "model_state_mutation"
+    )
+    if not isinstance(mutation, str):
+        mutation = config.get("mutation")
+    current_model = (
+        "different-model"
+        if session and mutation == "models-current-mismatch"
+        else model
+    )
+    metadata: dict[str, object] = {"agentType": "grok-build"}
+    if mutation == "agent-type-missing":
+        metadata = {}
+    elif mutation == "agent-type-strict":
+        metadata["agentType"] = "codex"
+    elif mutation == "agent-type-mismatch":
+        metadata["agentType"] = "custom-agent"
+    return {
+        "currentModelId": current_model,
+        "availableModels": [
+            {
+                "modelId": model,
+                "name": model,
+                "_meta": metadata,
+            }
+        ],
     }
-    mutation = config.get("mutation")
-    if mutation == "api-key":
-        result.update(
-            methodId="xai.api_key",
-            authMethod="api-key",
-            apiKeyOverride=True,
-            noExtraSpend=False,
-        )
-    elif mutation == "custom-paid":
-        result["customPaidRoute"] = True
-        result["noExtraSpend"] = False
+
+
+def _lifecycle_agent_profile(mode: object) -> dict[str, object]:
+    writer = mode == "writer"
+    if not writer and mode != "review":
+        raise ValueError("unsupported fake lifecycle mode")
+    return {
+        "name": "subagent-mcp-writer" if writer else "subagent-mcp-review",
+        "description": (
+            "Bounded Subagent MCP writer profile."
+            if writer
+            else "Bounded Subagent MCP review profile."
+        ),
+        "permissionMode": "bypassPermissions",
+        "discoverSkills": False,
+        "inheritSkills": False,
+        "agentsMd": False,
+        "injectDefaultTools": False,
+        "tools": ["read_file", "search_replace"] if writer else ["read_file"],
+        "disallowedTools": ["search_tool", "use_tool"],
+        "skills": [],
+        "mcpServers": [],
+        "promptMode": "extend",
+        "promptBody": "Follow the caller's requested final-output format exactly.",
+    }
+
+
+def _lifecycle_billing(
+    config: dict[str, Any], _check_count: int
+) -> dict[str, object]:
+    mutation = config.get("billing_mutation")
+    billing_config: dict[str, object] = {
+        "prepaidBalance": {"val": 0},
+        "onDemandCap": {"val": 0},
+        "isUnifiedBillingUser": True,
+    }
+    result: dict[str, object] = {
+        "config": billing_config,
+    }
+    if mutation == "billing-missing-config":
+        result.pop("config")
+    elif mutation == "included-exhausted":
+        billing_config["creditUsagePercent"] = 100
+    elif mutation == "included-invalid":
+        billing_config["creditUsagePercent"] = "unknown"
+    elif mutation == "serde-defaults":
+        billing_config["prepaidBalance"] = {}
+        billing_config["onDemandCap"] = {}
+    elif mutation == "prepaid-nonzero":
+        billing_config["prepaidBalance"] = {"val": 1}
+    elif mutation == "prepaid-unknown":
+        billing_config["prepaidBalance"] = {"val": None}
+    elif mutation == "on-demand-cap-nonzero":
+        billing_config["onDemandCap"] = {"val": 1}
+    elif mutation == "on-demand-enabled":
+        result["onDemandEnabled"] = True
+    elif mutation == "not-unified-billing":
+        billing_config["isUnifiedBillingUser"] = False
     return result
 
 
-def _lifecycle_attestation(config: dict[str, Any]) -> dict[str, object]:
-    mode = str(config["mode"])
-    tools = ["read_file", "search_files"]
-    routes = [["read_file", "repo_read"], ["search_files", "repo_read"]]
-    if mode == "writer":
-        tools = ["read_file", "write_file"]
-        routes = [
-            ["read_file", "repo_read"],
-            ["write_file", "workspace_write_bridge"],
-        ]
-    result: dict[str, object] = {
-        "pairKey": config["pair_key"],
-        "workspaceKey": config["workspace_key"],
-        "workspacePath": config["workspace_path"],
-        "mode": mode,
-        "reasoningEffort": config["reasoning_effort"],
-        "builtinToolNames": tools,
-        "permissionRoutes": routes,
-        "loadedExecutableExtensions": [],
-        "disabledExecutableExtensions": config.get("disabled_extensions", []),
-        "webSearchEnabled": False,
-        "nestedAgentsEnabled": False,
-        "terminalEnabled": False,
-        "quotaState": config.get("quota_state", "unknown"),
-    }
+def _lifecycle_auto_topup(
+    config: dict[str, Any], check_count: int
+) -> dict[str, object]:
+    mutation = config.get("billing_mutation")
+    enabled = mutation == "auto-topup-enabled" or (
+        mutation == "second-auto-topup-enabled" and check_count > 1
+    )
+    if mutation == "auto-topup-malformed":
+        return {"rule": {"enabled": "unknown"}}
+    if mutation == "serde-defaults":
+        return {"rule": {}}
+    if enabled or mutation == "auto-topup-disabled":
+        return {"rule": {"enabled": enabled}}
+    return {}
+
+
+def _lifecycle_session_meta(config: dict[str, Any]) -> dict[str, object]:
+    model = str(config["model"])
+    effort = str(config["reasoning_effort"])
+    workspace = str(config["workspace_path"])
     mutation = config.get("mutation")
-    if mutation == "pair-mismatch":
-        result["pairKey"] = "f" * 64
-    elif mutation == "unsafe-route":
-        result["builtinToolNames"] = ["read_file", "shell"]
-        result["permissionRoutes"] = [
-            ["read_file", "repo_read"],
-            ["shell", "terminal"],
-        ]
-    elif mutation == "missing-isolation":
-        result.pop("terminalEnabled")
-    elif mutation == "loaded-extension":
-        result["loadedExecutableExtensions"] = [["mcp", "unsafe-mcp"]]
+    options: list[dict[str, object]] = [
+        {"id": model, "category": "model", "label": model, "selected": True},
+        {"id": effort, "category": "mode", "label": effort, "selected": True},
+    ]
+    if mutation == "model-mismatch":
+        options[0]["id"] = "different-model"
+    elif mutation == "missing-model":
+        options.pop(0)
+    elif mutation == "multiple-model":
+        options.append(
+            {
+                "id": "other-model",
+                "category": "model",
+                "label": "Other",
+                "selected": True,
+            }
+        )
+    elif mutation == "reasoning-mismatch":
+        options[1]["id"] = "different-effort"
+    elif mutation == "missing-reasoning":
+        options.pop()
+    elif mutation == "multiple-reasoning":
+        options.append(
+            {
+                "id": "other-effort",
+                "category": "mode",
+                "label": "Other",
+                "selected": True,
+            }
+        )
+    elif mutation == "malformed-selected":
+        options[1]["selected"] = "yes"
+    if mutation == "cwd-mismatch":
+        workspace = str(Path(workspace).parent)
+    result: dict[str, object] = {
+        "currentWorkingDirectory": workspace,
+        "x.ai/sessionConfig": {"options": options},
+    }
+    if mutation == "missing-cwd":
+        result.pop("currentWorkingDirectory")
+    elif mutation == "missing-session-config":
+        result.pop("x.ai/sessionConfig")
     return result
 
 
@@ -328,11 +475,12 @@ def _lifecycle_finish_prompt(
     if config.get("scenario") == "malformed-terminal":
         _send({"jsonrpc": "2.0", "id": message["id"], "result": {"ok": True}})
         return
+    stop_reason = config.get("stop_reason", "end_turn")
     _send(
         {
             "jsonrpc": "2.0",
             "id": message["id"],
-            "result": {"stopReason": "end_turn"},
+            "result": {"stopReason": stop_reason},
         }
     )
 
@@ -341,9 +489,15 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
     session_id = str(config.get("session_id", "native-grok-session-1"))
     pending_prompt: dict[str, Any] | None = None
     prompt_count = 0
+    billing_check_count = 0
     current = _read()
     while current is not None:
-        _trace(trace_path, current)
+        role = config.get("child_role")
+        _trace(
+            trace_path,
+            current,
+            child_role=role if isinstance(role, str) else None,
+        )
         method = current.get("method")
         if method == config.get("handshake_rpc_method") and "id" in current:
             error: dict[str, object] = {
@@ -371,23 +525,196 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                     "result": _lifecycle_auth(config),
                 }
             )
-        elif method == "session/new" and "id" in current:
+        elif method in {
+            "x.ai/billing",
+            "x.ai/auto-topup-rule",
+        } and "id" in current:
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": current["id"],
+                    "error": {"code": -32601, "message": "Method not found"},
+                }
+            )
+        elif method == "_x.ai/billing" and "id" in current:
+            billing_mutation = config.get("billing_mutation")
+            if billing_mutation == "billing-process-exit":
+                return 7
+            if billing_mutation == "billing-timeout":
+                time.sleep(60)
+                return 0
+            if billing_mutation == "billing-invalid-result":
+                _send({"jsonrpc": "2.0", "id": current["id"], "result": []})
+            elif billing_mutation == "billing-method-missing":
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": current["id"],
+                        "error": {"code": -32601, "message": "Method not found"},
+                    }
+                )
+            elif billing_mutation == "billing-explicit-exhaustion":
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": current["id"],
+                        "error": {
+                            "code": -32603,
+                            "message": "PRIVATE_QUOTA_DETAIL",
+                            "data": {"providerCode": "quota_exhausted"},
+                        },
+                    }
+                )
+            else:
+                billing_check_count += 1
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": current["id"],
+                        "result": _lifecycle_billing(config, billing_check_count),
+                    }
+                )
+        elif method == "_x.ai/auto-topup-rule" and "id" in current:
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": current["id"],
+                    "result": _lifecycle_auto_topup(config, billing_check_count),
+                }
+            )
+        elif method == "_x.ai/models/list" and "id" in current:
             _send(
                 {
                     "jsonrpc": "2.0",
                     "id": current["id"],
                     "result": {
-                        "sessionId": session_id,
-                        "models": {"currentModelId": config["model"]},
-                        "_meta": {
-                            "subagentMcp": _lifecycle_attestation(config),
-                        },
+                        "result": _lifecycle_model_state(config, session=False)
                     },
+                }
+            )
+        elif method == "session/new" and "id" in current:
+            params = current.get("params")
+            if not isinstance(params, dict) or params.get("_meta") != {
+                "agentProfile": _lifecycle_agent_profile(config.get("mode"))
+            }:
+                return 14
+            result: dict[str, object] = {
+                "sessionId": session_id,
+                "models": _lifecycle_model_state(config, session=True),
+                "_meta": _lifecycle_session_meta(config),
+            }
+            if config.get("mutation") == "missing-session-id":
+                result.pop("sessionId")
+            _send(
+                {
+                    "jsonrpc": "2.0",
+                    "id": current["id"],
+                    "result": result,
                 }
             )
         elif method == "session/prompt" and "id" in current:
             prompt_count += 1
             scenario = config.get("scenario", "happy")
+            if scenario == "filesystem-wire":
+                workspace = Path(str(config["workspace_path"]))
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-read",
+                        "method": "fs/read_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str((workspace / "README.md").resolve()),
+                            "line": 2,
+                            "limit": 1,
+                            "_meta": {"source": "fake-grok-acp"},
+                        },
+                    }
+                )
+                read_response = _read()
+                if read_response != {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-read",
+                    "result": {"content": "two\n"},
+                }:
+                    return 8
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-write",
+                        "method": "fs/write_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str((workspace / "allowed.txt").resolve()),
+                            "content": "written-through-real-acp-wire\n",
+                            "_meta": {},
+                        },
+                    }
+                )
+                write_response = _read()
+                if write_response != {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-write",
+                    "result": {},
+                }:
+                    return 9
+            elif scenario == "filesystem-review-boundary":
+                if config.get("mode") != "review":
+                    return 10
+                workspace = Path(str(config["workspace_path"]))
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-review-read",
+                        "method": "fs/read_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str((workspace / "README.md").resolve()),
+                            "line": 2,
+                            "limit": 1,
+                            "_meta": {"source": "fake-grok-acp"},
+                        },
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-review-read",
+                    "result": {"content": "two\n"},
+                }:
+                    return 11
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-review-write",
+                        "method": "fs/write_text_file",
+                        "params": {
+                            "sessionId": session_id,
+                            "path": str((workspace / "denied.txt").resolve()),
+                            "content": "must-not-write\n",
+                            "_meta": {},
+                        },
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-review-write",
+                    "error": {"code": -32603, "message": "Internal error"},
+                }:
+                    return 12
+                _send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": "filesystem-review-terminal",
+                        "method": "terminal/create",
+                        "params": {},
+                    }
+                )
+                if _read() != {
+                    "jsonrpc": "2.0",
+                    "id": "filesystem-review-terminal",
+                    "error": {"code": -32603, "message": "Internal error"},
+                }:
+                    return 13
             if scenario == "process-exit":
                 return 7
             if scenario == "rpc-error":

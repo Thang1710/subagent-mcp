@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 import subagent_harness_mcp.service as service_module
+import subagent_harness_mcp.ui as ui_module
 
 from subagent_harness_mcp.adapters.base import (
     AdapterFailure,
@@ -38,6 +39,7 @@ from subagent_harness_mcp.contracts import (
     TaskPacket,
     WaitRequest,
     WaitTarget,
+    result_artifact_metadata,
 )
 from subagent_harness_mcp.paths import resolve_paths
 from subagent_harness_mcp.service import SubagentMcpService
@@ -444,6 +446,38 @@ class _RecoveryTerminalSnapshotAdapter(FakeAdapter):
         )
 
 
+class _ProviderDetailFailureAdapter(FakeAdapter):
+    def __init__(self, harness: FakeHarness, detail: str) -> None:
+        super().__init__(harness)
+        self._detail = detail
+
+    async def spawn(self, request):
+        snapshot = await super().spawn(request)
+        failed = replace(
+            snapshot,
+            conversation_state="idle",
+            execution_state="failed",
+            result_text="CAPSULE: provider failure was bounded",
+            error=AdapterFailure(
+                "PROVIDER_ERROR",
+                "provider",
+                True,
+                "Native provider request failed",
+            ),
+            evidence={
+                "source": "native-acp",
+                "provider_error": {
+                    "source": "native-acp",
+                    "rpc_code": -32603,
+                    "provider_code": "UPSTREAM_FAILURE",
+                    "detail": self._detail,
+                },
+            },
+        )
+        self._harness._sessions[snapshot.external_session_id].snapshot = failed
+        return failed
+
+
 class _PostHandshakeReasoningAdapter(FakeAdapter):
     async def spawn(self, request):
         snapshot = await super().spawn(request)
@@ -464,6 +498,38 @@ class _PostHandshakeReasoningAdapter(FakeAdapter):
                 },
             },
         )
+
+
+class _PostHandshakeTerminalRaceAdapter(_PostHandshakeReasoningAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.monitor_snapshot_entered = asyncio.Event()
+        self.refresh_snapshot_entered = asyncio.Event()
+        self.release_monitor_snapshot = asyncio.Event()
+        self.release_refresh_snapshot = asyncio.Event()
+        self.snapshot_calls = 0
+
+    async def spawn(self, request):
+        running = await super().spawn(request)
+        terminal = replace(
+            running,
+            conversation_state="idle",
+            execution_state="succeeded",
+            result_text="race reconciled",
+            evidence={"source": "deterministic-fake"},
+        )
+        self._harness._sessions[running.external_session_id].snapshot = terminal
+        return running
+
+    async def snapshot(self, request):
+        self.snapshot_calls += 1
+        if self.snapshot_calls == 1:
+            self.monitor_snapshot_entered.set()
+            await self.release_monitor_snapshot.wait()
+        elif self.snapshot_calls == 2:
+            self.refresh_snapshot_entered.set()
+            await self.release_refresh_snapshot.wait()
+        return await super().snapshot(request)
 
 
 def _service(
@@ -823,7 +889,7 @@ def test_snapshot_result_surfaces_bounded_adapter_next_action() -> None:
     )
 
 
-def test_snapshot_result_surfaces_redacted_provider_error_details() -> None:
+def test_snapshot_result_discards_provider_error_detail() -> None:
     secret = "provider-secret-value-123456"
     snapshot = AdapterSnapshot(
         external_session_id="native-session",
@@ -860,9 +926,65 @@ def test_snapshot_result_surfaces_redacted_provider_error_details() -> None:
         "source": "native-acp",
         "rpc_code": -32603,
         "provider_code": "PI_AI_ERROR",
-        "detail": "authorization=Bearer [REDACTED]",
     }
     assert secret not in str(result)
+
+
+def test_provider_error_detail_never_crosses_service_or_activity_boundaries(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    token = "tok" + "_provider_value_123456"
+    api_key = "sk" + "-service-value-abcdefghijklmnop"
+    aws_key = "ASIA" + "IOSFODNN7EXAMPLE"
+    email = "operator" + "@example.invalid"
+    local_path = "C:" + "\\Users\\LocalUser\\private\\trace.json"
+    sensitive = (token, api_key, aws_key, email, local_path)
+    detail = " | ".join(sensitive)
+    harness = FakeHarness()
+    harness.enqueue("failure", error_code="PROVIDER_ERROR")
+    adapter = _ProviderDetailFailureAdapter(harness, detail)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    status = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    record = store.load_execution(status.execution_id)
+    activity = ui_module._read_activity_detail(store, status.execution_id)
+    artifact = result_artifact_metadata(status.execution_id, record.result or {})
+    with store.transaction() as database:
+        durable = json.dumps(
+            {
+                "observed": database.execute(
+                    "SELECT observed_json FROM executions WHERE execution_id = ?",
+                    (status.execution_id,),
+                ).fetchone()[0],
+                "result": database.execute(
+                    "SELECT result_json FROM executions WHERE execution_id = ?",
+                    (status.execution_id,),
+                ).fetchone()[0],
+                "events": database.execute(
+                    "SELECT payload_json FROM events WHERE execution_id = ?",
+                    (status.execution_id,),
+                ).fetchall(),
+            }
+        )
+    observed_outputs = (
+        record.observed,
+        record.result,
+        status.to_dict(),
+        status.to_compact_dict(),
+        activity,
+        artifact,
+        durable,
+    )
+
+    assert record.observed["evidence"]["provider_error"] == {
+        "source": "native-acp",
+        "rpc_code": -32603,
+        "provider_code": "UPSTREAM_FAILURE",
+    }
+    for value in sensitive:
+        assert all(value not in str(output) for output in observed_outputs)
 
 
 def test_snapshot_result_omits_oversized_or_control_provider_fields() -> None:
@@ -1593,6 +1715,45 @@ def test_post_handshake_reasoning_is_allowlisted_into_status_only(
     observed = store.load_execution(status.execution_id).observed
     assert "post_handshake_attestation" not in observed["evidence"]
     assert observed["attestation"]["reasoning_provider_reported"] is True
+
+
+def test_initial_monitor_and_refresh_reconcile_same_post_handshake_terminal(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    harness.enqueue("running")
+    adapter = _PostHandshakeTerminalRaceAdapter(harness)
+    service, store = _service(tmp_path, harness, adapter=adapter)
+
+    async def scenario() -> None:
+        running = await service.agent_spawn(_spawn_request(workspace))
+        assert running.execution_state == "running"
+        assert running.reasoning_attestation["provider_reported"] is True
+
+        await asyncio.wait_for(adapter.monitor_snapshot_entered.wait(), timeout=1)
+        monitor = service._snapshot_monitors[running.execution_id]
+        refresh = asyncio.create_task(
+            service.agent_status(StatusRequest(running.conversation_id, refresh=True))
+        )
+        await asyncio.wait_for(adapter.refresh_snapshot_entered.wait(), timeout=1)
+
+        adapter.release_monitor_snapshot.set()
+        await asyncio.wait_for(asyncio.shield(monitor), timeout=1)
+        adapter.release_refresh_snapshot.set()
+        terminal = await asyncio.wait_for(refresh, timeout=1)
+
+        assert terminal.execution_state == "succeeded"
+        assert terminal.result == {"text": "race reconciled"}
+        assert terminal.recovery_required is False
+        assert terminal.reasoning_attestation["provider_reported"] is True
+        persisted = store.load_execution(running.execution_id)
+        assert persisted.execution_state == "succeeded"
+        assert persisted.result == {"text": "race reconciled"}
+
+    asyncio.run(scenario())
+    assert adapter.snapshot_calls == 2
 
 
 def test_post_native_spawn_service_error_retains_writer_until_cleanup(
@@ -3172,6 +3333,150 @@ class _RecordingSendAdapter(FakeAdapter):
         self.sent_prompts.append(request.prompt)
         self.send_requests.append(request)
         return await super().send(request)
+
+
+class _DurableResolvedContextAdapter(_RecordingSendAdapter):
+    def __init__(self, harness: FakeHarness) -> None:
+        super().__init__(harness)
+        self.expected_attestation: dict[str, object] | None = None
+
+    async def resolve_context(self, request):
+        context = await super().resolve_context(request)
+        mode = "writer" if "workspace_write" in request.permissions else "review"
+        attestation = {
+            "source": "durable-context-regression",
+            "variant_id": request.variant_id,
+            "permissions": request.permissions,
+            "context_policy_id": request.context_policy_id,
+            "permission_policy_id": request.permission_policy_id,
+            "write_set": request.write_set,
+            "mode": mode,
+            "pair_key": "p" * 64,
+            "workspace_root_identity": (11, 22),
+            "project_instructions": (
+                {
+                    "path": "AGENTS.md",
+                    "sha256": "a" * 64,
+                    "identity": (1, 2, 3, 4),
+                    "size": 3,
+                },
+            ),
+            "project_instruction_count": 1,
+            "project_trusted": True,
+            "project_root": r"C:\bounded\workspace",
+            "git_attestation": {
+                "executable_path": r"C:\tools\git.exe",
+                "version": "git version 2.51.0.windows.1",
+                "sha256": "b" * 64,
+                "identity": (5, 6, 7, 8),
+                "root_marker_identity": (9, 10, 11, 12),
+                "root_git_dir_path": r"C:\bounded\workspace\.git",
+                "root_git_dir_identity": (13, 14, 15, 16),
+                "root_common_dir_path": r"C:\bounded\workspace\.git",
+                "root_common_dir_identity": (13, 14, 15, 16),
+                "root_gitmodules_identity": None,
+                "root_gitmodules_sha256": None,
+                "repository_context_bound": True,
+                "nested_repository_boundaries": (),
+            },
+            "discovered_extensions": (),
+            "model_route_isolation": "verified",
+        }
+        self.expected_attestation = json.loads(json.dumps(attestation))
+        return replace(context, attestation=attestation)
+
+    async def send(self, request: AdapterSendRequest):
+        if json.loads(json.dumps(request.context.attestation)) != self.expected_attestation:
+            raise ServiceError(
+                "CONTEXT_DRIFT",
+                "durable resolved context changed",
+                category="context",
+            )
+        return await super().send(request)
+
+
+@pytest.mark.parametrize("write_set", ((), ("src", "docs")))
+def test_agent_send_preserves_full_resolved_context_through_store_roundtrip(
+    tmp_path: Path,
+    write_set: tuple[str, ...],
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    for root in write_set:
+        (workspace / root).mkdir()
+    harness = FakeHarness()
+    adapter = _DurableResolvedContextAdapter(harness)
+    harness.enqueue("done", result="CAPSULE: round one")
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    spawn = _spawn_request(workspace, write=bool(write_set))
+    if write_set:
+        spawn = replace(spawn, write_set=write_set)
+
+    started = asyncio.run(service.agent_spawn(spawn))
+    persisted = store.load_execution(started.execution_id)
+    assert adapter.expected_attestation is not None
+    assert persisted.observed is not None
+    assert persisted.observed["attestation"] == adapter.expected_attestation
+    public = json.dumps(started.to_dict(), sort_keys=True)
+    activity = json.dumps(
+        ui_module._read_activity_detail(store, started.execution_id),
+        sort_keys=True,
+    )
+    assert "C:\\\\tools\\\\git.exe" not in public
+    assert "C:\\\\tools\\\\git.exe" not in activity
+
+    harness.enqueue("done", result="CAPSULE: round two")
+    followed = asyncio.run(
+        service.agent_send(
+            SendRequest(
+                "send-after-store-roundtrip",
+                started.conversation_id,
+                "Continue with the exact retained authority.",
+            )
+        )
+    )
+
+    assert followed.execution_state == "succeeded"
+    assert harness.call_count("send") == 1
+    assert adapter.send_requests[0].context.attestation == adapter.expected_attestation
+
+
+def test_agent_send_fails_closed_when_persisted_resolved_context_drifts(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    harness = FakeHarness()
+    adapter = _DurableResolvedContextAdapter(harness)
+    harness.enqueue("done", result="CAPSULE: round one")
+    service, store = _service(tmp_path, harness, adapter=adapter)
+    started = asyncio.run(service.agent_spawn(_spawn_request(workspace)))
+    with store.transaction(write=True) as database:
+        raw = database.execute(
+            "SELECT observed_json FROM executions WHERE execution_id = ?",
+            (started.execution_id,),
+        ).fetchone()[0]
+        observed = json.loads(raw)
+        observed["attestation"]["pair_key"] = "d" * 64
+        database.execute(
+            "UPDATE executions SET observed_json = ? WHERE execution_id = ?",
+            (json.dumps(observed, sort_keys=True), started.execution_id),
+        )
+    harness.enqueue("done", result="must not run")
+
+    with pytest.raises(ServiceError) as rejected:
+        asyncio.run(
+            service.agent_send(
+                SendRequest(
+                    "send-after-context-drift",
+                    started.conversation_id,
+                    "Must fail before provider work.",
+                )
+            )
+        )
+
+    assert rejected.value.code == "CONTEXT_DRIFT"
+    assert harness.call_count("send") == 0
 
 
 def test_agent_send_hash_binds_changed_input_before_followup_turn(

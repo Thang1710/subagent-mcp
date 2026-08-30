@@ -566,7 +566,7 @@ class SubagentMcpService:
                 context=context,
                 snapshot=snapshot,
             )
-            self._start_snapshot_monitor(adapter, record, context)
+            self._start_snapshot_monitor(adapter, record, _context_from_record(record))
             self._resume_after_safe_result(
                 request.runtime_id,
                 request.variant_id,
@@ -2521,7 +2521,7 @@ def _safe_provider_error(value: object) -> dict[str, str | int] | None:
     if not isinstance(value, Mapping) or value.get("source") != "native-acp":
         return None
     result: dict[str, str | int] = {"source": "native-acp"}
-    limits = {"rpc_code": 128, "provider_code": 128, "detail": 2048}
+    limits = {"rpc_code": 128, "provider_code": 128}
     for key, limit in limits.items():
         scalar = _safe_public_scalar(value.get(key), limit)
         if scalar is not None:
@@ -2612,6 +2612,18 @@ def _context_observation(context: ResolvedContext) -> dict[str, Any]:
             "reasoning_source",
             "reasoning_binding",
             "reasoning_provider_reported",
+            "mode",
+            "pair_key",
+            "workspace_root_identity",
+            "project_instructions",
+            "project_instruction_count",
+            "project_trusted",
+            "project_root",
+            "git_attestation",
+            "discovered_extensions",
+            "model_route_isolation",
+            "required_agent_type",
+            "agent_type_evidence_source",
         )
         if key in context.attestation
     }
