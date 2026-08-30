@@ -241,6 +241,14 @@ def _adapter(
     )
 
 
+async def _resolve_unreleased_writer_context(
+    adapter: GrokBuildAdapter,
+    request: AdapterContextRequest,
+) -> object:
+    assert "workspace_write" in request.permissions
+    return await adapter._resolve_context_unreleased(request)
+
+
 def test_binding_uses_dynamic_canonical_identity_and_content_sha_not_mtime(
     tmp_path: Path,
 ) -> None:
@@ -518,7 +526,7 @@ def test_manifest_is_exact_and_contains_no_model_ids(tmp_path: Path) -> None:
         "supported_platforms": ["win32"],
         "supported_transports": ["native-acp"],
         "capabilities": ["interrupt", "session", "workspace"],
-        "semantic_permissions": ["repo_read", "workspace_write"],
+        "semantic_permissions": ["repo_read"],
         "reasoning_schema": {
             "type": "object",
             "additionalProperties": False,
@@ -536,6 +544,60 @@ def test_manifest_is_exact_and_contains_no_model_ids(tmp_path: Path) -> None:
         "max_write_roots_per_session": 32,
         "write_root_mode": "path-prefix",
     }
+
+
+def test_workspace_write_context_is_unreleased_before_native_discovery(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    binding = _binding(tmp_path)
+    calls = {"catalog": 0, "inspect": 0, "process": 0}
+
+    def catalog_reader(_binding: GrokBinding) -> tuple[dict[str, str], ...]:
+        calls["catalog"] += 1
+        return ()
+
+    def inspect_reader(
+        _binding: GrokBinding,
+        _workspace: Path,
+    ) -> GrokInspectObservation:
+        calls["inspect"] += 1
+        return _inspect(binding, workspace)
+
+    def process_factory(*_args: object, **_kwargs: object) -> object:
+        calls["process"] += 1
+        raise AssertionError("ACP process must not be constructed")
+
+    adapter = GrokBuildAdapter(
+        binding_locator=lambda: binding,
+        catalog_reader=catalog_reader,
+        inspect_reader=inspect_reader,
+        acp_process_factory=process_factory,  # type: ignore[arg-type]
+        platform="win32",
+        environment={
+            "APPDATA": str(tmp_path / "roaming"),
+            "LOCALAPPDATA": str(tmp_path / "local"),
+            "USERPROFILE": str(tmp_path / "user"),
+        },
+        data_root=tmp_path / "local" / "SubagentMCP",
+    )
+    adapter._last_binding = binding
+
+    with pytest.raises(ServiceError) as rejected:
+        asyncio.run(
+            adapter.resolve_context(
+                _request(
+                    workspace,
+                    permissions=("repo_read", "workspace_write"),
+                    write_set=(".",),
+                )
+            )
+        )
+
+    assert rejected.value.code == "CAPABILITY_MISSING"
+    assert "workspace_write" in str(rejected.value)
+    assert calls == {"catalog": 0, "inspect": 0, "process": 0}
 
 
 def test_binding_probe_classifies_platform_missing_incompatible_and_unknown_quota(
@@ -917,6 +979,7 @@ def test_context_is_exact_hash_bound_and_builds_exact_argv_and_safe_env(
     assert first.attestation["acp_terminal_transport"] is True
     assert first.attestation["terminal_authorized"] is False
     assert "terminal" in first.capability_gaps
+    assert "workspace_write" in first.capability_gaps
     assert "resume_after_restart" in first.capability_gaps
     assert "windows_os_sandbox" in first.capability_gaps
 
@@ -1763,7 +1826,8 @@ def test_json_roundtripped_context_retains_git_instructions_root_and_write_roots
     )
     assert asyncio.run(adapter.probe()).state == "needs_canary"
     context = asyncio.run(
-        adapter.resolve_context(
+        _resolve_unreleased_writer_context(
+            adapter,
             _request(
                 workspace,
                 permissions=("repo_read", "workspace_write"),
@@ -3813,7 +3877,8 @@ def test_context_writer_attests_canonical_write_set_for_service_contract(
     asyncio.run(adapter.probe())
 
     context = asyncio.run(
-        adapter.resolve_context(
+        _resolve_unreleased_writer_context(
+            adapter,
             _request(
                 workspace,
                 permissions=("repo_read", "workspace_write"),
@@ -4115,7 +4180,8 @@ def test_context_accepts_exact_file_roots_and_thirty_two_path_prefixes(
     roots = ("README.md", *(f"lane-{index}" for index in range(31)))
 
     context = asyncio.run(
-        adapter.resolve_context(
+        _resolve_unreleased_writer_context(
+            adapter,
             _request(
                 workspace,
                 permissions=("repo_read", "workspace_write"),
@@ -4148,7 +4214,8 @@ def test_context_accepts_exact_file_roots_and_thirty_two_path_prefixes(
     assert context.attestation["mode"] == "writer"
     with pytest.raises(ServiceError) as too_many:
         asyncio.run(
-            adapter.resolve_context(
+            _resolve_unreleased_writer_context(
+                adapter,
                 _request(
                     workspace,
                     permissions=("repo_read", "workspace_write"),
@@ -4332,7 +4399,8 @@ def test_context_handshake_accepts_only_bounded_writer_route(tmp_path: Path) -> 
     adapter = _adapter(tmp_path, binding)
     asyncio.run(adapter.probe())
     context = asyncio.run(
-        adapter.resolve_context(
+        _resolve_unreleased_writer_context(
+            adapter,
             _request(
                 workspace,
                 permissions=("repo_read", "workspace_write"),
@@ -6753,6 +6821,7 @@ def _lifecycle_adapter(
     session_model_state_mutation: str | None = None,
     model_agent_type: object = "grok-build",
     session_agent_type: object | None = None,
+    unreleased_writer_service: bool = False,
 ) -> tuple[GrokBuildAdapter, Path, list[AcpStdioProcess]]:
     workspace = tmp_path / "workspace"
     workspace.mkdir(exist_ok=True)
@@ -6948,6 +7017,12 @@ def _lifecycle_adapter(
         handshake_timeout_seconds=0.5,
         cancel_timeout_seconds=cancel_timeout,
     )
+    if unreleased_writer_service:
+        adapter._manifest = replace(
+            adapter.manifest,
+            semantic_permissions=frozenset({"repo_read", "workspace_write"}),
+        )
+        adapter.resolve_context = adapter._resolve_context_unreleased  # type: ignore[method-assign]
     return adapter, trace_path, children
 
 
@@ -6968,7 +7043,11 @@ def _lifecycle_context(
         if writer
         else _request(workspace)
     )
-    return asyncio.run(adapter.resolve_context(request))
+    return asyncio.run(
+        _resolve_unreleased_writer_context(adapter, request)
+        if writer
+        else adapter.resolve_context(request)
+    )
 
 
 def _lifecycle_spawn_request(context: object) -> AdapterSpawnRequest:
@@ -8608,7 +8687,8 @@ def test_lifecycle_send_rejects_full_resumed_authority_before_guard_or_prompt(
         (workspace / "docs").mkdir()
         assert asyncio.run(adapter.probe()).state == "needs_canary"
         context = asyncio.run(
-            adapter.resolve_context(
+            _resolve_unreleased_writer_context(
+                adapter,
                 _request(
                     workspace,
                     permissions=("repo_read", "workspace_write"),
@@ -9766,6 +9846,75 @@ def test_runtime_canary_cleanup_failure_overrides_a_valid_handshake(
     assert len(children) == 1 and children[0].closed is True
 
 
+def test_service_rejects_unreleased_grok_writer_before_acp_process(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "project"
+    workspace.mkdir()
+    adapter, trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        _binding(tmp_path),
+    )
+    paths = resolve_paths(
+        {"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt"
+    )
+    ConfigStore(paths).save(
+        {
+            "schema_version": 1,
+            "revision": 0,
+            "runtimes": {
+                "grok-build": {
+                    "enabled": True,
+                    "delegation_priority": 100,
+                    "selection_mode": "fixed",
+                    "fallback": False,
+                    "variants": [
+                        {
+                            "id": "default",
+                            "model": "grok-4",
+                            "reasoning": {"effort": "xhigh"},
+                        }
+                    ],
+                }
+            },
+        },
+        expected_revision=0,
+    )
+    service = SubagentMcpService(
+        config=ConfigStore(paths),
+        store=StateStore.open(paths),
+        registry=AdapterRegistry(builtin_factories=(lambda: adapter,)),
+    )
+    spawn = SpawnRequest(
+        request_id="grok-writer-unreleased",
+        runtime_id="grok-build",
+        variant_id="default",
+        task=TaskPacket(
+            "Bounded write",
+            "Write only the declared file.",
+            ("Return a verdict.",),
+            "sub-agent",
+        ),
+        cwd=str(workspace),
+        mode="implement",
+        transport="native-acp",
+        permissions=("repo_read", "workspace_write"),
+        write_set=("allowed.txt",),
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(ServiceError) as rejected:
+            await service.agent_spawn(spawn)
+        assert rejected.value.code == "CAPABILITY_MISSING"
+        assert str(rejected.value) == (
+            "adapter lacks semantic permissions: workspace_write"
+        )
+
+    asyncio.run(scenario())
+    assert children == []
+    assert not trace_path.exists()
+
+
 def test_service_canary_unblocks_grok_spawn_without_a_canary_prompt(
     tmp_path: Path,
 ) -> None:
@@ -9887,6 +10036,7 @@ def test_service_keeps_writer_lease_until_admitted_reverse_write_settles(
             if race_boundary == "dispatch-before-admission"
             else None
         ),
+        unreleased_writer_service=True,
     )
     paths = resolve_paths(
         {"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt"
@@ -10056,7 +10206,11 @@ def test_service_followup_binds_complete_persisted_grok_authority(
     for root in write_set:
         (workspace / root).mkdir()
     binding = _binding(tmp_path)
-    adapter, trace_path, children = _lifecycle_adapter(tmp_path, binding)
+    adapter, trace_path, children = _lifecycle_adapter(
+        tmp_path,
+        binding,
+        unreleased_writer_service=writer,
+    )
     paths = resolve_paths(
         {"SUBAGENT_MCP_HOME": str(tmp_path / "home")}, os_name="nt"
     )

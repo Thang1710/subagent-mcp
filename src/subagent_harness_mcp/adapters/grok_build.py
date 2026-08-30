@@ -220,6 +220,7 @@ _CHILD_ENV_NAMES = frozenset(
     }
 )
 _CAPABILITY_GAPS = (
+    "workspace_write",
     "terminal",
     "run_tests",
     "git_read",
@@ -1390,7 +1391,7 @@ class GrokBuildAdapter:
             supported_platforms=("win32",),
             supported_transports=(TRANSPORT,),
             capabilities=frozenset({"session", "interrupt", "workspace"}),
-            semantic_permissions=frozenset({"repo_read", "workspace_write"}),
+            semantic_permissions=frozenset({"repo_read"}),
             reasoning_schema={
                 "type": "object",
                 "additionalProperties": False,
@@ -1869,6 +1870,24 @@ class GrokBuildAdapter:
         self._catalog_authoritative = False
 
     async def resolve_context(self, request: AdapterContextRequest) -> ResolvedContext:
+        if request.runtime_id != RUNTIME_ID or request.transport != TRANSPORT:
+            raise _capability_error("Grok Build native ACP context is required")
+        if request.context_policy_id != "declared-native":
+            raise _capability_error(
+                "Grok Build implements only context_policy_id='declared-native'"
+            )
+        unsupported = set(request.permissions) - self._manifest.semantic_permissions
+        if unsupported:
+            raise _capability_error(
+                "Grok Build semantic permission is not released: "
+                + ", ".join(sorted(unsupported))
+            )
+        return await self._resolve_context_unreleased(request)
+
+    async def _resolve_context_unreleased(
+        self,
+        request: AdapterContextRequest,
+    ) -> ResolvedContext:
         if request.runtime_id != RUNTIME_ID or request.transport != TRANSPORT:
             raise _capability_error("Grok Build native ACP context is required")
         if request.context_policy_id != "declared-native":
