@@ -22,6 +22,7 @@ import subagent_harness_mcp.adapters.grok_build as grok_module
 
 from subagent_harness_mcp.adapters.acp_stdio import (
     AcpFatalCallbackError,
+    AcpMethodNotFoundError,
     AcpProcessError,
     AcpStdioProcess,
 )
@@ -4478,14 +4479,14 @@ def test_plan_exit_approves_exact_active_writer_once_and_resets_for_followup(
         await bridge.activate_turn("execution-1")
         request = _plan_exit_request(plan_content=None)
         assert await bridge.handle_reverse_request(
-            "_x.ai/exit_plan_mode", request, "execution-1"
+            "x.ai/exit_plan_mode", request, "execution-1"
         ) == {"outcome": "approved"}
         assert await bridge.handle_reverse_request(
-            "_x.ai/exit_plan_mode", request, "execution-1"
+            "x.ai/exit_plan_mode", request, "execution-1"
         ) == {"outcome": "approved"}
         with pytest.raises(GrokPermissionError):
             await bridge.handle_reverse_request(
-                "_x.ai/exit_plan_mode",
+                "x.ai/exit_plan_mode",
                 _plan_exit_request(tool_call_id="plan-tool-2"),
                 "execution-1",
             )
@@ -4493,7 +4494,7 @@ def test_plan_exit_approves_exact_active_writer_once_and_resets_for_followup(
 
         await bridge.activate_turn("execution-2")
         assert await bridge.handle_reverse_request(
-            "_x.ai/exit_plan_mode",
+            "x.ai/exit_plan_mode",
             _plan_exit_request(tool_call_id="plan-tool-2"),
             "execution-2",
         ) == {"outcome": "approved"}
@@ -4536,7 +4537,7 @@ def test_plan_exit_concurrent_distinct_ids_approve_exactly_one_and_replay_is_ide
         async def invoke(payload: dict[str, object]) -> Mapping[str, object]:
             await gate.wait()
             return await bridge.handle_reverse_request(
-                "_x.ai/exit_plan_mode", payload, execution_id
+                "x.ai/exit_plan_mode", payload, execution_id
             )
 
         calls = [asyncio.create_task(invoke(payload)) for payload in requests]
@@ -4588,7 +4589,7 @@ def test_plan_exit_denies_review_idle_and_foreign_session(tmp_path: Path) -> Non
         await reviewer.activate_turn("review-execution")
         with pytest.raises(GrokPermissionError):
             await reviewer.handle_reverse_request(
-                "_x.ai/exit_plan_mode",
+                "x.ai/exit_plan_mode",
                 _plan_exit_request(),
                 "review-execution",
             )
@@ -4596,13 +4597,13 @@ def test_plan_exit_denies_review_idle_and_foreign_session(tmp_path: Path) -> Non
 
         with pytest.raises(GrokPermissionError):
             await writer.handle_reverse_request(
-                "_x.ai/exit_plan_mode", _plan_exit_request(), None
+                "x.ai/exit_plan_mode", _plan_exit_request(), None
             )
 
         await writer.activate_turn("writer-execution")
         with pytest.raises(GrokPermissionError):
             await writer.handle_reverse_request(
-                "_x.ai/exit_plan_mode",
+                "x.ai/exit_plan_mode",
                 _plan_exit_request(session_id="foreign-session"),
                 "writer-execution",
             )
@@ -4638,7 +4639,7 @@ def test_plan_exit_rejects_malformed_wire(
         async with _active_filesystem_turn(bridge):
             with pytest.raises(GrokPermissionError):
                 await bridge.handle_reverse_request(
-                    "_x.ai/exit_plan_mode", payload, "test-execution"
+                    "x.ai/exit_plan_mode", payload, "test-execution"
                 )
 
     asyncio.run(scenario())
@@ -4665,7 +4666,7 @@ def test_plan_exit_ignores_unknown_fields_without_retaining_them(
     async def scenario() -> None:
         async with _active_filesystem_turn(bridge):
             assert await bridge.handle_reverse_request(
-                "_x.ai/exit_plan_mode", request, "test-execution"
+                "x.ai/exit_plan_mode", request, "test-execution"
             ) == {"outcome": "approved"}
 
     asyncio.run(scenario())
@@ -4675,6 +4676,41 @@ def test_plan_exit_ignores_unknown_fields_without_retaining_them(
         assert marker not in retained
         assert marker not in caplog.text
         assert marker not in attested
+
+
+@pytest.mark.parametrize(
+    "method",
+    (
+        "_x.ai/exit_plan_mode",
+        "x.ai/exit_plan_mode/future",
+        "x.ai/request_approval",
+    ),
+)
+def test_plan_exit_only_recognizes_exact_official_method(
+    tmp_path: Path,
+    method: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    exact = workspace / "exact.py"
+    exact.write_bytes(b"before\n")
+    bridge = _bound_filesystem_bridge(
+        workspace=workspace,
+        permission_mode="workspace-write",
+        write_roots=("exact.py",),
+    )
+
+    async def scenario() -> None:
+        async with _active_filesystem_turn(bridge):
+            with pytest.raises(AcpMethodNotFoundError):
+                await bridge.handle_reverse_request(
+                    method, _plan_exit_request(), "test-execution"
+                )
+
+    asyncio.run(scenario())
+    evidence = bridge._reverse_io_attestation()
+    assert evidence["plan_exit_attempts"] == 0
+    assert evidence["plan_exit_approvals"] == 0
 
 
 def test_plan_exit_rejects_oversized_content_without_retaining_it(
@@ -4696,7 +4732,7 @@ def test_plan_exit_rejects_oversized_content_without_retaining_it(
         async with _active_filesystem_turn(bridge):
             with pytest.raises(GrokPermissionError):
                 await bridge.handle_reverse_request(
-                    "_x.ai/exit_plan_mode",
+                    "x.ai/exit_plan_mode",
                     _plan_exit_request(plan_content="PRIVATE_PLAN"),
                     "test-execution",
                 )

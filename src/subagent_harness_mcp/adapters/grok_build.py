@@ -433,7 +433,7 @@ class GrokFilesystemBridge:
         params: Mapping[str, object],
         reverse_scope: str | None,
     ) -> Mapping[str, object]:
-        if method == "_x.ai/exit_plan_mode":
+        if method == "x.ai/exit_plan_mode":
             self._record_reverse_io("plan_exit_attempts")
             execution_id = await self._admit_reverse_callback(reverse_scope)
             try:

@@ -644,7 +644,7 @@ def _serve_grok_lifecycle(config: dict[str, Any], trace_path: Path) -> int:
                     {
                         "jsonrpc": "2.0",
                         "id": "plan-exit",
-                        "method": "_x.ai/exit_plan_mode",
+                        "method": "x.ai/exit_plan_mode",
                         "params": {
                             "sessionId": session_id,
                             "toolCallId": "plan-tool-1",
